@@ -20,8 +20,6 @@ class UAVDynamics:
         self.min_accelerate = config['clip_accelerate'][0]
         self.max_accelerate = config['clip_accelerate'][1]
 
-        se
-
         self.g_vec = np.array([0.0, 0.0, -9.8], dtype=float)
         self.p = np.zeros(3, dtype=float)
         self.v = np.zeros(3, dtype=float)
