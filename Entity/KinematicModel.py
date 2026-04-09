@@ -2,6 +2,10 @@
 
 import numpy as np
 
+'''
+先用质点模型跑通实验，再看是不是可以往
+'''
+
 
 class UAVDynamics:
     '''
@@ -15,16 +19,26 @@ class UAVDynamics:
     action: [a_x, a_y, a_z]
     '''
 
-    def __init__(self, config): #初始化
-        self.dt = config['timestep']
-        self.min_accelerate = config['clip_accelerate'][0]
-        self.max_accelerate = config['clip_accelerate'][1]
+    def __init__(self, init_config):     # 初始化无人机类
 
-        self.g_vec = np.array([0.0, 0.0, -9.8], dtype=float)
-        self.p = np.zeros(3, dtype=float)
+        """
+        初始化无人机类的构造函数
+        参数:
+            init_config: 包含初始化配置的字典，包括时间步长、加速度限制等
+        """
+        self.dt = init_config['timestep']    # 设置时间步长
+        self.min_accelerate = init_config['clip_accelerate'][0]
+        self.max_accelerate = init_config['clip_accelerate'][1]
+
+        self.g_vec = np.array([0.0, 0.0, -9.8], dtype=float)    # 重力矩阵
+        
+        # 初始化状态量
+        self.p = np.zeros(3, dtype=float)   
         self.v = np.zeros(3, dtype=float)
         self.atti = np.zeros(3, dtype=float)
         self.omega = np.zeros(3, dtype=float)
+
+        # 构建状态矩阵
         self.state = np.concatenate([self.p, self.v, self.atti, self.omega])
 
     def reset(self, init_state=None):
@@ -64,7 +78,7 @@ class UAVDynamics:
         self.state = next_state
         return self.state.copy()
 
-    def integrate(self, action):
+    def integrate(self, action):    # 状态积分
         ax_cmd, ay_cmd, az_cmd = action
         gravity = abs(self.g_vec[2])
         phi, theta, psi = self.atti
@@ -98,3 +112,83 @@ class UAVDynamics:
         p_next = self.p + self.v * self.dt + 0.5 * a_real * (self.dt ** 2)
 
         return np.concatenate([p_next, v_next, atti_next, omega_next])
+
+
+
+class PartialDynamic:
+
+    '''
+    质点模型
+
+    state: [px, py, pz, vx, vy, vz]
+    action: [ax, ay, az]
+
+    说明:
+    1. 该类只负责基础平动动力学
+    2. action 被视为净线加速度
+    3. 传感器、避障和碰撞判定由其他模块负责
+    '''
+
+    def __init__(self, init_config):
+        self.p = np.zeros(3, dtype=float)
+        self.v = np.zeros(3, dtype=float)
+
+        self.velocity_min = init_config['velocity_clip'][0]
+        self.velocity_max = init_config['velocity_clip'][1]
+        self.accelerate_min = init_config['accelerate_clip'][0]
+        self.accelerate_max = init_config['accelerate_clip'][1]
+        self.dt = init_config.get('time_step', init_config.get('timestep'))
+
+        if self.dt is None:
+            raise ValueError("init_config must contain 'time_step' or 'timestep'")
+
+        self.state = self._compose_state()
+
+    def _compose_state(self):
+        return np.concatenate([self.p, self.v])
+
+    @staticmethod
+    def clip(value, floor, ceiling):    # 限制函数
+        return np.clip(value, floor, ceiling)
+
+    def step(self, action): # 步进
+        action = np.asarray(action, dtype=float)
+        if action.shape != (3,):
+            raise ValueError('action must have shape (3,)')
+
+        action = self.clip(action, self.accelerate_min, self.accelerate_max)
+
+        v_t = self.v.copy()
+        p_t = self.p.copy()
+
+        v_t_next = self.clip(v_t + action * self.dt, self.velocity_min, self.velocity_max)
+        p_t_next = p_t + v_t * self.dt + 0.5 * action * (self.dt ** 2)
+
+        self.v = v_t_next
+        self.p = p_t_next
+        self.state = self._compose_state()
+        return self.state.copy()
+    
+    def reset(self, init_state=None):   # 重置
+        if init_state is None:
+            self.p = np.zeros(3, dtype=float)
+            self.v = np.zeros(3, dtype=float)
+        elif isinstance(init_state, dict):
+            self.p = np.asarray(init_state['position'], dtype=float)
+            self.v = np.asarray(init_state['velocity'], dtype=float)
+        else:
+            init_state = np.asarray(init_state, dtype=float)
+            if init_state.shape != (6,):
+                raise ValueError('init_state must have shape (6,)')
+            self.p = init_state[0:3].copy()
+            self.v = init_state[3:6].copy()
+
+        if self.p.shape != (3,) or self.v.shape != (3,):
+            raise ValueError('position and velocity must have shape (3,)')
+
+        self.state = self._compose_state()
+        return self.state.copy()
+
+        
+
+
