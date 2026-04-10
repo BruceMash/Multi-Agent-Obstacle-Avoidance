@@ -68,7 +68,7 @@ class MovingSphereObstacle:
 
         return self.center.copy()
 
-    def to_feature(self, point):
+    def to_feature(self, point):    # 转化为特征字典
         closest = self.closest_point(point)
         return {
             "closest_point": closest,

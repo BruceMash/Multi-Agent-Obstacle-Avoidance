@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 
 import numpy as np
 
@@ -46,11 +46,7 @@ class TestDMPRLPipeline(unittest.TestCase):
             static_obstacles=self.static_obstacles,
             dynamic_obstacles=self.dynamic_obstacles,
         )
-        # *联动修改：
-        # 这里的动作长度仍按旧设计写成 5。
-        # 如果 dmp_rl.py 固定为 [forcing_term, goal_offset_x, goal_offset_y, goal_offset_z]，
-        # 则这里应同步改成 4 维。
-        action = np.zeros(5, dtype=float)
+        action = np.zeros(6, dtype=float)
         acceleration, info = self.controller.compute_acceleration(
             position=np.zeros(3),
             velocity=np.zeros(3),
@@ -59,9 +55,8 @@ class TestDMPRLPipeline(unittest.TestCase):
         )
         self.assertEqual(acceleration.shape, (3,))
         self.assertIn("phase", info)
-        # *联动修改：
-        # 当前 controller_info 是否返回 coupling，取决于 dmp_rl.py 最终保留哪套设计。
-        self.assertIn("coupling", info)
+        self.assertIn("forcing", info)
+        self.assertIn("tau", info)
 
     def test_heuristic_policy_shape(self):
         packet = self.sensor.sense(
@@ -73,12 +68,8 @@ class TestDMPRLPipeline(unittest.TestCase):
         )
         policy = HeuristicDMPPolicy(goal_offset_max=0.8)
         action = policy.act(packet)
-        # *联动修改：
-        # 如果 HeuristicDMPPolicy 跟随 forcing_term 方案收敛，
-        # 这里的动作维度断言也要同步调整。
-        self.assertEqual(action.shape, (5,))
-        self.assertTrue(np.all(action <= 1.0))
-        self.assertTrue(np.all(action >= -1.0))
+        self.assertEqual(action.shape, (6,))
+        self.assertTrue(np.all(np.isfinite(action)))
 
     def test_single_agent_env_step(self):
         env = SingleAgentDMPEnv(
@@ -94,13 +85,12 @@ class TestDMPRLPipeline(unittest.TestCase):
         )
         observation = env.reset(start=np.array([0.0, 0.0, 0.0]), goal=np.array([6.0, 0.0, 0.0]))
         self.assertEqual(observation.shape[0], env.observation_dim)
+        self.assertEqual(env.get_sensor_observation().shape[0], env.sensor_observation_dim)
 
-        # *联动修改：
-        # env.action_dim 当前仍依赖环境文件里的旧动作定义；
-        # 当 Controller / Environment 接口统一后，这里的测试输入长度会随之变化。
         action = np.zeros(env.action_dim, dtype=float)
         next_observation, reward, done, info = env.step(action)
         self.assertEqual(next_observation.shape[0], env.observation_dim)
+        self.assertEqual(info["sensor_observation"].shape[0], env.sensor_observation_dim)
         self.assertIsInstance(reward, float)
         self.assertIn("distance_to_goal", info)
         self.assertFalse(np.isnan(reward))

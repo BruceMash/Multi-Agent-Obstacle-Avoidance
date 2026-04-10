@@ -21,10 +21,15 @@ class LocalObstacleSensor:
 
     每个障碍物编码为:
     [rel_x, rel_y, rel_z, rel_vx, rel_vy, rel_vz, clearance, size, valid]
+        rel_x, rel_y, rel_z: 障碍物最近点相较于自身位置的偏移量
+        rel_vx, rel_vy, rel_vz: 障碍物最近点相较于自身位置的偏移量
+        clearance: 障碍物最近点到自身距离
+        size: 障碍物尺寸
+        valid: 是否有效
     """
 
     def __init__(self, sensing_radius=6.0, max_obstacles=4):
-        self.sensing_radius = float(sensing_radius)
+        self.sensing_radius = float(sensing_radius) #
         self.max_obstacles = int(max_obstacles)
         if self.max_obstacles <= 0:
             raise ValueError("max_obstacles must be positive")
@@ -45,16 +50,18 @@ class LocalObstacleSensor:
         if position.shape != (3,) or velocity.shape != (3,) or goal.shape != (3,):
             raise ValueError("position, velocity and goal must have shape (3,)")
 
+        # 有没有障碍物分开处理
         static_obstacles = static_obstacles or []
         dynamic_obstacles = dynamic_obstacles or []
         raw_features = []
 
-        for obstacle in list(static_obstacles) + list(dynamic_obstacles):
+        for obstacle in list(static_obstacles) + list(dynamic_obstacles):   # 获取障碍物观测
             feature = obstacle.to_feature(position)
-            relative_position = feature["closest_point"] - position
-            relative_velocity = feature["velocity"] - velocity
-            clearance = float(feature["clearance"])
-            if clearance <= self.sensing_radius:
+            relative_position = feature["closest_point"] - position     # 最近的位置 - 当前的位置 = 相对位置
+            relative_velocity = feature["velocity"] - velocity          # 相对速度
+            clearance = float(feature["clearance"])     # 
+            
+            if clearance <= self.sensing_radius:    # 最近距离小于传感器的探测半径
                 raw_features.append(
                     np.concatenate(
                         [
