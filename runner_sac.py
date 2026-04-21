@@ -4,6 +4,8 @@ SAC 训练入口
 
 from pathlib import Path
 
+import torch
+
 from Controller.dmp_rl import DMPConfig
 from Environment.single_agent_dmp_env import EnvConfig, SingleAgentDMPEnv
 from baseline.sac import SAC
@@ -32,7 +34,46 @@ def build_env() -> SingleAgentDMPEnv:
     )
 
 
-def train(total_timesteps: int = 2000, model_path: str = "artifacts/sac_model.zip") -> str:
+def save_checkpoint(model: SAC, model_path: str) -> str:
+    save_path = Path(model_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    checkpoint = {
+        "actor": model.actor.state_dict(),
+        "critic": model.critic.state_dict(),
+        "critic_target": model.critic_target.state_dict(),
+        "actor_optimizer": model.actor.optimizer.state_dict(),
+        "critic_optimizer": model.critic.optimizer.state_dict(),
+    }
+    if model.ent_coef_optimizer is not None and model.log_ent_coef is not None:
+        checkpoint["log_ent_coef"] = model.log_ent_coef.detach().cpu()
+        checkpoint["ent_coef_optimizer"] = model.ent_coef_optimizer.state_dict()
+    elif hasattr(model, "ent_coef_tensor"):
+        checkpoint["ent_coef_tensor"] = model.ent_coef_tensor.detach().cpu()
+
+    torch.save(checkpoint, str(save_path))
+    return str(save_path)
+
+
+def load_checkpoint(model: SAC, model_path: str) -> SAC:
+    checkpoint = torch.load(model_path, map_location=model.device)
+    model.actor.load_state_dict(checkpoint["actor"])
+    model.critic.load_state_dict(checkpoint["critic"])
+    model.critic_target.load_state_dict(checkpoint["critic_target"])
+    model.actor.optimizer.load_state_dict(checkpoint["actor_optimizer"])
+    model.critic.optimizer.load_state_dict(checkpoint["critic_optimizer"])
+
+    if model.ent_coef_optimizer is not None and "ent_coef_optimizer" in checkpoint and "log_ent_coef" in checkpoint:
+        model.log_ent_coef = checkpoint["log_ent_coef"].to(model.device).requires_grad_(True)
+        model.ent_coef_optimizer = torch.optim.Adam([model.log_ent_coef], lr=model.lr_schedule(1))
+        model.ent_coef_optimizer.load_state_dict(checkpoint["ent_coef_optimizer"])
+    elif "ent_coef_tensor" in checkpoint:
+        model.ent_coef_tensor = checkpoint["ent_coef_tensor"].to(model.device)
+
+    return model
+
+
+def train(total_timesteps: int = 2000, model_path: str = "artifacts/sac_model.pt") -> str:
     env = build_env()
     model = SAC(
         policy="MlpPolicy",
@@ -54,11 +95,9 @@ def train(total_timesteps: int = 2000, model_path: str = "artifacts/sac_model.zi
         model.policy = _PolicyModeShim()
 
     model.learn(total_timesteps=total_timesteps)
-    save_path = Path(model_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    model.save(str(save_path))
+    saved_path = save_checkpoint(model, model_path)
     env.close()
-    return str(save_path)
+    return saved_path
 
 
 if __name__ == "__main__":
