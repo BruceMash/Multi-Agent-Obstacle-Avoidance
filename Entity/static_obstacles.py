@@ -51,6 +51,41 @@ class StaticSphereObstacle:
             distance = 1.0
         return self.center + direction / distance * self.effective_radius
 
+    def ray_intersection(self, origin, direction, max_distance):
+        """
+        计算射线与球形障碍物的最近正向交点距离。
+        若无交点则返回 None。
+        """
+        origin = _to_vector3(origin)
+        direction = _to_vector3(direction)
+        max_distance = float(max_distance)
+
+        direction_norm = np.linalg.norm(direction)
+        if direction_norm < 1e-8:
+            raise ValueError("direction must be non-zero")
+        direction = direction / direction_norm
+
+        if self.contains(origin):
+            return 0.0
+
+        offset = origin - self.center
+        b = float(np.dot(direction, offset))
+        c = float(np.dot(offset, offset) - self.effective_radius ** 2)
+        discriminant = b * b - c
+        if discriminant < 0.0:
+            return None
+
+        sqrt_discriminant = np.sqrt(discriminant)
+        candidates = [-b - sqrt_discriminant, -b + sqrt_discriminant]
+        positive_candidates = [distance for distance in candidates if distance >= 0.0]
+        if not positive_candidates:
+            return None
+
+        hit_distance = min(positive_candidates)
+        if hit_distance > max_distance:
+            return None
+        return float(hit_distance)
+
     def to_feature(self, point):    # 转化为特征
         closest = self.closest_point(point)
         return {
@@ -106,6 +141,52 @@ class AxisAlignedBoxObstacle:
         lower = self.center - self.expanded_half_extents
         upper = self.center + self.expanded_half_extents
         return np.clip(point, lower, upper)
+
+    def ray_intersection(self, origin, direction, max_distance):
+        """
+        计算射线与轴对齐长方体的最近正向交点距离。
+        使用 slab 法求交。
+        """
+        origin = _to_vector3(origin)
+        direction = _to_vector3(direction)
+        max_distance = float(max_distance)
+
+        direction_norm = np.linalg.norm(direction)
+        if direction_norm < 1e-8:
+            raise ValueError("direction must be non-zero")
+        direction = direction / direction_norm
+
+        if self.contains(origin):
+            return 0.0
+
+        lower = self.center - self.expanded_half_extents
+        upper = self.center + self.expanded_half_extents
+        t_min = -np.inf
+        t_max = np.inf
+
+        for dim in range(3):
+            if abs(direction[dim]) < 1e-8:
+                if origin[dim] < lower[dim] or origin[dim] > upper[dim]:
+                    return None
+                continue
+
+            t1 = (lower[dim] - origin[dim]) / direction[dim]
+            t2 = (upper[dim] - origin[dim]) / direction[dim]
+            near = min(t1, t2)
+            far = max(t1, t2)
+            t_min = max(t_min, near)
+            t_max = min(t_max, far)
+
+            if t_min > t_max:
+                return None
+
+        if t_max < 0.0:
+            return None
+
+        hit_distance = max(t_min, 0.0)
+        if hit_distance > max_distance:
+            return None
+        return float(hit_distance)
 
     def to_feature(self, point):
         closest = self.closest_point(point)

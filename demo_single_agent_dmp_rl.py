@@ -1,4 +1,4 @@
-import numpy as np
+﻿import numpy as np
 
 from Controller.dmp_rl import DMPConfig, HeuristicDMPPolicy
 from Entity.dynamic_obstacles import MovingSphereObstacle
@@ -11,8 +11,8 @@ def build_demo_env():
         "accelerate_clip": (-4.0, 4.0),
         "time_step": 0.1,
     }
-    sensor_config = {"sensing_radius": 4.5, "max_obstacles": 4}
-    dmp_config = DMPConfig(dt=dynamics_config["time_step"], goal_offset_max=0.8)
+    sensor_config = {"sensing_radius": 4.5}
+    dmp_config = DMPConfig(dt=dynamics_config["time_step"], goal_offset_max=1.0)
     env_config = EnvConfig(max_steps=220, goal_tolerance=0.3)
 
     dynamic_obstacles = [
@@ -35,29 +35,33 @@ def build_demo_env():
 
 def run_demo():
     env = build_demo_env()
-    # *联动修改：
-    # 这里依赖 HeuristicDMPPolicy 的动作维度定义。
-    # 如果 Controller/dmp_rl.py 固定成 forcing_term + goal_offset，
-    # policy.act() 的输出形状也必须同步调整。
-    policy = HeuristicDMPPolicy(goal_offset_max=0.8)
-    observation = env.reset(start=np.array([0.0, 0.0, 0.0]), goal=np.array([8.0, 0.0, 0.0]))
+    policy = HeuristicDMPPolicy(goal_offset_max=1.0, dims=env.dmp.config.dims)
+    observation, _ = env.reset(
+        options={
+            "start": np.array([0.0, 0.0, 0.0]),
+            "goal": np.array([8.0, 0.0, 0.0]),
+        }
+    )
 
     trajectory = [env.dynamics.p.copy()]
     total_reward = 0.0
-    done = False
+    terminated = False
+    truncated = False
     info = {}
 
-    while not done:
+    while not (terminated or truncated):
         action = policy.act(env.latest_sensor_packet)
-        observation, reward, done, info = env.step(action)
+        observation, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
         trajectory.append(env.dynamics.p.copy())
 
     print("demo finished")
+    print(f"observation_dim: {observation.shape[0]}")
     print(f"steps: {env.steps}")
     print(f"total_reward: {total_reward:.3f}")
     print(f"success: {info['success']}")
     print(f"collision: {info['collision']}")
+    print(f"truncated: {info['truncated']}")
     print(f"distance_to_goal: {info['distance_to_goal']:.3f}")
     print(f"trajectory_points: {len(trajectory)}")
     return np.asarray(trajectory, dtype=float), info

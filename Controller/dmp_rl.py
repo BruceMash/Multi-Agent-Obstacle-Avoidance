@@ -117,7 +117,7 @@ class SecondOrderDMPController:
         return np.abs(goal - current)
 
 
-class HeuristicDMPPolicy:
+class HeuristicDMPPolicy:       # 这部分仅作测试用
     """
     用于 Demo 的启发式策略。
 
@@ -125,33 +125,58 @@ class HeuristicDMPPolicy:
     后续可以直接替换成神经网络策略。
     """
 
-    def __init__(self, goal_offset_max=1.0, forcing_scale=1.0):
+    def __init__(self, goal_offset_max=1.0, forcing_scale=1.0, elevation_range_deg=(-80.0, 80.0), dims=3):
         self.goal_offset_max = float(goal_offset_max)
         self.forcing_scale = float(forcing_scale)
+        self.elevation_range_deg = tuple(float(value) for value in elevation_range_deg)
+        self.dims = int(dims)
+        if self.dims <= 0:
+            raise ValueError("dims must be positive")
+        if self.dims > 3:
+            raise ValueError("HeuristicDMPPolicy only supports dims <= 3")
+
+    @staticmethod
+    def _beam_direction(azimuth, elevation):
+        cos_elevation = np.cos(elevation)
+        return np.array(
+            [
+                cos_elevation * np.cos(azimuth),
+                cos_elevation * np.sin(azimuth),
+                np.sin(elevation),
+            ],
+            dtype=float,
+        )
 
     def act(self, sensor_packet):
-        obstacle_features = sensor_packet.obstacle_features
-        valid_mask = obstacle_features[:, -1] > 0.0
+        current_scan = np.asarray(sensor_packet.current_scan, dtype=float)
+        previous_scan = np.asarray(sensor_packet.previous_scan, dtype=float)
+        if current_scan.shape != previous_scan.shape:
+            raise ValueError("current_scan and previous_scan must have the same shape")
 
-        if not np.any(valid_mask):
-            return np.zeros(6, dtype=float)
+        danger = np.clip(1.0 - current_scan, 0.0, 1.0)
+        dynamic_change = np.clip(previous_scan - current_scan, 0.0, 1.0)
+        weights = danger ** 2 + 0.5 * dynamic_change
+        if not np.any(weights > 1e-6):
+            return np.zeros(2 * self.dims, dtype=float)
 
-        close_features = obstacle_features[valid_mask]
-        avoid_direction = np.zeros(3, dtype=float)
-        proximity_score = 0.0
+        avoid_direction = np.zeros(self.dims, dtype=float)
+        azimuth_bins, elevation_bins = current_scan.shape
+        azimuth_angles = np.linspace(-np.pi, np.pi, azimuth_bins, endpoint=False, dtype=float)
+        elevation_angles = np.deg2rad(
+            np.linspace(self.elevation_range_deg[0], self.elevation_range_deg[1], elevation_bins, dtype=float)
+        )
 
-        for feature in close_features:
-            relative_position = feature[0:3]
-            clearance = max(feature[6], 1e-3)
-            distance = np.linalg.norm(relative_position)
-            if distance < 1e-8:
-                continue
-            proximity_score += np.exp(-clearance)
-            avoid_direction -= relative_position / distance * np.exp(-clearance)
+        for azimuth_index, azimuth in enumerate(azimuth_angles):
+            for elevation_index, elevation in enumerate(elevation_angles):
+                beam_weight = weights[azimuth_index, elevation_index]
+                if beam_weight <= 1e-6:
+                    continue
+                avoid_direction -= self._beam_direction(azimuth, elevation)[: self.dims] * beam_weight
 
         norm = np.linalg.norm(avoid_direction)
         if norm > 1e-8:
             avoid_direction = avoid_direction / norm
+        proximity_score = float(np.mean(weights[weights > 1e-6]))
 
         forcing_term = np.clip(
             avoid_direction * min(proximity_score, self.forcing_scale),

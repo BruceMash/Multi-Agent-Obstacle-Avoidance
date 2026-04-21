@@ -23,11 +23,12 @@ class TestDMPRLPipeline(unittest.TestCase):
                 safety_margin=0.1,
             )
         ]
-        self.sensor = LocalObstacleSensor(sensing_radius=5.0, max_obstacles=4)
+        self.sensor = LocalObstacleSensor(sensing_radius=5.0)
         self.controller = SecondOrderDMPController(DMPConfig(dt=0.1))
         self.controller.reset(start=[0.0, 0.0, 0.0], goal=[6.0, 0.0, 0.0])
 
     def test_sensor_packet_shape(self):
+        self.sensor.reset()
         packet = self.sensor.sense(
             position=np.array([0.0, 0.0, 0.0]),
             velocity=np.zeros(3),
@@ -35,8 +36,78 @@ class TestDMPRLPipeline(unittest.TestCase):
             static_obstacles=self.static_obstacles,
             dynamic_obstacles=self.dynamic_obstacles,
         )
-        self.assertEqual(packet.obstacle_features.shape, (4, 9))
+        self.assertEqual(packet.current_scan.shape, (24, 9))
+        self.assertEqual(packet.previous_scan.shape, (24, 9))
+        self.assertEqual(packet.observation.shape[0], 439)
         self.assertEqual(packet.observation.shape[0], self.sensor.observation_dim)
+        self.assertTrue(np.all(packet.current_scan >= 0.0))
+        self.assertTrue(np.all(packet.current_scan <= 1.0))
+        self.assertTrue(np.all(packet.previous_scan >= 0.0))
+        self.assertTrue(np.all(packet.previous_scan <= 1.0))
+        self.assertTrue(np.allclose(packet.current_scan, packet.previous_scan))
+
+    def test_sensor_temporal_scan_update(self):
+        moving_obstacle = MovingSphereObstacle(
+            center=[4.0, 0.0, 0.0],
+            radius=0.4,
+            velocity=[-1.0, 0.0, 0.0],
+            safety_margin=0.0,
+        )
+        self.sensor.reset()
+        packet_first = self.sensor.sense(
+            position=np.array([0.0, 0.0, 0.0]),
+            velocity=np.zeros(3),
+            goal=np.array([6.0, 0.0, 0.0]),
+            dynamic_obstacles=[moving_obstacle],
+        )
+        moving_obstacle.step(1.0)
+        packet_second = self.sensor.sense(
+            position=np.array([0.0, 0.0, 0.0]),
+            velocity=np.zeros(3),
+            goal=np.array([6.0, 0.0, 0.0]),
+            dynamic_obstacles=[moving_obstacle],
+        )
+        self.assertTrue(np.allclose(packet_second.previous_scan, packet_first.current_scan))
+        self.assertLess(packet_second.min_clearance, packet_first.min_clearance)
+        self.assertFalse(np.allclose(packet_second.current_scan, packet_first.current_scan))
+
+    def test_sphere_ray_intersection(self):
+        obstacle = StaticSphereObstacle(center=[3.0, 0.0, 0.0], radius=0.5)
+        distance = obstacle.ray_intersection(
+            origin=np.array([0.0, 0.0, 0.0]),
+            direction=np.array([1.0, 0.0, 0.0]),
+            max_distance=10.0,
+        )
+        self.assertAlmostEqual(distance, 2.5, places=6)
+
+    def test_box_ray_intersection(self):
+        obstacle = AxisAlignedBoxObstacle(center=[4.0, 0.0, 0.0], half_extents=[1.0, 0.5, 0.5])
+        distance = obstacle.ray_intersection(
+            origin=np.array([0.0, 0.0, 0.0]),
+            direction=np.array([1.0, 0.0, 0.0]),
+            max_distance=10.0,
+        )
+        self.assertAlmostEqual(distance, 3.0, places=6)
+
+    def test_lidar_occlusion_prefers_nearest_hit(self):
+        sensor = LocalObstacleSensor(sensing_radius=5.0)
+        packet = sensor.sense(
+            position=np.array([0.0, 0.0, 0.0]),
+            velocity=np.zeros(3),
+            goal=np.array([6.0, 0.0, 0.0]),
+            static_obstacles=[
+                StaticSphereObstacle(center=[2.0, 0.0, 0.0], radius=0.3),
+                StaticSphereObstacle(center=[4.0, 0.0, 0.0], radius=0.3),
+            ],
+        )
+        front_azimuth_index = 12
+        center_elevation_index = 4
+        expected_normalized_distance = 1.7 / 5.0
+        self.assertAlmostEqual(
+            float(packet.current_scan[front_azimuth_index, center_elevation_index]),
+            expected_normalized_distance,
+            places=5,
+        )
 
     def test_controller_output(self):
         packet = self.sensor.sense(
@@ -78,23 +149,35 @@ class TestDMPRLPipeline(unittest.TestCase):
                 "accelerate_clip": (-4.0, 4.0),
                 "time_step": 0.1,
             },
-            sensor_config={"sensing_radius": 5.0, "max_obstacles": 4},
+            sensor_config={"sensing_radius": 5.0},
             dmp_config=DMPConfig(dt=0.1),
             static_obstacles=self.static_obstacles,
             dynamic_obstacles=self.dynamic_obstacles,
         )
-        observation = env.reset(start=np.array([0.0, 0.0, 0.0]), goal=np.array([6.0, 0.0, 0.0]))
+        observation, info = env.reset(
+            options={
+                "start": np.array([0.0, 0.0, 0.0]),
+                "goal": np.array([6.0, 0.0, 0.0]),
+            }
+        )
+        self.assertEqual(env.sensor_observation_dim, 439)
+        self.assertEqual(env.extra_observation_dim, 3)
+        self.assertEqual(env.observation_dim, 442)
         self.assertEqual(observation.shape[0], env.observation_dim)
         self.assertEqual(env.get_sensor_observation().shape[0], env.sensor_observation_dim)
+        self.assertEqual(env.observation_space.shape[0], env.observation_dim)
+        self.assertEqual(env.action_space.shape[0], env.action_dim)
+        self.assertIn("distance_to_goal", info)
 
-        action = np.zeros(env.action_dim, dtype=float)
-        next_observation, reward, done, info = env.step(action)
+        action = np.zeros(env.action_dim, dtype=np.float32)
+        next_observation, reward, terminated, truncated, info = env.step(action)
         self.assertEqual(next_observation.shape[0], env.observation_dim)
         self.assertEqual(info["sensor_observation"].shape[0], env.sensor_observation_dim)
         self.assertIsInstance(reward, float)
         self.assertIn("distance_to_goal", info)
         self.assertFalse(np.isnan(reward))
-        self.assertIsInstance(done, bool)
+        self.assertIsInstance(terminated, bool)
+        self.assertIsInstance(truncated, bool)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,41 @@ class MovingSphereObstacle:
             distance = 1.0
         return self.center + direction / distance * self.effective_radius
 
+    def ray_intersection(self, origin, direction, max_distance):
+        """
+        计算射线与动态球形障碍物的最近正向交点距离。
+        若无交点则返回 None。
+        """
+        origin = _to_vector3(origin)
+        direction = _to_vector3(direction)
+        max_distance = float(max_distance)
+
+        direction_norm = np.linalg.norm(direction)
+        if direction_norm < 1e-8:
+            raise ValueError("direction must be non-zero")
+        direction = direction / direction_norm
+
+        if self.contains(origin):
+            return 0.0
+
+        offset = origin - self.center
+        b = float(np.dot(direction, offset))
+        c = float(np.dot(offset, offset) - self.effective_radius ** 2)
+        discriminant = b * b - c
+        if discriminant < 0.0:
+            return None
+
+        sqrt_discriminant = np.sqrt(discriminant)
+        candidates = [-b - sqrt_discriminant, -b + sqrt_discriminant]
+        positive_candidates = [distance for distance in candidates if distance >= 0.0]
+        if not positive_candidates:
+            return None
+
+        hit_distance = min(positive_candidates)
+        if hit_distance > max_distance:
+            return None
+        return float(hit_distance)
+
     def step(self, dt):
         self.center = self.center + self.velocity * float(dt)
 
