@@ -36,23 +36,24 @@ class EnvConfig:
     这部分参数只负责“环境层面的任务定义”，不负责动力学和控制器本身：
     - max_steps: 单回合最大步数，超出后记为 truncated
     - goal_tolerance: 到达目标的距离阈值
-    - collision_penalty: 碰撞惩罚
-    - success_bonus: 到达目标奖励
-    - progress_weight: 向目标推进的奖励系数
-    - clearance_weight: 贴近障碍物时的惩罚系数
-    - action_penalty: 控制过猛时的惩罚系数
-    - living_penalty: 每一步的生存惩罚，防止策略原地拖时间
+    奖励目前由三部分组成：
+    1. obstacle_potential_weight: 障碍物方向的人工势场惩罚权重
+    2. step_reward_weight: 步进奖励权重（离目标越近奖励越大）
+    3. step_penalty: 单步固定惩罚
+
+    额外保留：
+    - collision_penalty: 碰撞终止惩罚
+    - success_bonus: 到达目标终止奖励
     - collision_margin: 碰撞判定时的额外安全边界
     """
 
     max_steps: int = 250
     goal_tolerance: float = 0.35
+    obstacle_potential_weight: float = 2.0
+    step_reward_weight: float = 4.0
+    step_penalty: float = 0.01
     collision_penalty: float = 80.0
     success_bonus: float = 80.0
-    progress_weight: float = 4.0
-    clearance_weight: float = 0.8
-    action_penalty: float = 0.02
-    living_penalty: float = 0.01
     collision_margin: float = 0.0
 
 
@@ -320,6 +321,9 @@ class SingleAgentDMPEnv(gym.Env):
             commanded_acceleration=np.zeros(self.state_dim, dtype=np.float32),
             applied_acceleration=np.zeros(self.state_dim, dtype=np.float32),
             next_state=self.dynamics.state.copy(),
+            step_reward=0.0,
+            obstacle_potential_penalty=0.0,
+            step_penalty=float(self.env_config.step_penalty),
         )
         return observation, info
 
@@ -338,16 +342,16 @@ class SingleAgentDMPEnv(gym.Env):
         if self.latest_sensor_packet is None:
             raise RuntimeError("reset must be called before step")
 
-        # 1. 检查动作维度，并裁剪到动作空间范围内
+        # 检查动作维度，并裁剪到动作空间范围内
         action = np.asarray(action, dtype=np.float32)
         if action.shape != (self.action_dim,):
             raise ValueError(f"action must have shape ({self.action_dim},)")
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        # 2. 记录执行前到目标的距离，用于后面计算推进奖励
+        # 记录执行前到目标的距离，用于后面计算推进奖励
         previous_distance = float(np.linalg.norm(self.goal - self.dynamics.p))
 
-        # 3. 让 DMP 控制器根据当前状态和 RL 动作计算期望加速度
+        # 让 DMP 控制器根据当前状态和 RL 动作计算期望加速度
         acceleration, controller_info = self.dmp.compute_acceleration(
             self.dynamics.p,
             self.dynamics.v,
@@ -355,22 +359,22 @@ class SingleAgentDMPEnv(gym.Env):
             sensor_packet=self.latest_sensor_packet,
         )
 
-        # 4. 再用动力学模型允许的加速度范围做一次裁剪
+        # 再用动力学模型允许的加速度范围做一次裁剪
         applied_acceleration = np.clip(
             acceleration,
             self.dynamics.accelerate_min,
             self.dynamics.accelerate_max,
         )
 
-        # 5. 推进无人机动力学
+        # 推进无人机动力学
         self.latest_controller_info = controller_info
         next_state = self.dynamics.step(applied_acceleration)
 
-        # 6. 推进所有动态障碍物
+        # 推进所有动态障碍物
         for obstacle in self.dynamic_obstacles:
             obstacle.step(self.dynamics.dt)
 
-        # 7. 更新步数和最新传感器观测
+        # 更新步数和最新传感器观测
         self.steps += 1
         self.latest_sensor_packet = self.sensor.sense(
             self.dynamics.p,
@@ -380,23 +384,22 @@ class SingleAgentDMPEnv(gym.Env):
             self.dynamic_obstacles,
         )
 
-        # 8. 刷新完整观测
+        # 刷新完整观测
         observation = self.get_observation()
         current_distance = float(np.linalg.norm(self.goal - self.dynamics.p))
         progress = previous_distance - current_distance
 
-        # 9. 奖励由四部分组成：
-        #    - 向目标推进的正奖励
-        #    - 控制过猛惩罚
-        #    - 每步生存惩罚
-        #    - 贴近障碍物惩罚
-        reward = self.env_config.progress_weight * progress
-        reward -= self.env_config.action_penalty * float(np.linalg.norm(applied_acceleration))
-        reward -= self.env_config.living_penalty
-        if np.isfinite(self.latest_sensor_packet.min_clearance):
-            reward -= self.env_config.clearance_weight * np.exp(-max(self.latest_sensor_packet.min_clearance, 0.0))
+        # 奖励重构为三部分：
+        # 1) obstacle_potential_penalty：障碍物方向人工势场惩罚
+        # 2) step_reward：步进奖励（朝目标前进）
+        # 3) step_penalty：固定单步惩罚
+        obstacle_potential_penalty = self._compute_obstacle_potential_penalty(applied_acceleration)
+        step_reward = self.env_config.step_reward_weight * progress
+        step_penalty = self.env_config.step_penalty
 
-        # 10. 判断本步结束类型
+        reward = step_reward - obstacle_potential_penalty - step_penalty
+
+        # 判断本步结束类型
         # success / collision 算 terminated
         # 超步数算 truncated
         success = current_distance <= self.env_config.goal_tolerance
@@ -404,13 +407,13 @@ class SingleAgentDMPEnv(gym.Env):
         terminated = bool(success or collision)
         truncated = bool((not terminated) and (self.steps >= self.env_config.max_steps))
 
-        # 11. 成功和碰撞分别叠加终止奖励/惩罚
+        # 成功和碰撞分别叠加终止奖励/惩罚
         if collision:
             reward -= self.env_config.collision_penalty
         elif success:
             reward += self.env_config.success_bonus
 
-        # 12. 组装当前步的附加信息
+        # 组装当前步的附加信息
         info = self._build_info(
             success=success,
             collision=collision,
@@ -418,10 +421,72 @@ class SingleAgentDMPEnv(gym.Env):
             commanded_acceleration=acceleration,
             applied_acceleration=applied_acceleration,
             next_state=next_state,
+            step_reward=step_reward,
+            obstacle_potential_penalty=obstacle_potential_penalty,
+            step_penalty=step_penalty,
         )
         return observation, float(reward), terminated, truncated, info
 
-    def _build_info(self, success, collision, truncated, commanded_acceleration, applied_acceleration, next_state):
+    def _compute_obstacle_potential_penalty(self, applied_acceleration: np.ndarray) -> float:
+        """
+        计算“障碍物方向的人工势场惩罚”。
+
+        设计要点：
+        1. 只在“动作方向朝向障碍物”时产生惩罚（方向门控）
+        2. 距障碍物越近，惩罚越大（势场强度随距离增大而衰减）
+        3. 多障碍物惩罚累加
+        """
+        # 当动作幅值接近 0 时，不施加方向惩罚，避免数值噪声导致抖动。
+        action_norm = float(np.linalg.norm(applied_acceleration))
+        if action_norm < 1e-8:
+            return 0.0
+
+        action_dir = applied_acceleration / action_norm
+        position = self.dynamics.p
+        influence_distance = float(self.sensor.sensing_radius)
+        if influence_distance <= 0.0:
+            return 0.0
+
+        penalty_sum = 0.0
+        for obstacle in self.static_obstacles + self.dynamic_obstacles:
+            # 用障碍物表面最近点构造“指向障碍物”的方向向量。
+            closest_point = obstacle.closest_point(position)
+            to_obstacle = closest_point - position
+            distance_to_surface = float(np.linalg.norm(to_obstacle))
+
+            # 超出势场影响半径则不惩罚。
+            if distance_to_surface >= influence_distance:
+                continue
+
+            # 在障碍物内部或极近处时给一个稳定下界，避免除零。
+            d = max(distance_to_surface, 1e-3)
+
+            # 势场基础强度：常见人工势场形式 (1/d - 1/d0)^2
+            # d0 取传感器感知半径，使远离障碍物时强度自然收敛到 0。
+            base_field = (1.0 / d - 1.0 / influence_distance) ** 2
+
+            # 方向门控：只有朝向障碍物的动作才惩罚。
+            # cos_theta > 0 表示与障碍物方向同向。
+            obstacle_dir = to_obstacle / d
+            cos_theta = float(np.dot(action_dir, obstacle_dir))
+            directional_gate = max(0.0, cos_theta)
+
+            penalty_sum += base_field * directional_gate
+
+        return float(self.env_config.obstacle_potential_weight * penalty_sum)
+
+    def _build_info(
+        self,
+        success,
+        collision,
+        truncated,
+        commanded_acceleration,
+        applied_acceleration,
+        next_state,
+        step_reward,
+        obstacle_potential_penalty,
+        step_penalty,
+    ):
         """
         组装 info 字典。
 
@@ -442,6 +507,9 @@ class SingleAgentDMPEnv(gym.Env):
             "commanded_acceleration": np.asarray(commanded_acceleration, dtype=np.float32).copy(),
             "applied_acceleration": np.asarray(applied_acceleration, dtype=np.float32).copy(),
             "next_state": np.asarray(next_state, dtype=np.float32).copy(),
+            "reward_step_reward": float(step_reward),
+            "reward_obstacle_potential_penalty": float(obstacle_potential_penalty),
+            "reward_step_penalty": float(step_penalty),
         }
 
     def _check_collision(self):
