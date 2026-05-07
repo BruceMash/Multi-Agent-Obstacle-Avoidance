@@ -1,4 +1,4 @@
-﻿"""
+"""
 SAC 训练入口（用于本项目的单智能体 DMP-RL 环境）。
 
 这份 runner 负责三件事：
@@ -16,8 +16,11 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from Controller.dmp_rl import DMPConfig
-from Entity.dynamic_obstacles import MovingSphereObstacle
-from Entity.static_obstacles import AxisAlignedBoxObstacle, StaticSphereObstacle
+
+# 引入障碍物随机生成
+from Entity.obstacle_generators import DynamicSpherePositionGenerate, StaticSpherePositionGenerate
+from Entity.static_obstacles import AxisAlignedBoxObstacle
+
 from Environment.single_agent_dmp_env import EnvConfig, SingleAgentDMPEnv
 from baseline.common.callbacks import BaseCallback, CallbackList
 from baseline.sac import SAC
@@ -52,19 +55,41 @@ def build_env() -> SingleAgentDMPEnv:
     # dmp与环境测试
     dmp_config = DMPConfig(dt=dynamics_config["time_step"], goal_offset_max=1.0)
     env_config = EnvConfig(max_steps=220, goal_tolerance=0.3)
-    static_obstacles = [
-        StaticSphereObstacle(center=[2.6, 0.6, 0.0], radius=0.45, safety_margin=0.1),
-        AxisAlignedBoxObstacle(center=[4.8, -0.5, 0.0], half_extents=[0.45, 0.45, 0.35], safety_margin=0.1),
-    ]   # 两个静态的 半球和立方体
-    dynamic_obstacles = [
-        MovingSphereObstacle(
-            center=[3.5, -1.5, 0.0],
-            radius=0.35,
-            velocity=[0.0, 0.8, 0.0],
-            safety_margin=0.15,
-            bounds=(np.array([3.5, -2.0, -0.5]), np.array([3.5, 1.0, 0.5])),
+    # 固定立方体：作为稳定参考场景，每个回合都存在。
+    # 随机障碍物生成时必须避让此立方体，避免一开始就重叠。
+    fixed_box = AxisAlignedBoxObstacle(
+        center=[4.8, -0.5, 0.0], half_extents=[0.45, 0.45, 0.35], safety_margin=0.1
+    )
+
+    def static_obstacle_generator(start, goal, seed):
+        spheres = StaticSpherePositionGenerate(
+            center=[[1.2, -1.4, -0.3], [7.0, 1.4, 0.3]],
+            radius=0.45,
+            safety_margin=0.1,
+            num=3,
+            existing_obstacles=[fixed_box],
+            seed=seed,
+            protected_points=[start, goal],
         )
-    ]   # 动态障碍物
+        spheres.append(fixed_box)
+        return spheres
+
+    def dynamic_obstacle_generator(start, goal, seed, static_obstacles):
+        return DynamicSpherePositionGenerate(
+            center=[[1.5, -1.6, -0.3], [7.0, 1.2, 0.3]],
+            radius=0.35,
+            velocity=[[-0.3, -1.0, -0.2], [0.3, 1.0, 0.2]],
+            safety_margin=0.15,
+            num=1,
+            movement_bounds=[[1.2, -2.0, -1.0], [7.3, 1.5, 1.0]],
+            existing_obstacles=static_obstacles,
+            seed=seed,
+            protected_points=[start, goal],
+            min_speed=0.4,
+        )
+
+    # env 构造阶段只放固定障碍物；随机球形障碍物在每次 reset 时按本回合起终点生成。
+    static_obstacles = [fixed_box]
 
     return SingleAgentDMPEnv(
         dynamics_config=dynamics_config,
@@ -72,7 +97,9 @@ def build_env() -> SingleAgentDMPEnv:
         dmp_config=dmp_config,
         env_config=env_config,
         static_obstacles=static_obstacles,
-        dynamic_obstacles=dynamic_obstacles,
+        static_obstacle_generator=static_obstacle_generator,
+        dynamic_obstacles=[],
+        dynamic_obstacle_generator=dynamic_obstacle_generator,
     )   # 创建环境
 
 

@@ -1,4 +1,4 @@
-﻿"""
+"""
 单智能体 SAC 测试脚本。
 
 功能：
@@ -241,6 +241,7 @@ def test_single_episode(
     model_path: str | Path | None = None,
     deterministic: bool = True,
     output_root: str = "artifacts",
+    test_seed: int = 20240517,
 ) -> dict[str, Any]:
     """加载模型并执行单回合测试。"""
     checkpoint_path = Path(model_path) if model_path is not None else _find_latest_model(output_root=output_root)
@@ -248,13 +249,13 @@ def test_single_episode(
         raise FileNotFoundError(f"模型文件不存在: {checkpoint_path}")
 
     env = runner_sac.build_env()
-    env_summary = _summarize_env(env)
     model = runner_sac.build_model(env, buffer_size=1_000, verbose=0)
     model = runner_sac.load_checkpoint(model, checkpoint_path)
 
     start = np.array([0.0, 0.0, 0.0], dtype=float)
     goal = np.array([8.0, 0.0, 0.0], dtype=float)
-    observation, info = env.reset(options={"start": start, "goal": goal})
+    observation, info = env.reset(seed=test_seed, options={"start": start, "goal": goal})
+    env_summary = _summarize_env(env)
 
     total_reward = 0.0
     step_count = 0
@@ -282,6 +283,7 @@ def test_single_episode(
 
     result: dict[str, Any] = {
         "model_path": str(checkpoint_path),
+        "test_seed": int(test_seed),
         "steps": int(step_count),
         "total_reward": float(total_reward),
         "success": bool(info.get("success", False)),
@@ -329,12 +331,19 @@ def main() -> None:
         default=None,
         help="可视化输出图片路径（png）。不传则自动保存到模型目录下 test_vis_时间戳.png",
     )
+    parser.add_argument(
+        "--test-seed",
+        type=int,
+        default=20240517,
+        help="测试场景随机种子。固定后每次测试使用同一批随机障碍物",
+    )
     args = parser.parse_args()
 
     result = test_single_episode(
         model_path=args.model,
         deterministic=not args.stochastic,
         output_root=args.output_root,
+        test_seed=args.test_seed,
     )
 
     if args.vis_path is not None:
@@ -348,6 +357,7 @@ def main() -> None:
 
     print("test finished")
     print(f"model_path: {result['model_path']}")
+    print(f"test_seed: {result['test_seed']}")
     print(f"steps: {result['steps']}")
     print(f"total_reward: {result['total_reward']:.3f}")
     print(f"success: {result['success']}")

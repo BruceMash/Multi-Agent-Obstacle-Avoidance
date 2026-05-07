@@ -1,4 +1,4 @@
-﻿import copy
+import copy
 from dataclasses import dataclass
 
 import gymnasium as gym
@@ -83,7 +83,9 @@ class SingleAgentDMPEnv(gym.Env):
         dmp_config=None,
         env_config=None,
         static_obstacles=None,
+        static_obstacle_generator=None,
         dynamic_obstacles=None,
+        dynamic_obstacle_generator=None,
         render_mode=None,
     ):
         # 当前这个 Demo 只支持最小的 human 渲染占位接口。
@@ -106,7 +108,9 @@ class SingleAgentDMPEnv(gym.Env):
 
         # deepcopy 会递归复制对象，保证每次 reset 都拿到独立场景。
         self._initial_static_obstacles = copy.deepcopy(static_obstacles or [])
+        self._static_obstacle_generator = static_obstacle_generator
         self._initial_dynamic_obstacles = copy.deepcopy(dynamic_obstacles or [])
+        self._dynamic_obstacle_generator = dynamic_obstacle_generator
         self._default_start = np.zeros(self.state_dim, dtype=float)
         self._default_goal = np.zeros(self.state_dim, dtype=float)
         self._default_goal[0] = 8.0
@@ -291,15 +295,41 @@ class SingleAgentDMPEnv(gym.Env):
         # 1. 回合级状态重置
         self.goal = goal.copy()
         self.steps = 0
-        self.static_obstacles = copy.deepcopy(options.get("static_obstacles", self._initial_static_obstacles))
-        self.dynamic_obstacles = copy.deepcopy(options.get("dynamic_obstacles", self._initial_dynamic_obstacles))
+        if "static_obstacles" in options:
+            self.static_obstacles = copy.deepcopy(options["static_obstacles"])
+        elif self._static_obstacle_generator is not None:
+            # 训练时可在每个回合重置时重新生成静态障碍物，让策略看到更多场景。
+            generator_seed = int(self.np_random.integers(0, np.iinfo(np.uint32).max))
+            self.static_obstacles = copy.deepcopy(
+                self._static_obstacle_generator(
+                    start=start.copy(),
+                    goal=goal.copy(),
+                    seed=generator_seed,
+                )
+            )
+        else:
+            self.static_obstacles = copy.deepcopy(self._initial_static_obstacles)
+        if "dynamic_obstacles" in options:
+            self.dynamic_obstacles = copy.deepcopy(options["dynamic_obstacles"])
+        elif self._dynamic_obstacle_generator is not None:
+            generator_seed = int(self.np_random.integers(0, np.iinfo(np.uint32).max))
+            self.dynamic_obstacles = copy.deepcopy(
+                self._dynamic_obstacle_generator(
+                    start=start.copy(),
+                    goal=goal.copy(),
+                    seed=generator_seed,
+                    static_obstacles=copy.deepcopy(self.static_obstacles),
+                )
+            )
+        else:
+            self.dynamic_obstacles = copy.deepcopy(self._initial_dynamic_obstacles)
 
-        # 2. 底层模块重置
+        # 底层模块重置
         self.dynamics.reset({"position": start, "velocity": np.zeros(self.state_dim, dtype=float)})
         self.dmp.reset(start, goal)
         self.sensor.reset()
 
-        # 3. 用重置后的状态生成第一帧传感器读数
+        # 用重置后的状态生成第一帧传感器读数
         self.latest_sensor_packet = self.sensor.sense(
             self.dynamics.p,
             self.dynamics.v,
@@ -308,11 +338,11 @@ class SingleAgentDMPEnv(gym.Env):
             self.dynamic_obstacles,
         )
 
-        # 4. 保存控制器当前内部状态，便于后续 info 直接读取
+        # 保存控制器当前内部状态，便于后续 info 直接读取
         self.latest_controller_info = {"phase": float(self.dmp.phase), "tau": float(self.dmp.config.tau)}
         self.latest_observation = None
 
-        # 5. 生成 reset 后的完整观测和信息字典
+        # 生成 reset 后的完整观测和信息字典
         observation = self.get_observation()
         info = self._build_info(
             success=False,
