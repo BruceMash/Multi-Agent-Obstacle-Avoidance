@@ -1,4 +1,5 @@
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import gymnasium as gym
@@ -53,7 +54,8 @@ class EnvConfig:
     step_reward_weight: float = 4.0
     step_penalty: float = 0.01
     collision_penalty: float = 80.0
-    success_bonus: float = 80.0
+    timeout_penalty: float = 50.0
+    success_bonus: float = 300.0
     collision_margin: float = 0.0
 
 
@@ -82,6 +84,7 @@ class SingleAgentDMPEnv(gym.Env):
         sensor_config=None,
         dmp_config=None,
         env_config=None,
+        start_goal_generator: Callable[[np.random.Generator], tuple[np.ndarray, np.ndarray]] | None = None,
         static_obstacles=None,
         static_obstacle_generator=None,
         dynamic_obstacles=None,
@@ -111,6 +114,7 @@ class SingleAgentDMPEnv(gym.Env):
         self._static_obstacle_generator = static_obstacle_generator
         self._initial_dynamic_obstacles = copy.deepcopy(dynamic_obstacles or [])
         self._dynamic_obstacle_generator = dynamic_obstacle_generator
+        self._start_goal_generator = start_goal_generator
         self._default_start = np.zeros(self.state_dim, dtype=float)
         self._default_goal = np.zeros(self.state_dim, dtype=float)
         self._default_goal[0] = 8.0
@@ -286,9 +290,16 @@ class SingleAgentDMPEnv(gym.Env):
         super().reset(seed=seed)
         options = options or {}
 
-        # 读取本回合场景配置；若不传则使用默认值
-        start = np.asarray(options.get("start", self._default_start), dtype=float)
-        goal = np.asarray(options.get("goal", self._default_goal), dtype=float)
+        # 读取本回合场景配置；训练模式下未显式指定起终点时按配置随机采样。
+        has_start = "start" in options
+        has_goal = "goal" in options
+        if self._start_goal_generator is not None and not has_start and not has_goal:
+            start, goal = self._start_goal_generator(self.np_random)
+            start = np.asarray(start, dtype=float)
+            goal = np.asarray(goal, dtype=float)
+        else:
+            start = np.asarray(options.get("start", self._default_start), dtype=float)
+            goal = np.asarray(options.get("goal", self._default_goal), dtype=float)
         if start.shape != (self.state_dim,) or goal.shape != (self.state_dim,):
             raise ValueError(f"start and goal must have shape ({self.state_dim},)")
 
@@ -354,6 +365,7 @@ class SingleAgentDMPEnv(gym.Env):
             step_reward=0.0,
             obstacle_potential_penalty=0.0,
             step_penalty=float(self.env_config.step_penalty),
+            timeout_penalty=0.0,
         )
         return observation, info
 
@@ -442,6 +454,8 @@ class SingleAgentDMPEnv(gym.Env):
             reward -= self.env_config.collision_penalty
         elif success:
             reward += self.env_config.success_bonus
+        timeout_penalty = float(self.env_config.timeout_penalty) if truncated else 0.0
+        reward -= timeout_penalty
 
         # 组装当前步的附加信息
         info = self._build_info(
@@ -454,6 +468,7 @@ class SingleAgentDMPEnv(gym.Env):
             step_reward=step_reward,
             obstacle_potential_penalty=obstacle_potential_penalty,
             step_penalty=step_penalty,
+            timeout_penalty=timeout_penalty,
         )
         return observation, float(reward), terminated, truncated, info
 
@@ -516,6 +531,7 @@ class SingleAgentDMPEnv(gym.Env):
         step_reward,
         obstacle_potential_penalty,
         step_penalty,
+        timeout_penalty,
     ):
         """
         组装 info 字典。
@@ -540,6 +556,7 @@ class SingleAgentDMPEnv(gym.Env):
             "reward_step_reward": float(step_reward),
             "reward_obstacle_potential_penalty": float(obstacle_potential_penalty),
             "reward_step_penalty": float(step_penalty),
+            "reward_timeout_penalty": float(timeout_penalty),
         }
 
     def _check_collision(self):

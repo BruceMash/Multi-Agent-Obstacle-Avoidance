@@ -1,12 +1,8 @@
 """
-SAC 训练入口（用于本项目的单智能体 DMP-RL 环境）。
-
-这份 runner 负责三件事：
-1. 构建训练环境和模型
-2. 训练过程中按规则保存 checkpoint / best_model
-3. 支持从 checkpoint 恢复继续训练
+SAC training entry for the single-agent DMP-RL environment.
 """
 
+import csv
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,140 +11,78 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from Controller.dmp_rl import DMPConfig
-
-# 引入障碍物随机生成
-from Entity.obstacle_generators import DynamicSpherePositionGenerate, StaticSpherePositionGenerate
-from Entity.static_obstacles import AxisAlignedBoxObstacle
-
-from Environment.single_agent_dmp_env import EnvConfig, SingleAgentDMPEnv
+from Environment.single_agent_dmp_env import SingleAgentDMPEnv
 from baseline.common.callbacks import BaseCallback, CallbackList
 from baseline.sac import SAC
+from experiment_config import EXPERIMENT_CONFIG, SACExperimentConfig
 
 
 class _PolicyModeShim:
-    """
-    兼容占位对象。
-
-    当前自定义 SAC 实现里，`model.policy` 不是核心训练对象，
-    但父类训练流程会调用 `set_training_mode()`，这里给一个最小实现避免中断。
-    """
+    """Compatibility shim for the legacy training loop."""
 
     def set_training_mode(self, mode: bool) -> None:
         _ = mode
         return None
 
 
-def build_env() -> SingleAgentDMPEnv:
-    """
-    统一构建训练环境。
+def build_env(config: SACExperimentConfig = EXPERIMENT_CONFIG) -> SingleAgentDMPEnv:
+    """Build the training environment from a centralized config."""
+    dynamics_config = config.build_dynamics_config()
+    sensor_config = config.build_sensor_config()
+    dmp_config = config.build_dmp_config()
+    env_config = config.build_env_config()
+    fixed_box = config.build_fixed_box()
+    start_goal_generator = config.build_start_goal_generator()
+    static_obstacle_generator = config.build_static_obstacle_generator(fixed_box)
+    dynamic_obstacle_generator = config.build_dynamic_obstacle_generator()
+    static_obstacles = config.build_static_obstacles(fixed_box)
 
-    这里集中放环境超参数，便于评审时快速确认实验配置。
-    """
-    dynamics_config = {
-        "velocity_clip": (-2.0, 2.0),
-        "accelerate_clip": (-4.0, 4.0),
-        "time_step": 0.1,
-    }   # 动态参数裁剪
-    sensor_config = {"sensing_radius": 4.5} # 感知半径
-
-    # dmp与环境测试
-    dmp_config = DMPConfig(dt=dynamics_config["time_step"], goal_offset_max=1.0)
-    env_config = EnvConfig(max_steps=220, goal_tolerance=0.3)
-    # 固定立方体：作为稳定参考场景，每个回合都存在。
-    # 随机障碍物生成时必须避让此立方体，避免一开始就重叠。
-    fixed_box = AxisAlignedBoxObstacle(
-        center=[4.8, -0.5, 0.0], half_extents=[0.45, 0.45, 0.35], safety_margin=0.1
-    )
-
-    def static_obstacle_generator(start, goal, seed):
-        spheres = StaticSpherePositionGenerate(
-            center=[[1.2, -1.4, -0.3], [7.0, 1.4, 0.3]],
-            radius=0.45,
-            safety_margin=0.1,
-            num=3,
-            existing_obstacles=[fixed_box],
-            seed=seed,
-            protected_points=[start, goal],
-        )
-        spheres.append(fixed_box)
-        return spheres
-
-    def dynamic_obstacle_generator(start, goal, seed, static_obstacles):
-        return DynamicSpherePositionGenerate(
-            center=[[1.5, -1.6, -0.3], [7.0, 1.2, 0.3]],
-            radius=0.35,
-            velocity=[[-0.3, -1.0, -0.2], [0.3, 1.0, 0.2]],
-            safety_margin=0.15,
-            num=1,
-            movement_bounds=[[1.2, -2.0, -1.0], [7.3, 1.5, 1.0]],
-            existing_obstacles=static_obstacles,
-            seed=seed,
-            protected_points=[start, goal],
-            min_speed=0.4,
-        )
-
-    # env 构造阶段只放固定障碍物；随机球形障碍物在每次 reset 时按本回合起终点生成。
-    static_obstacles = [fixed_box]
-
-    return SingleAgentDMPEnv(
+    env = SingleAgentDMPEnv(
         dynamics_config=dynamics_config,
         sensor_config=sensor_config,
         dmp_config=dmp_config,
         env_config=env_config,
+        start_goal_generator=start_goal_generator,
         static_obstacles=static_obstacles,
         static_obstacle_generator=static_obstacle_generator,
         dynamic_obstacles=[],
         dynamic_obstacle_generator=dynamic_obstacle_generator,
-    )   # 创建环境
+    )
+    env._default_start = np.asarray(config.default_start, dtype=float)
+    env._default_goal = np.asarray(config.default_goal, dtype=float)
+    env.goal = env._default_goal.copy()
+    return env
 
 
 def build_model(
     env: SingleAgentDMPEnv,
+    config: SACExperimentConfig = EXPERIMENT_CONFIG,
     tensorboard_log: str | None = None,
-    buffer_size: int = 1_000_000,
-    verbose: int = 1,
+    verbose: int | None = None,
 ) -> SAC:
-    """
-    创建 SAC 模型并注入网络结构参数。
-    """
-    model = SAC(    
-        policy="MlpPolicy", # sb3基础实现的接口占位
+    """Build SAC using the centralized experiment config."""
+    model = SAC(
+        policy="MlpPolicy",
         env=env,
-        learning_rate=3e-4,
-        buffer_size=buffer_size,
-        batch_size=256,
-        learning_starts=100,
-        train_freq=1,
-        gradient_steps=1,
-        verbose=verbose,
+        learning_rate=config.learning_rate,
+        buffer_size=config.buffer_size,
+        batch_size=config.batch_size,
+        learning_starts=config.learning_starts,
+        train_freq=config.train_freq,
+        gradient_steps=config.gradient_steps,
+        ent_coef=config.ent_coef,
+        verbose=config.verbose if verbose is None else verbose,
         tensorboard_log=tensorboard_log,
-        policy_kwargs={
-            # 下面 4 个参数映射到 baseline/sac/net.py 的网络结构
-            "hidden_dim": 256,
-            "sensor_output_dim": 128,
-            "num_sensor_layers": 2,
-            "num_observation_layers": 2,
-        },
+        policy_kwargs=config.build_policy_kwargs(),
     )
 
-    # 父类训练循环会调用 model.policy.set_training_mode()，这里确保接口存在。
-    if model.policy is None:    # 兼容旧版本
+    if model.policy is None:
         model.policy = _PolicyModeShim()
     return model
 
 
 def save_checkpoint(model: SAC, model_path: str | Path, extra: dict[str, Any] | None = None) -> str:
-    """
-    保存可恢复训练的完整状态。
-
-    保存内容包括：
-    1. actor / critic / critic_target 参数
-    2. actor / critic 优化器状态
-    3. 时间步与更新次数
-    4. 熵系数相关状态（自动熵或固定熵两种模式）
-    5. 额外业务字段（extra）
-    """
+    """Save a full training checkpoint."""
     save_path = Path(model_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -162,11 +96,9 @@ def save_checkpoint(model: SAC, model_path: str | Path, extra: dict[str, Any] | 
         "n_updates": int(getattr(model, "_n_updates", 0)),
     }
 
-    # 自动熵：保存 log_ent_coef + 对应优化器
     if model.ent_coef_optimizer is not None and model.log_ent_coef is not None:
         checkpoint["log_ent_coef"] = model.log_ent_coef.detach().cpu()
         checkpoint["ent_coef_optimizer"] = model.ent_coef_optimizer.state_dict()
-    # 固定熵：保存 ent_coef_tensor
     elif hasattr(model, "ent_coef_tensor"):
         checkpoint["ent_coef_tensor"] = model.ent_coef_tensor.detach().cpu()
 
@@ -178,9 +110,7 @@ def save_checkpoint(model: SAC, model_path: str | Path, extra: dict[str, Any] | 
 
 
 def load_checkpoint(model: SAC, model_path: str | Path) -> SAC:
-    """
-    从 checkpoint 恢复模型和训练状态。
-    """
+    """Restore model and optimizer states from a checkpoint."""
     checkpoint = torch.load(model_path, map_location=model.device)
 
     model.actor.load_state_dict(checkpoint["actor"])
@@ -204,12 +134,7 @@ def load_checkpoint(model: SAC, model_path: str | Path) -> SAC:
 
 
 class CheckpointAndBestCallback(BaseCallback):
-    """
-    训练过程保存策略：
-    1. 周期性保存 checkpoint（固定步数）
-    2. 额外维护一个最新 checkpoint（checkpoint.pt）
-    3. 发现更高 episode reward 时保存 best_model
-    """
+    """Periodically save checkpoints and keep the best episode reward."""
 
     def __init__(self, run_dir: Path, save_freq: int = 500, verbose: int = 1):
         super().__init__(verbose=verbose)
@@ -238,10 +163,7 @@ class CheckpointAndBestCallback(BaseCallback):
             extra={"best_episode_reward": self.best_episode_reward},
         )
 
-    def _maybe_save_best(self, infos: list[dict[str, Any]]) -> None:   
-        """
-        从 env 返回的 info 中读取 episode 统计，维护 best_model。
-        """
+    def _maybe_save_best(self, infos: list[dict[str, Any]]) -> None:
         for info in infos:
             episode_info = info.get("episode")
             if episode_info is None:
@@ -271,21 +193,11 @@ class CheckpointAndBestCallback(BaseCallback):
         return True
 
     def _on_training_end(self) -> None:
-        # 训练结束时再落一次最新 checkpoint，保证最后状态可恢复。
         self._save_latest_checkpoint()
 
 
 class TensorboardRewardCallback(BaseCallback):
-    """
-    记录与奖励相关的 TensorBoard 指标。
-
-    记录内容：
-    1. step/reward_total: 每步奖励（多环境取均值）
-    2. step/reward_step_reward: 步进奖励
-    3. step/reward_obstacle_potential_penalty: 势场惩罚
-    4. step/reward_step_penalty: 单步惩罚
-    5. episode/reward: 每个回合总奖励（由 Monitor 提供）
-    """
+    """Write reward-related metrics to TensorBoard."""
 
     def __init__(self, log_dir: Path):
         super().__init__(verbose=0)
@@ -310,6 +222,11 @@ class TensorboardRewardCallback(BaseCallback):
             step_reward_values: list[float] = []
             obstacle_penalty_values: list[float] = []
             step_penalty_values: list[float] = []
+            timeout_penalty_values: list[float] = []
+            distance_values: list[float] = []
+            success_values: list[float] = []
+            collision_values: list[float] = []
+            timeout_values: list[float] = []
             episode_reward_values: list[float] = []
 
             for info in infos:
@@ -319,9 +236,27 @@ class TensorboardRewardCallback(BaseCallback):
                     obstacle_penalty_values.append(float(info["reward_obstacle_potential_penalty"]))
                 if "reward_step_penalty" in info:
                     step_penalty_values.append(float(info["reward_step_penalty"]))
+                if "reward_timeout_penalty" in info:
+                    timeout_penalty_values.append(float(info["reward_timeout_penalty"]))
+                if "distance_to_goal" in info:
+                    distance_values.append(float(info["distance_to_goal"]))
+                if "success" in info:
+                    success_values.append(float(info["success"]))
+                if "collision" in info:
+                    collision_values.append(float(info["collision"]))
+                if "truncated" in info:
+                    timeout_values.append(float(info["truncated"]))
                 episode_info = info.get("episode")
                 if episode_info is not None and "r" in episode_info:
                     episode_reward_values.append(float(episode_info["r"]))
+                    if "success" in info:
+                        self.writer.add_scalar("episode/success", float(info["success"]), self.num_timesteps)
+                    if "collision" in info:
+                        self.writer.add_scalar("episode/collision", float(info["collision"]), self.num_timesteps)
+                    if "truncated" in info:
+                        self.writer.add_scalar("episode/timeout", float(info["truncated"]), self.num_timesteps)
+                    if "distance_to_goal" in info:
+                        self.writer.add_scalar("episode/distance_to_goal", float(info["distance_to_goal"]), self.num_timesteps)
 
             if step_reward_values:
                 self.writer.add_scalar(
@@ -341,6 +276,24 @@ class TensorboardRewardCallback(BaseCallback):
                     sum(step_penalty_values) / len(step_penalty_values),
                     self.num_timesteps,
                 )
+            if timeout_penalty_values:
+                self.writer.add_scalar(
+                    "step/reward_timeout_penalty",
+                    sum(timeout_penalty_values) / len(timeout_penalty_values),
+                    self.num_timesteps,
+                )
+            if distance_values:
+                self.writer.add_scalar(
+                    "step/distance_to_goal",
+                    sum(distance_values) / len(distance_values),
+                    self.num_timesteps,
+                )
+            if success_values:
+                self.writer.add_scalar("step/success_rate", sum(success_values) / len(success_values), self.num_timesteps)
+            if collision_values:
+                self.writer.add_scalar("step/collision_rate", sum(collision_values) / len(collision_values), self.num_timesteps)
+            if timeout_values:
+                self.writer.add_scalar("step/timeout_rate", sum(timeout_values) / len(timeout_values), self.num_timesteps)
             for episode_reward in episode_reward_values:
                 self.writer.add_scalar("episode/reward", episode_reward, self.num_timesteps)
 
@@ -352,29 +305,364 @@ class TensorboardRewardCallback(BaseCallback):
             self.writer.close()
 
 
-def train(
-    total_timesteps: int = 4000000,
-    output_root: str = "artifacts",
-    save_freq: int = 50000,
-    resume_from: str | None = None,
-) -> dict[str, str]:
-    """
-    执行训练并返回本次产物路径。
+class FixedSeedEvalCallback(BaseCallback):
+    """Evaluate the policy on a fixed set of seeded benchmark scenarios."""
 
-    输出目录为时间戳目录：output_root/YYYYMMDD_HHMMSS/
-    """
+    CSV_FIELDS = [
+        "timesteps",
+        "seed",
+        "reward",
+        "length",
+        "success",
+        "collision",
+        "timeout",
+        "distance_to_goal",
+    ]
+
+    def __init__(
+        self,
+        eval_env: SingleAgentDMPEnv,
+        run_dir: Path,
+        log_dir: Path,
+        eval_freq: int,
+        eval_seeds: tuple[int, ...],
+        deterministic: bool = True,
+        save_visualizations: bool = True,
+        visualization_dir: str | Path | None = None,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose=verbose)
+        self.eval_env = eval_env
+        self.run_dir = run_dir
+        self.eval_dir = run_dir / "eval"
+        self.log_dir = log_dir
+        self.visualization_dir = Path(visualization_dir) if visualization_dir is not None else run_dir / "visualizations"
+        self.eval_freq = max(1, int(eval_freq))
+        self.eval_seeds = tuple(int(seed) for seed in eval_seeds)
+        if not self.eval_seeds:
+            raise ValueError("eval_seeds must contain at least one seed")
+        self.deterministic = bool(deterministic)
+        self.save_visualizations = bool(save_visualizations)
+        self.csv_path = self.eval_dir / "fixed_seed_eval.csv"
+        self.best_eval_model_path = run_dir / "best_eval_model.pt"
+        self.best_mean_reward = float("-inf")
+        self.writer: SummaryWriter | None = None
+
+    def _init_callback(self) -> None:
+        self.eval_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        if self.save_visualizations:
+            self.visualization_dir.mkdir(parents=True, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=str(self.log_dir))
+        if not self.csv_path.exists() or self.csv_path.stat().st_size == 0:
+            with self.csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=self.CSV_FIELDS)
+                writer.writeheader()
+
+    @staticmethod
+    def _extract_obstacles(env: SingleAgentDMPEnv) -> list[dict[str, Any]]:
+        obstacles: list[dict[str, Any]] = []
+        for obstacle_kind, obstacle_list in (("static", env.static_obstacles), ("dynamic", env.dynamic_obstacles)):
+            for obstacle in obstacle_list:
+                item: dict[str, Any] = {
+                    "kind": obstacle_kind,
+                    "center": np.asarray(obstacle.center, dtype=float).copy(),
+                }
+                if hasattr(obstacle, "expanded_half_extents"):
+                    item["type"] = "box"
+                    item["half_extents"] = np.asarray(obstacle.expanded_half_extents, dtype=float).copy()
+                elif hasattr(obstacle, "effective_radius"):
+                    item["type"] = "sphere"
+                    item["radius"] = float(obstacle.effective_radius)
+                else:
+                    item["type"] = "unsupported"
+                obstacles.append(item)
+        return obstacles
+
+    @staticmethod
+    def _set_equal_3d_axes(ax: Any, points: list[np.ndarray]) -> None:
+        stacked = np.vstack(points)
+        lower = stacked.min(axis=0)
+        upper = stacked.max(axis=0)
+        center = 0.5 * (lower + upper)
+        radius = max(0.5, 0.5 * float(np.max(upper - lower)))
+        ax.set_xlim(center[0] - radius, center[0] + radius)
+        ax.set_ylim(center[1] - radius, center[1] + radius)
+        ax.set_zlim(center[2] - radius, center[2] + radius)
+        if hasattr(ax, "set_box_aspect"):
+            ax.set_box_aspect([1.0, 1.0, 1.0])
+
+    @staticmethod
+    def _plot_sphere(ax: Any, center: np.ndarray, radius: float, color: str, label: str | None) -> None:
+        u = np.linspace(0.0, 2.0 * np.pi, 24)
+        v = np.linspace(0.0, np.pi, 14)
+        x = center[0] + radius * np.outer(np.cos(u), np.sin(v))
+        y = center[1] + radius * np.outer(np.sin(u), np.sin(v))
+        z = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
+        ax.plot_surface(x, y, z, color=color, alpha=0.18, linewidth=0.0, shade=False)
+        ax.scatter([center[0]], [center[1]], [center[2]], color=color, s=24, label=label)
+
+    @staticmethod
+    def _plot_box(ax: Any, center: np.ndarray, half_extents: np.ndarray, color: str, label: str | None) -> None:
+        x0, y0, z0 = center - half_extents
+        x1, y1, z1 = center + half_extents
+        vertices = np.array(
+            [
+                [x0, y0, z0],
+                [x1, y0, z0],
+                [x1, y1, z0],
+                [x0, y1, z0],
+                [x0, y0, z1],
+                [x1, y0, z1],
+                [x1, y1, z1],
+                [x0, y1, z1],
+            ],
+            dtype=float,
+        )
+        edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+        for start_index, end_index in edges:
+            ax.plot(
+                [vertices[start_index, 0], vertices[end_index, 0]],
+                [vertices[start_index, 1], vertices[end_index, 1]],
+                [vertices[start_index, 2], vertices[end_index, 2]],
+                color=color,
+                linewidth=1.2,
+            )
+        ax.scatter([center[0]], [center[1]], [center[2]], color=color, s=24, label=label)
+
+    def _save_visualization(
+        self,
+        row: dict[str, float | int],
+        trajectory: np.ndarray,
+        start: np.ndarray,
+        goal: np.ndarray,
+        obstacles: list[dict[str, Any]],
+    ) -> None:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        save_path = self.visualization_dir / f"eval_seed_{int(row['seed'])}_step_{int(row['timesteps'])}.png"
+        fig = plt.figure(figsize=(10, 7))
+        ax = fig.add_subplot(1, 1, 1, projection="3d")
+
+        ax.plot(trajectory[:, 0], trajectory[:, 1], trajectory[:, 2], color="tab:blue", linewidth=2.0, label="trajectory")
+        ax.scatter([start[0]], [start[1]], [start[2]], color="tab:green", marker="o", s=70, label="start")
+        ax.scatter([goal[0]], [goal[1]], [goal[2]], color="tab:orange", marker="*", s=130, label="goal")
+        ax.scatter(
+            [trajectory[-1, 0]],
+            [trajectory[-1, 1]],
+            [trajectory[-1, 2]],
+            color="black",
+            marker="x",
+            s=70,
+            label="final",
+        )
+
+        axis_points = [trajectory.min(axis=0), trajectory.max(axis=0), start, goal]
+        used_labels: set[str] = set()
+        for obstacle in obstacles:
+            center = obstacle["center"]
+            color = "tab:red" if obstacle["kind"] == "static" else "tab:purple"
+            label_key = f"{obstacle['kind']} {obstacle['type']}"
+            label = None if label_key in used_labels else label_key
+            used_labels.add(label_key)
+            if obstacle["type"] == "sphere":
+                radius = float(obstacle["radius"])
+                self._plot_sphere(ax, center, radius, color=color, label=label)
+                axis_points.extend([center - radius, center + radius])
+            elif obstacle["type"] == "box":
+                half_extents = obstacle["half_extents"]
+                self._plot_box(ax, center, half_extents, color=color, label=label)
+                axis_points.extend([center - half_extents, center + half_extents])
+
+        self._set_equal_3d_axes(ax, axis_points)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_zlabel("z")
+        ax.view_init(elev=24.0, azim=-58.0)
+        title = (
+            f"seed={int(row['seed'])} | reward={float(row['reward']):.2f} | length={int(row['length'])} | "
+            f"success={int(row['success'])} collision={int(row['collision'])} timeout={int(row['timeout'])} | "
+            f"distance={float(row['distance_to_goal']):.3f}"
+        )
+        ax.set_title(title, fontsize=10)
+        ax.legend(loc="upper left", fontsize=8)
+        fig.tight_layout()
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    def _run_episode(self, seed: int) -> tuple[dict[str, float | int], dict[str, Any]]:
+        observation, _ = self.eval_env.reset(seed=seed)
+        start = self.eval_env.dynamics.p.copy()
+        goal = self.eval_env.goal.copy()
+        obstacles = self._extract_obstacles(self.eval_env)
+        trajectory = [start.copy()]
+        total_reward = 0.0
+        length = 0
+        info: dict[str, Any] = {}
+        terminated = False
+        truncated = False
+
+        while not (terminated or truncated):
+            action, _ = self.model.predict(observation, deterministic=self.deterministic)
+            observation, reward, terminated, truncated, info = self.eval_env.step(action)
+            total_reward += float(reward)
+            length += 1
+            trajectory.append(self.eval_env.dynamics.p.copy())
+
+        row = {
+            "timesteps": int(self.num_timesteps),
+            "seed": int(seed),
+            "reward": float(total_reward),
+            "length": int(length),
+            "success": int(bool(info.get("success", False))),
+            "collision": int(bool(info.get("collision", False))),
+            "timeout": int(bool(info.get("truncated", False))),
+            "distance_to_goal": float(info.get("distance_to_goal", np.nan)),
+        }
+        visualization_data = {
+            "trajectory": np.asarray(trajectory, dtype=float),
+            "start": start,
+            "goal": goal,
+            "obstacles": obstacles,
+        }
+        return row, visualization_data
+
+    def _write_csv_rows(self, rows: list[dict[str, float | int]]) -> None:
+        with self.csv_path.open("a", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=self.CSV_FIELDS)
+            writer.writerows(rows)
+
+    def _write_tensorboard(self, rows: list[dict[str, float | int]]) -> None:
+        if self.writer is None:
+            return
+
+        rewards = [float(row["reward"]) for row in rows]
+        lengths = [float(row["length"]) for row in rows]
+        successes = [float(row["success"]) for row in rows]
+        collisions = [float(row["collision"]) for row in rows]
+        timeouts = [float(row["timeout"]) for row in rows]
+        distances = [float(row["distance_to_goal"]) for row in rows]
+
+        self.writer.add_scalar("eval/mean_reward", float(np.mean(rewards)), self.num_timesteps)
+        self.writer.add_scalar("eval/std_reward", float(np.std(rewards)), self.num_timesteps)
+        self.writer.add_scalar("eval/mean_length", float(np.mean(lengths)), self.num_timesteps)
+        self.writer.add_scalar("eval/success_rate", float(np.mean(successes)), self.num_timesteps)
+        self.writer.add_scalar("eval/collision_rate", float(np.mean(collisions)), self.num_timesteps)
+        self.writer.add_scalar("eval/timeout_rate", float(np.mean(timeouts)), self.num_timesteps)
+        self.writer.add_scalar("eval/mean_distance_to_goal", float(np.mean(distances)), self.num_timesteps)
+        self.writer.flush()
+
+    def _maybe_save_best_eval(self, mean_reward: float) -> None:
+        if mean_reward <= self.best_mean_reward:
+            return
+
+        self.best_mean_reward = float(mean_reward)
+        save_checkpoint(
+            model=self.model,
+            model_path=self.best_eval_model_path,
+            extra={"best_eval_mean_reward": self.best_mean_reward},
+        )
+        if self.verbose > 0:
+            print(
+                f"[best_eval_model] timesteps={self.num_timesteps}, "
+                f"mean_reward={self.best_mean_reward:.3f}"
+            )
+
+    def _evaluate(self) -> None:
+        actor_was_training = bool(getattr(self.model.actor, "training", False))
+        critic_was_training = bool(getattr(self.model.critic, "training", False))
+        self.model.actor.train(False)
+        self.model.critic.train(False)
+        try:
+            episode_results = [self._run_episode(seed) for seed in self.eval_seeds]
+        finally:
+            self.model.actor.train(actor_was_training)
+            self.model.critic.train(critic_was_training)
+
+        rows = [row for row, _ in episode_results]
+        if self.save_visualizations:
+            for row, visualization_data in episode_results:
+                self._save_visualization(
+                    row=row,
+                    trajectory=visualization_data["trajectory"],
+                    start=visualization_data["start"],
+                    goal=visualization_data["goal"],
+                    obstacles=visualization_data["obstacles"],
+                )
+
+        rewards = [float(row["reward"]) for row in rows]
+        lengths = [float(row["length"]) for row in rows]
+        successes = [float(row["success"]) for row in rows]
+        collisions = [float(row["collision"]) for row in rows]
+        timeouts = [float(row["timeout"]) for row in rows]
+        distances = [float(row["distance_to_goal"]) for row in rows]
+        mean_reward = float(np.mean(rewards))
+
+        self._write_csv_rows(rows)
+        self._write_tensorboard(rows)
+        self._maybe_save_best_eval(mean_reward)
+
+        if self.verbose > 0:
+            print(
+                f"[eval] timesteps={self.num_timesteps}, "
+                f"reward={mean_reward:.3f}, "
+                f"length={np.mean(lengths):.1f}, "
+                f"success={np.mean(successes):.2f}, "
+                f"collision={np.mean(collisions):.2f}, "
+                f"timeout={np.mean(timeouts):.2f}, "
+                f"distance={np.mean(distances):.3f}"
+            )
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps > 0 and self.num_timesteps % self.eval_freq == 0:
+            self._evaluate()
+        return True
+
+    def _on_training_end(self) -> None:
+        self.eval_env.close()
+        if self.writer is not None:
+            self.writer.flush()
+            self.writer.close()
+
+
+def train(
+    total_timesteps: int | None = None,
+    output_root: str | None = None,
+    save_freq: int | None = None,
+    resume_from: str | None = None,
+    config: SACExperimentConfig = EXPERIMENT_CONFIG,
+) -> dict[str, str]:
+    """Run training and return artifact paths."""
+    total_timesteps = config.total_timesteps if total_timesteps is None else total_timesteps
+    output_root = config.output_root if output_root is None else output_root
+    save_freq = config.save_freq if save_freq is None else save_freq
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(output_root) / timestamp
     tensorboard_dir = run_dir / "tensorboard"
 
-    env = build_env()
-    model = build_model(env, tensorboard_log=str(tensorboard_dir))
+    env = build_env(config=config)
+    eval_env = build_env(config=config)
+    model = build_model(env, config=config, tensorboard_log=str(tensorboard_dir))
     if resume_from:
         model = load_checkpoint(model, resume_from)
 
     checkpoint_callback = CheckpointAndBestCallback(run_dir=run_dir, save_freq=save_freq, verbose=1)
     tensorboard_callback = TensorboardRewardCallback(log_dir=tensorboard_dir)
-    callback = CallbackList([checkpoint_callback, tensorboard_callback])
+    eval_callback = FixedSeedEvalCallback(
+        eval_env=eval_env,
+        run_dir=run_dir,
+        log_dir=tensorboard_dir,
+        eval_freq=config.eval_freq,
+        eval_seeds=config.eval_seeds,
+        deterministic=config.eval_deterministic,
+        save_visualizations=True,
+        verbose=1,
+    )
+    callback = CallbackList([checkpoint_callback, tensorboard_callback, eval_callback])
 
     model.learn(total_timesteps=total_timesteps, callback=callback)
 
@@ -382,7 +670,10 @@ def train(
     save_checkpoint(
         model=model,
         model_path=final_model_path,
-        extra={"best_episode_reward": checkpoint_callback.best_episode_reward},
+        extra={
+            "best_episode_reward": checkpoint_callback.best_episode_reward,
+            "best_eval_mean_reward": eval_callback.best_mean_reward,
+        },
     )
     env.close()
 
@@ -390,6 +681,8 @@ def train(
         "run_dir": str(run_dir),
         "checkpoint": str(checkpoint_callback.latest_checkpoint_path),
         "best_model": str(checkpoint_callback.best_model_path),
+        "best_eval_model": str(eval_callback.best_eval_model_path),
+        "eval_csv": str(eval_callback.csv_path),
         "final_model": str(final_model_path),
         "tensorboard_dir": str(tensorboard_dir),
     }
@@ -401,5 +694,7 @@ if __name__ == "__main__":
     print(f"run_dir: {outputs['run_dir']}")
     print(f"checkpoint: {outputs['checkpoint']}")
     print(f"best_model: {outputs['best_model']}")
+    print(f"best_eval_model: {outputs['best_eval_model']}")
+    print(f"eval_csv: {outputs['eval_csv']}")
     print(f"final_model: {outputs['final_model']}")
     print(f"tensorboard_dir: {outputs['tensorboard_dir']}")
