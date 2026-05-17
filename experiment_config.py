@@ -1,5 +1,9 @@
 """Centralized experiment parameters for SAC training."""
 
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -45,6 +49,17 @@ class SACExperimentConfig:
     timeout_penalty: float = 50.0
     success_bonus: float = 300.0
     collision_margin: float = 0.0
+    action_guidance_enabled: bool = True
+    action_guidance_radius: float = 1.0
+    action_guidance_initial_weight: float = 0.7
+    action_guidance_decay_steps: int = 500_000
+    workspace_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (-0.5, -2.5, -1.2),
+        (8.5, 2.0, 1.2),
+    )
+    boundary_influence_distance: float = 0.6
+    boundary_potential_weight: float = 0.3
+    boundary_distance_epsilon: float = 1e-3
 
     # DMP
     dmp_dims: int = 3
@@ -185,6 +200,14 @@ class SACExperimentConfig:
             timeout_penalty=self.timeout_penalty,
             success_bonus=self.success_bonus,
             collision_margin=self.collision_margin,
+            action_guidance_enabled=self.action_guidance_enabled,
+            action_guidance_radius=self.action_guidance_radius,
+            action_guidance_initial_weight=self.action_guidance_initial_weight,
+            action_guidance_decay_steps=self.action_guidance_decay_steps,
+            workspace_bounds=self.workspace_bounds,
+            boundary_influence_distance=self.boundary_influence_distance,
+            boundary_potential_weight=self.boundary_potential_weight,
+            boundary_distance_epsilon=self.boundary_distance_epsilon,
         )
 
     def build_fixed_box(self) -> AxisAlignedBoxObstacle:

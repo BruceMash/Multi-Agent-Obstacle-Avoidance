@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Experiment artifacts
+artifacts/
+artifacts/**/tensorboard/
+artifacts/**/visualizations/
+artifacts/**/manual_eval/visualizations/

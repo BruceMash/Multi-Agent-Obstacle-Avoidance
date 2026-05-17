@@ -25,12 +25,17 @@ class _PolicyModeShim:
         return None
 
 
-def build_env(config: SACExperimentConfig = EXPERIMENT_CONFIG) -> SingleAgentDMPEnv:
+def build_env(
+    config: SACExperimentConfig = EXPERIMENT_CONFIG,
+    action_guidance_enabled: bool | None = False,
+) -> SingleAgentDMPEnv:
     """Build the training environment from a centralized config."""
     dynamics_config = config.build_dynamics_config()
     sensor_config = config.build_sensor_config()
     dmp_config = config.build_dmp_config()
     env_config = config.build_env_config()
+    if action_guidance_enabled is not None:
+        env_config.action_guidance_enabled = bool(action_guidance_enabled)
     fixed_box = config.build_fixed_box()
     start_goal_generator = config.build_start_goal_generator()
     static_obstacle_generator = config.build_static_obstacle_generator(fixed_box)
@@ -221,12 +226,15 @@ class TensorboardRewardCallback(BaseCallback):
         if isinstance(infos, list) and infos:
             step_reward_values: list[float] = []
             obstacle_penalty_values: list[float] = []
+            boundary_penalty_values: list[float] = []
             step_penalty_values: list[float] = []
             timeout_penalty_values: list[float] = []
             distance_values: list[float] = []
+            boundary_distance_values: list[float] = []
             success_values: list[float] = []
             collision_values: list[float] = []
             timeout_values: list[float] = []
+            action_guidance_values: list[float] = []
             episode_reward_values: list[float] = []
 
             for info in infos:
@@ -234,18 +242,24 @@ class TensorboardRewardCallback(BaseCallback):
                     step_reward_values.append(float(info["reward_step_reward"]))
                 if "reward_obstacle_potential_penalty" in info:
                     obstacle_penalty_values.append(float(info["reward_obstacle_potential_penalty"]))
+                if "reward_boundary_potential_penalty" in info:
+                    boundary_penalty_values.append(float(info["reward_boundary_potential_penalty"]))
                 if "reward_step_penalty" in info:
                     step_penalty_values.append(float(info["reward_step_penalty"]))
                 if "reward_timeout_penalty" in info:
                     timeout_penalty_values.append(float(info["reward_timeout_penalty"]))
                 if "distance_to_goal" in info:
                     distance_values.append(float(info["distance_to_goal"]))
+                if "min_boundary_distance" in info:
+                    boundary_distance_values.append(float(info["min_boundary_distance"]))
                 if "success" in info:
                     success_values.append(float(info["success"]))
                 if "collision" in info:
                     collision_values.append(float(info["collision"]))
                 if "truncated" in info:
                     timeout_values.append(float(info["truncated"]))
+                if "action_guidance_weight" in info:
+                    action_guidance_values.append(float(info["action_guidance_weight"]))
                 episode_info = info.get("episode")
                 if episode_info is not None and "r" in episode_info:
                     episode_reward_values.append(float(episode_info["r"]))
@@ -270,6 +284,12 @@ class TensorboardRewardCallback(BaseCallback):
                     sum(obstacle_penalty_values) / len(obstacle_penalty_values),
                     self.num_timesteps,
                 )
+            if boundary_penalty_values:
+                self.writer.add_scalar(
+                    "step/reward_boundary_potential_penalty",
+                    sum(boundary_penalty_values) / len(boundary_penalty_values),
+                    self.num_timesteps,
+                )
             if step_penalty_values:
                 self.writer.add_scalar(
                     "step/reward_step_penalty",
@@ -288,12 +308,24 @@ class TensorboardRewardCallback(BaseCallback):
                     sum(distance_values) / len(distance_values),
                     self.num_timesteps,
                 )
+            if boundary_distance_values:
+                self.writer.add_scalar(
+                    "step/min_boundary_distance",
+                    sum(boundary_distance_values) / len(boundary_distance_values),
+                    self.num_timesteps,
+                )
             if success_values:
                 self.writer.add_scalar("step/success_rate", sum(success_values) / len(success_values), self.num_timesteps)
             if collision_values:
                 self.writer.add_scalar("step/collision_rate", sum(collision_values) / len(collision_values), self.num_timesteps)
             if timeout_values:
                 self.writer.add_scalar("step/timeout_rate", sum(timeout_values) / len(timeout_values), self.num_timesteps)
+            if action_guidance_values:
+                self.writer.add_scalar(
+                    "step/action_guidance_weight",
+                    sum(action_guidance_values) / len(action_guidance_values),
+                    self.num_timesteps,
+                )
             for episode_reward in episode_reward_values:
                 self.writer.add_scalar("episode/reward", episode_reward, self.num_timesteps)
 
@@ -384,13 +416,24 @@ class FixedSeedEvalCallback(BaseCallback):
         stacked = np.vstack(points)
         lower = stacked.min(axis=0)
         upper = stacked.max(axis=0)
-        center = 0.5 * (lower + upper)
-        radius = max(0.5, 0.5 * float(np.max(upper - lower)))
-        ax.set_xlim(center[0] - radius, center[0] + radius)
-        ax.set_ylim(center[1] - radius, center[1] + radius)
-        ax.set_zlim(center[2] - radius, center[2] + radius)
+        span = upper - lower
+        min_span = 0.5
+        for axis_index in range(3):
+            if span[axis_index] < min_span:
+                center = 0.5 * (lower[axis_index] + upper[axis_index])
+                lower[axis_index] = center - 0.5 * min_span
+                upper[axis_index] = center + 0.5 * min_span
+                span[axis_index] = min_span
+
+        padding = 0.08 * span
+        lower = lower - padding
+        upper = upper + padding
+        span = upper - lower
+        ax.set_xlim(lower[0], upper[0])
+        ax.set_ylim(lower[1], upper[1])
+        ax.set_zlim(lower[2], upper[2])
         if hasattr(ax, "set_box_aspect"):
-            ax.set_box_aspect([1.0, 1.0, 1.0])
+            ax.set_box_aspect(span)
 
     @staticmethod
     def _plot_sphere(ax: Any, center: np.ndarray, radius: float, color: str, label: str | None) -> None:
@@ -481,7 +524,7 @@ class FixedSeedEvalCallback(BaseCallback):
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_zlabel("z")
-        ax.view_init(elev=24.0, azim=-58.0)
+        ax.view_init(elev=32.0, azim=-58.0)
         title = (
             f"seed={int(row['seed'])} | reward={float(row['reward']):.2f} | length={int(row['length'])} | "
             f"success={int(row['success'])} collision={int(row['collision'])} timeout={int(row['timeout'])} | "
@@ -644,8 +687,8 @@ def train(
     run_dir = Path(output_root) / timestamp
     tensorboard_dir = run_dir / "tensorboard"
 
-    env = build_env(config=config)
-    eval_env = build_env(config=config)
+    env = build_env(config=config, action_guidance_enabled=config.action_guidance_enabled)
+    eval_env = build_env(config=config, action_guidance_enabled=False)
     model = build_model(env, config=config, tensorboard_log=str(tensorboard_dir))
     if resume_from:
         model = load_checkpoint(model, resume_from)

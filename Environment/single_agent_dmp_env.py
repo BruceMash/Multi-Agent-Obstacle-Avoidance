@@ -57,6 +57,17 @@ class EnvConfig:
     timeout_penalty: float = 50.0
     success_bonus: float = 300.0
     collision_margin: float = 0.0
+    action_guidance_enabled: bool = False
+    action_guidance_radius: float = 1.0
+    action_guidance_initial_weight: float = 0.7
+    action_guidance_decay_steps: int = 500000
+    workspace_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (-0.5, -2.5, -1.2),
+        (8.5, 2.0, 1.2),
+    )
+    boundary_influence_distance: float = 0.6
+    boundary_potential_weight: float = 0.3
+    boundary_distance_epsilon: float = 1e-3
 
 
 class SingleAgentDMPEnv(gym.Env):
@@ -124,6 +135,7 @@ class SingleAgentDMPEnv(gym.Env):
         self.dynamic_obstacles = copy.deepcopy(self._initial_dynamic_obstacles)
         self.goal = self._default_goal.copy()
         self.steps = 0
+        self.action_guidance_step = 0
         self.latest_sensor_packet = None
         self.latest_observation = None
         self.latest_controller_info = {}
@@ -364,8 +376,12 @@ class SingleAgentDMPEnv(gym.Env):
             next_state=self.dynamics.state.copy(),
             step_reward=0.0,
             obstacle_potential_penalty=0.0,
+            boundary_potential_penalty=0.0,
             step_penalty=float(self.env_config.step_penalty),
             timeout_penalty=0.0,
+            raw_action=np.zeros(self.action_dim, dtype=np.float32),
+            guided_action=np.zeros(self.action_dim, dtype=np.float32),
+            action_guidance_weight=0.0,
         )
         return observation, info
 
@@ -392,6 +408,8 @@ class SingleAgentDMPEnv(gym.Env):
 
         # 记录执行前到目标的距离，用于后面计算推进奖励
         previous_distance = float(np.linalg.norm(self.goal - self.dynamics.p))
+        raw_action = action.copy()
+        action, action_guidance_weight = self._apply_action_guidance(action, previous_distance)
 
         # 让 DMP 控制器根据当前状态和 RL 动作计算期望加速度
         acceleration, controller_info = self.dmp.compute_acceleration(
@@ -418,6 +436,7 @@ class SingleAgentDMPEnv(gym.Env):
 
         # 更新步数和最新传感器观测
         self.steps += 1
+        self.action_guidance_step += 1
         self.latest_sensor_packet = self.sensor.sense(
             self.dynamics.p,
             self.dynamics.v,
@@ -436,10 +455,11 @@ class SingleAgentDMPEnv(gym.Env):
         # 2) step_reward：步进奖励（朝目标前进）
         # 3) step_penalty：固定单步惩罚
         obstacle_potential_penalty = self._compute_obstacle_potential_penalty(applied_acceleration)
+        boundary_potential_penalty = self._compute_boundary_potential_penalty()
         step_reward = self.env_config.step_reward_weight * progress
         step_penalty = self.env_config.step_penalty
 
-        reward = step_reward - obstacle_potential_penalty - step_penalty
+        reward = step_reward - obstacle_potential_penalty - boundary_potential_penalty - step_penalty
 
         # 判断本步结束类型
         # success / collision 算 terminated
@@ -467,10 +487,40 @@ class SingleAgentDMPEnv(gym.Env):
             next_state=next_state,
             step_reward=step_reward,
             obstacle_potential_penalty=obstacle_potential_penalty,
+            boundary_potential_penalty=boundary_potential_penalty,
             step_penalty=step_penalty,
             timeout_penalty=timeout_penalty,
+            raw_action=raw_action,
+            guided_action=action,
+            action_guidance_weight=action_guidance_weight,
         )
         return observation, float(reward), terminated, truncated, info
+
+    def _apply_action_guidance(self, action: np.ndarray, distance_to_goal: float) -> tuple[np.ndarray, float]:
+        """
+        Mix the policy action toward the zero DMP action near the goal during early training.
+        """
+        if not self.env_config.action_guidance_enabled:
+            return action, 0.0
+
+        radius = float(self.env_config.action_guidance_radius)
+        if radius <= 0.0 or distance_to_goal >= radius:
+            return action, 0.0
+
+        decay_steps = max(1, int(self.env_config.action_guidance_decay_steps))
+        training_gate = max(0.0, 1.0 - float(self.action_guidance_step) / float(decay_steps))
+        if training_gate <= 0.0:
+            return action, 0.0
+
+        distance_gate = 1.0 - max(0.0, distance_to_goal) / radius
+        initial_weight = float(np.clip(self.env_config.action_guidance_initial_weight, 0.0, 1.0))
+        guidance_weight = float(np.clip(initial_weight * distance_gate * training_gate, 0.0, 1.0))
+        if guidance_weight <= 0.0:
+            return action, 0.0
+
+        guided_action = (1.0 - guidance_weight) * action
+        guided_action = np.clip(guided_action, self.action_space.low, self.action_space.high)
+        return guided_action.astype(np.float32, copy=False), guidance_weight
 
     def _compute_obstacle_potential_penalty(self, applied_acceleration: np.ndarray) -> float:
         """
@@ -520,6 +570,37 @@ class SingleAgentDMPEnv(gym.Env):
 
         return float(self.env_config.obstacle_potential_weight * penalty_sum)
 
+    def _compute_min_boundary_distance(self) -> float:
+        bounds = np.asarray(self.env_config.workspace_bounds, dtype=float)
+        if bounds.shape != (2, self.state_dim):
+            raise ValueError(f"workspace_bounds must have shape (2, {self.state_dim})")
+
+        lower, upper = bounds
+        distances = np.concatenate([self.dynamics.p - lower, upper - self.dynamics.p])
+        return float(np.min(distances))
+
+    def _compute_boundary_potential_penalty(self) -> float:
+        bounds = np.asarray(self.env_config.workspace_bounds, dtype=float)
+        if bounds.shape != (2, self.state_dim):
+            raise ValueError(f"workspace_bounds must have shape (2, {self.state_dim})")
+
+        influence_distance = float(self.env_config.boundary_influence_distance)
+        if influence_distance <= 0.0:
+            return 0.0
+
+        lower, upper = bounds
+        signed_distances = np.concatenate([self.dynamics.p - lower, upper - self.dynamics.p])
+        epsilon = max(float(self.env_config.boundary_distance_epsilon), 1e-8)
+
+        penalty_sum = 0.0
+        for signed_distance in signed_distances:
+            if signed_distance >= influence_distance:
+                continue
+            d = max(float(signed_distance), epsilon)
+            penalty_sum += (1.0 / d - 1.0 / influence_distance) ** 2
+
+        return float(self.env_config.boundary_potential_weight * penalty_sum)
+
     def _build_info(
         self,
         success,
@@ -530,8 +611,12 @@ class SingleAgentDMPEnv(gym.Env):
         next_state,
         step_reward,
         obstacle_potential_penalty,
+        boundary_potential_penalty,
         step_penalty,
         timeout_penalty,
+        raw_action,
+        guided_action,
+        action_guidance_weight,
     ):
         """
         组装 info 字典。
@@ -546,6 +631,7 @@ class SingleAgentDMPEnv(gym.Env):
             "collision": bool(collision),
             "truncated": bool(truncated),
             "distance_to_goal": float(np.linalg.norm(self.goal - self.dynamics.p)),
+            "min_boundary_distance": self._compute_min_boundary_distance(),
             "min_clearance": float(self.latest_sensor_packet.min_clearance),
             "phase": float(self.latest_controller_info.get("phase", self.dmp.phase)),
             "tau": float(self.latest_controller_info.get("tau", self.dmp.config.tau)),
@@ -553,8 +639,12 @@ class SingleAgentDMPEnv(gym.Env):
             "commanded_acceleration": np.asarray(commanded_acceleration, dtype=np.float32).copy(),
             "applied_acceleration": np.asarray(applied_acceleration, dtype=np.float32).copy(),
             "next_state": np.asarray(next_state, dtype=np.float32).copy(),
+            "raw_action": np.asarray(raw_action, dtype=np.float32).copy(),
+            "guided_action": np.asarray(guided_action, dtype=np.float32).copy(),
+            "action_guidance_weight": float(action_guidance_weight),
             "reward_step_reward": float(step_reward),
             "reward_obstacle_potential_penalty": float(obstacle_potential_penalty),
+            "reward_boundary_potential_penalty": float(boundary_potential_penalty),
             "reward_step_penalty": float(step_penalty),
             "reward_timeout_penalty": float(timeout_penalty),
         }
