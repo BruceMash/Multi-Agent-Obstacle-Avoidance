@@ -51,6 +51,8 @@ class EnvConfig:
     max_steps: int = 250
     goal_tolerance: float = 0.35
     obstacle_potential_weight: float = 2.0
+    obstacle_influence_distance: float = 1.5
+    obstacle_potential_penalty_max: float = 20.0
     step_reward_weight: float = 4.0
     step_penalty: float = 0.01
     collision_penalty: float = 80.0
@@ -454,8 +456,11 @@ class SingleAgentDMPEnv(gym.Env):
         # 1) obstacle_potential_penalty：障碍物方向人工势场惩罚
         # 2) step_reward：步进奖励（朝目标前进）
         # 3) step_penalty：固定单步惩罚
-        obstacle_potential_penalty = self._compute_obstacle_potential_penalty(applied_acceleration)
+
+        # 两部分势场惩罚
+        obstacle_potential_penalty = self._compute_obstacle_potential_penalty(action)
         boundary_potential_penalty = self._compute_boundary_potential_penalty()
+
         step_reward = self.env_config.step_reward_weight * progress
         step_penalty = self.env_config.step_penalty
 
@@ -474,6 +479,7 @@ class SingleAgentDMPEnv(gym.Env):
             reward -= self.env_config.collision_penalty
         elif success:
             reward += self.env_config.success_bonus
+
         timeout_penalty = float(self.env_config.timeout_penalty) if truncated else 0.0
         reward -= timeout_penalty
 
@@ -522,32 +528,38 @@ class SingleAgentDMPEnv(gym.Env):
         guided_action = np.clip(guided_action, self.action_space.low, self.action_space.high)
         return guided_action.astype(np.float32, copy=False), guidance_weight
 
-    def _compute_obstacle_potential_penalty(self, applied_acceleration: np.ndarray) -> float:
+    def _compute_obstacle_potential_penalty(self, policy_action: np.ndarray) -> float:
         """
         计算“障碍物方向的人工势场惩罚”。
 
         设计要点：
-        1. 只在“动作方向朝向障碍物”时产生惩罚（方向门控）
+        1. 只在“策略动作方向朝向障碍物”时产生惩罚（方向门控）
         2. 距障碍物越近，惩罚越大（势场强度随距离增大而衰减）
         3. 多障碍物惩罚累加
         """
-        # 当动作幅值接近 0 时，不施加方向惩罚，避免数值噪声导致抖动。
-        action_norm = float(np.linalg.norm(applied_acceleration))
+        # 只使用策略输出中的 forcing 分量进行方向门控，避免 DMP 基础吸引项替策略承担避障惩罚。
+        action_component = np.asarray(policy_action[: self.state_dim], dtype=float)
+        action_norm = float(np.linalg.norm(action_component))
         if action_norm < 1e-8:
             return 0.0
 
-        action_dir = applied_acceleration / action_norm
+        action_dir = action_component / action_norm
+        velocity_norm = float(np.linalg.norm(self.dynamics.v))
+        velocity_dir = self.dynamics.v / velocity_norm if velocity_norm >= 1e-8 else None
         position = self.dynamics.p
-        influence_distance = float(self.sensor.sensing_radius)
+        influence_distance = float(self.env_config.obstacle_influence_distance)
         if influence_distance <= 0.0:
             return 0.0
 
         penalty_sum = 0.0
         for obstacle in self.static_obstacles + self.dynamic_obstacles:
             # 用障碍物表面最近点构造“指向障碍物”的方向向量。
-            closest_point = obstacle.closest_point(position)
-            to_obstacle = closest_point - position
-            distance_to_surface = float(np.linalg.norm(to_obstacle))
+            closest_point = obstacle.closest_point(position)    # 获取关于障碍物的最短距离
+            to_obstacle = closest_point - position  # 计算相对方向
+            distance_to_surface = float(np.linalg.norm(to_obstacle))    # 计算到障碍物最近处的距离，用于索引
+            to_obstacle_norm = float(np.linalg.norm(to_obstacle))   # 归一化值
+            if to_obstacle_norm < 1e-8:
+                continue
 
             # 超出势场影响半径则不惩罚。
             if distance_to_surface >= influence_distance:
@@ -557,18 +569,21 @@ class SingleAgentDMPEnv(gym.Env):
             d = max(distance_to_surface, 1e-3)
 
             # 势场基础强度：常见人工势场形式 (1/d - 1/d0)^2
-            # d0 取传感器感知半径，使远离障碍物时强度自然收敛到 0。
+            # d0 使用独立势场半径，使惩罚范围与传感器感知范围解耦。
             base_field = (1.0 / d - 1.0 / influence_distance) ** 2
 
-            # 方向门控：只有朝向障碍物的动作才惩罚。
-            # cos_theta > 0 表示与障碍物方向同向。
-            obstacle_dir = to_obstacle / d
-            cos_theta = float(np.dot(action_dir, obstacle_dir))
-            directional_gate = max(0.0, cos_theta)
+            # 策略动作必须指向障碍物才惩罚；速度也指向障碍物时，说明风险正在累积，惩罚增强。
+            obstacle_dir = to_obstacle / to_obstacle_norm
+            action_gate = max(0.0, float(np.dot(action_dir, obstacle_dir)))
+            if action_gate <= 0.0:
+                continue
+            velocity_gate = 0.0 if velocity_dir is None else max(0.0, float(np.dot(velocity_dir, obstacle_dir)))
+            directional_gate = action_gate * (0.5 + 0.5 * velocity_gate)
 
             penalty_sum += base_field * directional_gate
 
-        return float(self.env_config.obstacle_potential_weight * penalty_sum)
+        penalty = float(self.env_config.obstacle_potential_weight * penalty_sum)
+        return float(min(penalty, self.env_config.obstacle_potential_penalty_max))
 
     def _compute_min_boundary_distance(self) -> float:
         bounds = np.asarray(self.env_config.workspace_bounds, dtype=float)
