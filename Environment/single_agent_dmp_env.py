@@ -69,6 +69,7 @@ class EnvConfig:
     )
     boundary_influence_distance: float = 0.6
     boundary_potential_weight: float = 0.3
+    boundary_potential_penalty_max: float = 20.0
     boundary_distance_epsilon: float = 1e-3
 
 
@@ -459,7 +460,7 @@ class SingleAgentDMPEnv(gym.Env):
 
         # 两部分势场惩罚
         obstacle_potential_penalty = self._compute_obstacle_potential_penalty(raw_action)
-        boundary_potential_penalty = self._compute_boundary_potential_penalty()
+        boundary_potential_penalty = self._compute_boundary_potential_penalty(raw_action)
 
         step_reward = self.env_config.step_reward_weight * progress
         step_penalty = self.env_config.step_penalty
@@ -538,19 +539,10 @@ class SingleAgentDMPEnv(gym.Env):
         3. 多障碍物惩罚累加
         """
         # 使用策略输出诱导的控制方向进行门控，避免 DMP 基础吸引项替策略承担避障惩罚。
-        forcing_component = np.asarray(policy_action[: self.state_dim], dtype=float)
-        goal_offset = np.asarray(policy_action[self.state_dim: 2 * self.state_dim], dtype=float)
-        goal_eff = self.goal + goal_offset
-        forcing_gate = np.tanh(np.abs(goal_eff - self.dynamics.p))
-        action_component = (
-            self.dmp.config.K_alpha * self.dmp.config.K_beta * goal_offset
-            + forcing_component * forcing_gate
-        )
-        action_norm = float(np.linalg.norm(action_component))
-        if action_norm < 1e-8:
+        action_dir = self._compute_policy_action_direction(policy_action)
+        if action_dir is None:
             return 0.0
 
-        action_dir = action_component / action_norm
         velocity_norm = float(np.linalg.norm(self.dynamics.v))
         velocity_dir = self.dynamics.v / velocity_norm if velocity_norm >= 1e-8 else None
         position = self.dynamics.p
@@ -600,27 +592,61 @@ class SingleAgentDMPEnv(gym.Env):
         distances = np.concatenate([self.dynamics.p - lower, upper - self.dynamics.p])
         return float(np.min(distances))
 
-    def _compute_boundary_potential_penalty(self) -> float:
+    def _compute_policy_action_direction(self, policy_action: np.ndarray) -> np.ndarray | None:
+        forcing_component = np.asarray(policy_action[: self.state_dim], dtype=float)
+        goal_offset = np.asarray(policy_action[self.state_dim: 2 * self.state_dim], dtype=float)
+        goal_eff = self.goal + goal_offset
+        forcing_gate = np.tanh(np.abs(goal_eff - self.dynamics.p))
+        action_component = (
+            self.dmp.config.K_alpha * self.dmp.config.K_beta * goal_offset
+            + forcing_component * forcing_gate
+        )
+        action_norm = float(np.linalg.norm(action_component))
+        if action_norm < 1e-8:
+            return None
+        return action_component / action_norm
+
+    def _compute_boundary_potential_penalty(self, policy_action: np.ndarray) -> float:
         bounds = np.asarray(self.env_config.workspace_bounds, dtype=float)
         if bounds.shape != (2, self.state_dim):
             raise ValueError(f"workspace_bounds must have shape (2, {self.state_dim})")
+
+        action_dir = self._compute_policy_action_direction(policy_action)
+        if action_dir is None:
+            return 0.0
+        velocity_norm = float(np.linalg.norm(self.dynamics.v))
+        velocity_dir = self.dynamics.v / velocity_norm if velocity_norm >= 1e-8 else None
 
         influence_distance = float(self.env_config.boundary_influence_distance)
         if influence_distance <= 0.0:
             return 0.0
 
         lower, upper = bounds
-        signed_distances = np.concatenate([self.dynamics.p - lower, upper - self.dynamics.p])
         epsilon = max(float(self.env_config.boundary_distance_epsilon), 1e-8)
 
         penalty_sum = 0.0
-        for signed_distance in signed_distances:
-            if signed_distance >= influence_distance:
-                continue
-            d = max(float(signed_distance), epsilon)
-            penalty_sum += (1.0 / d - 1.0 / influence_distance) ** 2
+        for axis in range(self.state_dim):
+            boundary_cases = (
+                (float(self.dynamics.p[axis] - lower[axis]), -1.0),
+                (float(upper[axis] - self.dynamics.p[axis]), 1.0),
+            )
+            for signed_distance, direction_sign in boundary_cases:
+                if signed_distance >= influence_distance:
+                    continue
+                boundary_dir = np.zeros(self.state_dim, dtype=float)
+                boundary_dir[axis] = direction_sign
+                action_gate = max(0.0, float(np.dot(action_dir, boundary_dir)))
+                if action_gate <= 0.0:
+                    continue
 
-        return float(self.env_config.boundary_potential_weight * penalty_sum)
+                d = max(signed_distance, epsilon)
+                base_field = (1.0 / d - 1.0 / influence_distance) ** 2
+                velocity_gate = 0.0 if velocity_dir is None else max(0.0, float(np.dot(velocity_dir, boundary_dir)))
+                directional_gate = action_gate * (0.5 + 0.5 * velocity_gate)
+                penalty_sum += base_field * directional_gate
+
+        penalty = float(self.env_config.boundary_potential_weight * penalty_sum)
+        return float(min(penalty, self.env_config.boundary_potential_penalty_max))
 
     def _build_info(
         self,

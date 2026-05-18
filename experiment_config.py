@@ -61,6 +61,7 @@ class SACExperimentConfig:
     )
     boundary_influence_distance: float = 0.6
     boundary_potential_weight: float = 0.3
+    boundary_potential_penalty_max: float = 20.0
     boundary_distance_epsilon: float = 1e-3
 
     # DMP
@@ -211,6 +212,7 @@ class SACExperimentConfig:
             workspace_bounds=self.workspace_bounds,
             boundary_influence_distance=self.boundary_influence_distance,
             boundary_potential_weight=self.boundary_potential_weight,
+            boundary_potential_penalty_max=self.boundary_potential_penalty_max,
             boundary_distance_epsilon=self.boundary_distance_epsilon,
         )
 
