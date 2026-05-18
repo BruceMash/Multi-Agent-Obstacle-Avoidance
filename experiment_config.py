@@ -27,7 +27,7 @@ class SACExperimentConfig:
     sensor_elevation_bins: int = 7
     randomize_start_goal: bool = True
     default_start: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    default_goal: tuple[float, float, float] = (8.0, 0.0, 0.0)
+    default_goal: tuple[float, float, float] = (8.0, 8.0, 8.0)
     start_position_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
         (0.0, -1.0, -0.4),
         (0.8, 1.0, 0.4),
@@ -43,10 +43,12 @@ class SACExperimentConfig:
     max_steps: int = 220    # 单个Episode的最大步数
     goal_tolerance: float = 0.3     # 
     obstacle_potential_weight: float = 1.5  # 障碍物势场权重
+    obstacle_influence_distance: float = 1.5    # 障碍物势场的计算范围
+    obstacle_potential_penalty_max: float = 20.0    # 能够给予的最大势场惩罚
     step_reward_weight: float = 8.0 # 步进奖励权重
     step_penalty: float = 0.01  # 单步惩罚
-    collision_penalty: float = 80.0
-    timeout_penalty: float = 50.0
+    collision_penalty: float = 20.0
+    timeout_penalty: float = 20.0
     success_bonus: float = 300.0
     collision_margin: float = 0.0
     action_guidance_enabled: bool = True
@@ -63,10 +65,10 @@ class SACExperimentConfig:
 
     # DMP
     dmp_dims: int = 3
-    k_alpha: float = 20.0
-    k_beta: float = 5.0
+    k_alpha: float = 3.0
+    k_beta: float = 0.8
     alpha_s: float = 4.0
-    tau: float = 1.2
+    tau: float = 2.5
     forcing_term_max: float = 10.0
     forcing_term_min: float = -10.0
     goal_offset_max: float = 1.0
@@ -194,6 +196,8 @@ class SACExperimentConfig:
             max_steps=self.max_steps,
             goal_tolerance=self.goal_tolerance,
             obstacle_potential_weight=self.obstacle_potential_weight,
+            obstacle_influence_distance=self.obstacle_influence_distance,
+            obstacle_potential_penalty_max=self.obstacle_potential_penalty_max,
             step_reward_weight=self.step_reward_weight,
             step_penalty=self.step_penalty,
             collision_penalty=self.collision_penalty,

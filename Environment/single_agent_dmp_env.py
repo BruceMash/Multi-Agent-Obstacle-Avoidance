@@ -458,7 +458,7 @@ class SingleAgentDMPEnv(gym.Env):
         # 3) step_penalty：固定单步惩罚
 
         # 两部分势场惩罚
-        obstacle_potential_penalty = self._compute_obstacle_potential_penalty(action)
+        obstacle_potential_penalty = self._compute_obstacle_potential_penalty(raw_action)
         boundary_potential_penalty = self._compute_boundary_potential_penalty()
 
         step_reward = self.env_config.step_reward_weight * progress
@@ -537,8 +537,15 @@ class SingleAgentDMPEnv(gym.Env):
         2. 距障碍物越近，惩罚越大（势场强度随距离增大而衰减）
         3. 多障碍物惩罚累加
         """
-        # 只使用策略输出中的 forcing 分量进行方向门控，避免 DMP 基础吸引项替策略承担避障惩罚。
-        action_component = np.asarray(policy_action[: self.state_dim], dtype=float)
+        # 使用策略输出诱导的控制方向进行门控，避免 DMP 基础吸引项替策略承担避障惩罚。
+        forcing_component = np.asarray(policy_action[: self.state_dim], dtype=float)
+        goal_offset = np.asarray(policy_action[self.state_dim: 2 * self.state_dim], dtype=float)
+        goal_eff = self.goal + goal_offset
+        forcing_gate = np.tanh(np.abs(goal_eff - self.dynamics.p))
+        action_component = (
+            self.dmp.config.K_alpha * self.dmp.config.K_beta * goal_offset
+            + forcing_component * forcing_gate
+        )
         action_norm = float(np.linalg.norm(action_component))
         if action_norm < 1e-8:
             return 0.0
@@ -554,11 +561,10 @@ class SingleAgentDMPEnv(gym.Env):
         penalty_sum = 0.0
         for obstacle in self.static_obstacles + self.dynamic_obstacles:
             # 用障碍物表面最近点构造“指向障碍物”的方向向量。
-            closest_point = obstacle.closest_point(position)    # 获取关于障碍物的最短距离
-            to_obstacle = closest_point - position  # 计算相对方向
-            distance_to_surface = float(np.linalg.norm(to_obstacle))    # 计算到障碍物最近处的距离，用于索引
-            to_obstacle_norm = float(np.linalg.norm(to_obstacle))   # 归一化值
-            if to_obstacle_norm < 1e-8:
+            closest_point = obstacle.closest_point(position)
+            to_obstacle = closest_point - position
+            distance_to_surface = float(np.linalg.norm(to_obstacle))
+            if distance_to_surface < 1e-8:
                 continue
 
             # 超出势场影响半径则不惩罚。
@@ -573,7 +579,7 @@ class SingleAgentDMPEnv(gym.Env):
             base_field = (1.0 / d - 1.0 / influence_distance) ** 2
 
             # 策略动作必须指向障碍物才惩罚；速度也指向障碍物时，说明风险正在累积，惩罚增强。
-            obstacle_dir = to_obstacle / to_obstacle_norm
+            obstacle_dir = to_obstacle / distance_to_surface
             action_gate = max(0.0, float(np.dot(action_dir, obstacle_dir)))
             if action_gate <= 0.0:
                 continue
