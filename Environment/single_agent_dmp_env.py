@@ -113,7 +113,7 @@ class SingleAgentDMPEnv(gym.Env):
         # dynamics: 负责位置速度更新
         # sensor:   负责局部感知
         # dmp:      负责把 RL 动作变成实际控制量
-        self.dynamics = PartialDynamic(dynamics_config)
+        self.dynamics = PartialDynamic(dynamics_config)  # 粒子动力学
         self.sensor = LocalObstacleSensor(**(sensor_config or {}))
         self.dmp = SecondOrderDMPController(dmp_config or DMPConfig(dt=self.dynamics.dt))
         self.env_config = env_config or EnvConfig()

@@ -42,9 +42,16 @@ class SACExperimentConfig:
     # Reward and termination
     max_steps: int = 220    # 单个Episode的最大步数
     goal_tolerance: float = 0.3     # 
+    
     obstacle_potential_weight: float = 1.5  # 障碍物势场权重
     obstacle_influence_distance: float = 1.5    # 障碍物势场的计算范围
     obstacle_potential_penalty_max: float = 20.0    # 能够给予的最大势场惩罚
+
+    boundary_influence_distance: float = 0.6
+    boundary_potential_weight: float = 0.3
+    boundary_potential_penalty_max: float = 20.0
+    boundary_distance_epsilon: float = 1e-3
+
     step_reward_weight: float = 8.0 # 步进奖励权重
     step_penalty: float = 0.01  # 单步惩罚
     collision_penalty: float = 20.0
@@ -59,10 +66,7 @@ class SACExperimentConfig:
         (-0.5, -2.5, -1.2),
         (8.5, 2.0, 1.2),
     )
-    boundary_influence_distance: float = 0.6
-    boundary_potential_weight: float = 0.3
-    boundary_potential_penalty_max: float = 20.0
-    boundary_distance_epsilon: float = 1e-3
+
 
     # DMP
     dmp_dims: int = 3
