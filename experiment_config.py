@@ -10,7 +10,7 @@ from typing import Any, Callable
 import numpy as np
 
 from Controller.dmp_rl import DMPConfig
-from Entity.obstacle_generators import DynamicSpherePositionGenerate, StaticSpherePositionGenerate
+from Entity.obstacle_generators import DynamicSpherePositionGenerate, StaticCylinderPositionGenerate, StaticSpherePositionGenerate
 from Entity.static_obstacles import AxisAlignedBoxObstacle
 from Environment.single_agent_dmp_env import EnvConfig
 
@@ -121,6 +121,14 @@ class SACExperimentConfig:
     static_obstacle_radius: float = 0.45
     static_obstacle_safety_margin: float = 0.1
     static_obstacle_num: int = 1
+    static_cylinder_center: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (1.2, -1.4, 0.0),
+        (7.0, 1.4, 0.0),
+    )
+    static_cylinder_radius: float = 0.38
+    static_cylinder_half_height: float = 0.6
+    static_cylinder_safety_margin: float = 0.1
+    static_cylinder_num: int = 0
 
     dynamic_obstacle_center: tuple[tuple[float, float, float], tuple[float, float, float]] = (
         (1.5, -1.6, -0.3),
@@ -231,17 +239,40 @@ class SACExperimentConfig:
         self, fixed_box: AxisAlignedBoxObstacle
     ) -> Callable[[np.ndarray, np.ndarray, int], list[Any]]:
         def static_obstacle_generator(start, goal, seed):
+            obstacles: list[Any] = []
+            cylinder_seed = None if seed is None else int(seed) + 10007
+            if self.static_cylinder_num > 0:
+                cylinder_center = np.asarray(self.static_cylinder_center, dtype=float).copy()
+                workspace_bottom_z = float(np.asarray(self.workspace_bounds, dtype=float)[0, 2])
+                cylinder_center_z = workspace_bottom_z + self.static_cylinder_half_height
+                cylinder_center[0, 2] = cylinder_center_z
+                cylinder_center[1, 2] = cylinder_center_z + 1e-6
+                cylinders = StaticCylinderPositionGenerate(
+                    center=cylinder_center.tolist(),
+                    radius=self.static_cylinder_radius,
+                    half_height=self.static_cylinder_half_height,
+                    safety_margin=self.static_cylinder_safety_margin,
+                    num=self.static_cylinder_num,
+                    existing_obstacles=[fixed_box],
+                    seed=cylinder_seed,
+                    protected_points=[start, goal],
+                )
+                for cylinder in cylinders:
+                    cylinder.center[2] = cylinder_center_z
+                obstacles.extend(cylinders)
+
             spheres = StaticSpherePositionGenerate(
                 center=[list(point) for point in self.static_obstacle_center],
                 radius=self.static_obstacle_radius,
                 safety_margin=self.static_obstacle_safety_margin,
                 num=self.static_obstacle_num,
-                existing_obstacles=[fixed_box],
+                existing_obstacles=[fixed_box, *obstacles],
                 seed=seed,
                 protected_points=[start, goal],
             )
-            spheres.append(fixed_box)
-            return spheres
+            obstacles.extend(spheres)
+            obstacles.append(fixed_box)
+            return obstacles
 
         return static_obstacle_generator
 

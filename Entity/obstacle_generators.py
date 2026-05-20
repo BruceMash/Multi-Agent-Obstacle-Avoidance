@@ -122,7 +122,7 @@ def StaticSpherePositionGenerate(center, radius, safety_margin, num,
             center=candidate_center,
             radius=obstacle_radius,
             safety_margin=obstacle_safety_margin,
-        )
+        ) 
         obstacles.append(obstacle)
         existing.append(obstacle)
 

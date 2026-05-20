@@ -299,11 +299,16 @@ def build_generalization_scenarios(
             description="Use many static obstacles near the nominal route to form a narrow passable corridor.",
             config=replace(
                 base_config,
-                static_obstacle_num=8,
+                static_obstacle_num=4,
                 static_obstacle_radius=0.38,
                 static_obstacle_safety_margin=0.08,
                 static_obstacle_center=((1.0, -1.15, -0.45), (8.0, 1.15, 0.45)),
-                dynamic_obstacle_num=1,
+                static_cylinder_num=3,
+                static_cylinder_radius=0.36,
+                static_cylinder_half_height=0.62,
+                static_cylinder_safety_margin=0.08,
+                static_cylinder_center=((1.0, -1.15, 0.0), (8.0, 1.15, 0.0)),
+                dynamic_obstacle_num=0,
             ),
         ),
         ScenarioSpec(
@@ -311,15 +316,20 @@ def build_generalization_scenarios(
             description="Combine dense static and dynamic obstacles around a narrow passable corridor.",
             config=replace(
                 base_config,
-                static_obstacle_num=7,
+                static_obstacle_num=3,
                 static_obstacle_radius=0.36,
                 static_obstacle_safety_margin=0.08,
                 static_obstacle_center=((1.0, -1.10, -0.45), (8.0, 1.10, 0.45)),
+                static_cylinder_num=2,
+                static_cylinder_radius=0.34,
+                static_cylinder_half_height=0.62,
+                static_cylinder_safety_margin=0.08,
+                static_cylinder_center=((1.0, -1.10, 0.0), (8.0, 1.10, 0.0)),
                 dynamic_obstacle_num=2,
-                dynamic_obstacle_radius=0.26,
-                dynamic_obstacle_safety_margin=0.08,
-                dynamic_obstacle_center=((1.2, -1.20, -0.50), (8.0, 1.20, 0.50)),
-                dynamic_obstacle_bounds=((0.8, -1.45, -0.65), (8.2, 1.45, 0.65)),
+                dynamic_obstacle_radius=0.22,
+                dynamic_obstacle_safety_margin=0.06,
+                dynamic_obstacle_center=((1.2, -1.35, -0.90), (8.0, 1.35, 0.70)),
+                dynamic_obstacle_bounds=((0.8, -1.55, -1.00), (8.2, 1.55, 0.85)),
             ),
         ),
     ]
@@ -373,6 +383,13 @@ def extract_obstacles(env: Any) -> list[dict[str, Any]]:
             if hasattr(obstacle, "expanded_half_extents"):
                 item["type"] = "box"
                 item["half_extents"] = np.asarray(obstacle.expanded_half_extents, dtype=float).copy()
+            elif hasattr(obstacle, "expanded_radius") and hasattr(obstacle, "expanded_half_height"):
+                item["type"] = "cylinder"
+                item["radius"] = float(obstacle.expanded_radius)
+                item["half_height"] = float(obstacle.expanded_half_height)
+                item["body_radius"] = float(obstacle.radius)
+                item["body_half_height"] = float(obstacle.half_height)
+                item["safety_margin"] = float(obstacle.safety_margin)
             elif hasattr(obstacle, "effective_radius"):
                 item["type"] = "sphere"
                 item["radius"] = float(obstacle.effective_radius)
@@ -679,6 +696,71 @@ def plot_sphere(ax: Any, center: np.ndarray, radius: float, color: str, label: s
     )
 
 
+def plot_cylinder(
+    ax: Any,
+    center: np.ndarray,
+    radius: float,
+    half_height: float,
+    color: str,
+    label: str | None,
+    safety_radius: float | None = None,
+    safety_half_height: float | None = None,
+) -> None:
+    theta = np.linspace(0.0, 2.0 * np.pi, 36)
+    if safety_radius is not None and safety_half_height is not None:
+        safety_radius = float(safety_radius)
+        safety_half_height = float(safety_half_height)
+        if safety_radius > radius + 1e-8 or safety_half_height > half_height + 1e-8:
+            safety_z_values = np.linspace(center[2] - safety_half_height, center[2] + safety_half_height, 8)
+            safety_theta_grid, safety_z_grid = np.meshgrid(theta, safety_z_values)
+            safety_x = center[0] + safety_radius * np.cos(safety_theta_grid)
+            safety_y = center[1] + safety_radius * np.sin(safety_theta_grid)
+            ax.plot_surface(
+                safety_x,
+                safety_y,
+                safety_z_grid,
+                color=color,
+                alpha=0.10,
+                linewidth=0.25,
+                edgecolor="#ffffff",
+                shade=True,
+            )
+            ax.plot_wireframe(safety_x, safety_y, safety_z_grid, color="#ffffff", linewidth=0.30, alpha=0.45)
+
+    z_values = np.linspace(center[2] - half_height, center[2] + half_height, 8)
+    theta_grid, z_grid = np.meshgrid(theta, z_values)
+    x = center[0] + radius * np.cos(theta_grid)
+    y = center[1] + radius * np.sin(theta_grid)
+    ax.plot_surface(
+        x,
+        y,
+        z_grid,
+        color=color,
+        alpha=0.38,
+        linewidth=0.35,
+        edgecolor="#ffd1d1",
+        shade=True,
+    )
+    ax.plot_wireframe(x, y, z_grid, color="#ffd1d1", linewidth=0.35, alpha=0.62)
+
+    cap_x = center[0] + radius * np.cos(theta)
+    cap_y = center[1] + radius * np.sin(theta)
+    bottom_z = np.full_like(theta, center[2] - half_height)
+    top_z = np.full_like(theta, center[2] + half_height)
+    ax.plot(cap_x, cap_y, bottom_z, color="#ffffff", linewidth=1.4, alpha=0.82)
+    ax.plot(cap_x, cap_y, top_z, color="#ffffff", linewidth=1.4, alpha=0.82)
+    ax.scatter(
+        [center[0]],
+        [center[1]],
+        [center[2]],
+        color="#ffffff",
+        edgecolor=color,
+        linewidth=1.2,
+        s=36,
+        label=label,
+    )
+
+
 def plot_box(ax: Any, center: np.ndarray, half_extents: np.ndarray, color: str, label: str | None) -> None:
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
@@ -773,6 +855,25 @@ def save_terminal_state_figure(result: EpisodeResult, output_dir: Path) -> Path:
             radius = float(obstacle["radius"])
             plot_sphere(ax, center, radius, color=color, label=label)
             axis_points.extend([center - radius, center + radius])
+        elif obstacle["type"] == "cylinder":
+            radius = float(obstacle["radius"])
+            half_height = float(obstacle["half_height"])
+            body_radius = float(obstacle.get("body_radius", radius))
+            body_half_height = float(obstacle.get("body_half_height", half_height))
+            plot_cylinder(
+                ax,
+                center,
+                body_radius,
+                body_half_height,
+                color=color,
+                label=label,
+                safety_radius=radius,
+                safety_half_height=half_height,
+            )
+            axis_points.extend([
+                center + np.array([-radius, -radius, -half_height], dtype=float),
+                center + np.array([radius, radius, half_height], dtype=float),
+            ])
         elif obstacle["type"] == "box":
             half_extents = obstacle["half_extents"]
             plot_box(ax, center, half_extents, color=color, label=label)
@@ -876,6 +977,25 @@ def draw_static_scene_for_animation(ax: Any, trace: EpisodeTrace) -> list[np.nda
             radius = float(obstacle["radius"])
             plot_sphere(ax, center, radius, color=color, label=label)
             axis_points.extend([center - radius, center + radius])
+        elif obstacle["type"] == "cylinder":
+            radius = float(obstacle["radius"])
+            half_height = float(obstacle["half_height"])
+            body_radius = float(obstacle.get("body_radius", radius))
+            body_half_height = float(obstacle.get("body_half_height", half_height))
+            plot_cylinder(
+                ax,
+                center,
+                body_radius,
+                body_half_height,
+                color=color,
+                label=label,
+                safety_radius=radius,
+                safety_half_height=half_height,
+            )
+            axis_points.extend([
+                center + np.array([-radius, -radius, -half_height], dtype=float),
+                center + np.array([radius, radius, half_height], dtype=float),
+            ])
         elif obstacle["type"] == "box":
             half_extents = obstacle["half_extents"]
             plot_box(ax, center, half_extents, color=color, label=label)
@@ -886,6 +1006,13 @@ def draw_static_scene_for_animation(ax: Any, trace: EpisodeTrace) -> list[np.nda
             if obstacle["type"] == "sphere":
                 radius = float(obstacle["radius"])
                 axis_points.extend([center - radius, center + radius])
+            elif obstacle["type"] == "cylinder":
+                radius = float(obstacle["radius"])
+                half_height = float(obstacle["half_height"])
+                axis_points.extend([
+                    center + np.array([-radius, -radius, -half_height], dtype=float),
+                    center + np.array([radius, radius, half_height], dtype=float),
+                ])
             elif obstacle["type"] == "box":
                 half_extents = obstacle["half_extents"]
                 axis_points.extend([center - half_extents, center + half_extents])
@@ -939,6 +1066,69 @@ def draw_top_down_scene_for_animation(ax: Any, trace: EpisodeTrace) -> list[np.n
                 zorder=5,
             )
             axis_points.extend([center - radius, center + radius])
+        elif obstacle["type"] == "cylinder":
+            radius = float(obstacle["radius"])
+            half_height = float(obstacle["half_height"])
+            body_radius = float(obstacle.get("body_radius", radius))
+            body_half_height = float(obstacle.get("body_half_height", half_height))
+            safety_patch = Circle(
+                (center[0], center[1]),
+                radius,
+                facecolor=ANIMATION_STATIC_COLOR,
+                edgecolor="#ffffff",
+                linewidth=1.0,
+                alpha=0.16,
+                label=label,
+            )
+            ax.add_patch(safety_patch)
+            patch = Circle(
+                (center[0], center[1]),
+                body_radius,
+                facecolor=ANIMATION_STATIC_COLOR,
+                edgecolor="#ffd1d1",
+                linewidth=2.1,
+                alpha=0.46,
+            )
+            ax.add_patch(patch)
+            ring = Circle(
+                (center[0], center[1]),
+                body_radius * 1.06,
+                facecolor="none",
+                edgecolor="#ffffff",
+                linewidth=1.1,
+                alpha=0.78,
+            )
+            ax.add_patch(ring)
+            ax.plot(
+                [center[0] - body_radius, center[0] + body_radius],
+                [center[1], center[1]],
+                color="#ffffff",
+                linewidth=1.0,
+                alpha=0.68,
+                zorder=5,
+            )
+            ax.plot(
+                [center[0], center[0]],
+                [center[1] - body_radius, center[1] + body_radius],
+                color="#ffffff",
+                linewidth=1.0,
+                alpha=0.68,
+                zorder=5,
+            )
+            ax.text(
+                center[0],
+                center[1],
+                f"h={2.0 * body_half_height:.1f}",
+                color="#ffffff",
+                fontsize=7,
+                ha="center",
+                va="center",
+                zorder=6,
+            )
+            axis_points.extend([
+                center + np.array([-radius, -radius, -half_height], dtype=float),
+                center + np.array([radius, radius, half_height], dtype=float),
+            ])
         elif obstacle["type"] == "box":
             half_extents = obstacle["half_extents"]
             x0 = center[0] - half_extents[0]
@@ -985,6 +1175,13 @@ def draw_top_down_scene_for_animation(ax: Any, trace: EpisodeTrace) -> list[np.n
             if obstacle["type"] == "sphere":
                 radius = float(obstacle["radius"])
                 axis_points.extend([center - radius, center + radius])
+            elif obstacle["type"] == "cylinder":
+                radius = float(obstacle["radius"])
+                half_height = float(obstacle["half_height"])
+                axis_points.extend([
+                    center + np.array([-radius, -radius, -half_height], dtype=float),
+                    center + np.array([radius, radius, half_height], dtype=float),
+                ])
             elif obstacle["type"] == "box":
                 half_extents = obstacle["half_extents"]
                 axis_points.extend([center - half_extents, center + half_extents])
@@ -1080,6 +1277,66 @@ def nearest_box_surface_point(point: np.ndarray, center: np.ndarray, half_extent
     return surface_point, -float(distances_to_faces[face_index])
 
 
+def nearest_cylinder_surface_point(
+    point: np.ndarray,
+    center: np.ndarray,
+    radius: float,
+    half_height: float,
+) -> tuple[np.ndarray, float]:
+    offset = point - center
+    xy_offset = offset[:2]
+    z_offset = float(offset[2])
+    xy_distance = float(np.linalg.norm(xy_offset))
+    if xy_distance < 1e-8:
+        xy_direction = np.array([1.0, 0.0], dtype=float)
+    else:
+        xy_direction = xy_offset / xy_distance
+
+    radial_distance = xy_distance - radius
+    vertical_distance = abs(z_offset) - half_height
+    outside_radial = max(radial_distance, 0.0)
+    outside_vertical = max(vertical_distance, 0.0)
+    signed_distance = float(
+        np.sqrt(outside_radial * outside_radial + outside_vertical * outside_vertical)
+        + min(max(radial_distance, vertical_distance), 0.0)
+    )
+
+    if xy_distance <= radius and abs(z_offset) <= half_height:
+        side_gap = radius - xy_distance
+        top_gap = half_height - z_offset
+        bottom_gap = half_height + z_offset
+        if side_gap <= top_gap and side_gap <= bottom_gap:
+            surface_point = np.array(
+                [center[0] + xy_direction[0] * radius, center[1] + xy_direction[1] * radius, point[2]],
+                dtype=float,
+            )
+        elif top_gap <= bottom_gap:
+            surface_point = np.array([point[0], point[1], center[2] + half_height], dtype=float)
+        else:
+            surface_point = np.array([point[0], point[1], center[2] - half_height], dtype=float)
+        return surface_point, signed_distance
+
+    if xy_distance <= radius:
+        z_sign = 1.0 if z_offset >= 0.0 else -1.0
+        surface_point = np.array([point[0], point[1], center[2] + z_sign * half_height], dtype=float)
+    elif abs(z_offset) <= half_height:
+        surface_point = np.array(
+            [center[0] + xy_direction[0] * radius, center[1] + xy_direction[1] * radius, point[2]],
+            dtype=float,
+        )
+    else:
+        z_sign = 1.0 if z_offset >= 0.0 else -1.0
+        surface_point = np.array(
+            [
+                center[0] + xy_direction[0] * radius,
+                center[1] + xy_direction[1] * radius,
+                center[2] + z_sign * half_height,
+            ],
+            dtype=float,
+        )
+    return surface_point, signed_distance
+
+
 def nearest_obstacle_surface(trace: EpisodeTrace, point_index: int) -> tuple[np.ndarray | None, float]:
     point = trace.trajectory[point_index]
     nearest_surface_point: np.ndarray | None = None
@@ -1093,6 +1350,11 @@ def nearest_obstacle_surface(trace: EpisodeTrace, point_index: int) -> tuple[np.
             center = np.asarray(obstacle["center"], dtype=float)
             half_extents = np.asarray(obstacle["half_extents"], dtype=float)
             surface_point, surface_distance = nearest_box_surface_point(point, center, half_extents)
+        elif obstacle["type"] == "cylinder":
+            center = np.asarray(obstacle["center"], dtype=float)
+            radius = float(obstacle["radius"])
+            half_height = float(obstacle["half_height"])
+            surface_point, surface_distance = nearest_cylinder_surface_point(point, center, radius, half_height)
         else:
             continue
         if surface_distance < nearest_surface_distance:
@@ -1534,6 +1796,7 @@ def print_scenario_summary(scenarios: list[ScenarioSpec]) -> None:
         print(
             f"scenario[{index}]: {scenario.name} | "
             f"static_obstacle_num={config.static_obstacle_num} | "
+            f"static_cylinder_num={config.static_cylinder_num} | "
             f"dynamic_obstacle_num={config.dynamic_obstacle_num} | "
             f"start_bounds={config.start_position_bounds} | "
             f"goal_bounds={config.goal_position_bounds}"
