@@ -154,7 +154,6 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
 
     def _build_single_agent_action_bounds(self) -> tuple[np.ndarray, np.ndarray]:   # 构建动作上下界
         dims = int(self.dmp_config.dims)
-        dims = int(self.dmp_config.dims)
         low = np.concatenate(
             [
                 np.full(dims, self.dmp_config.forcing_term_min, dtype=np.float32),
@@ -463,16 +462,17 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
         }
         return observation, info
 
+
     def step(self, action):
-        if any(packet is None for packet in self.latest_sensor_packets):
+        if any(packet is None for packet in self.latest_sensor_packets):   # 不存在传感器观测，说明环境未重置
             raise RuntimeError("reset must be called before step")
 
-        action = np.asarray(action, dtype=np.float32)
-        if action.shape != self.action_shape:
+        action = np.asarray(action, dtype=np.float32)   # 转换动作向量为float32
+        if action.shape != self.action_shape:   # 动作向量大小错误
             raise ValueError(f"action must have shape {self.action_shape}")
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+        action = np.clip(action, self.action_space.low, self.action_space.high)  # 将动作向量裁剪到动作空间范围内
 
-        previous_distances = np.array(
+        previous_distances = np.array(  # 获取当前距离目标点的距离
             [
                 np.linalg.norm(self.goals[agent_index] - self.dynamics[agent_index].p)
                 for agent_index in range(self.num_agents)
@@ -480,11 +480,12 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
             dtype=float,
         )
 
+        # 获取命令加速度和实际加速度，并推进动力学
         commanded_accelerations = np.zeros((self.num_agents, self.state_dim), dtype=np.float32)
         applied_accelerations = np.zeros((self.num_agents, self.state_dim), dtype=np.float32)
         next_states = np.zeros((self.num_agents, 2 * self.state_dim), dtype=np.float32)
 
-        for agent_index in range(self.num_agents):
+        for agent_index in range(self.num_agents):  # 迭代所有智能体
             acceleration, controller_info = self.dmps[agent_index].compute_acceleration(
                 self.dynamics[agent_index].p,
                 self.dynamics[agent_index].v,
