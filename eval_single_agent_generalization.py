@@ -252,6 +252,7 @@ def close_runtime(runtime: EvalRuntime | None) -> None: # 当前场景有close�
 def build_generalization_scenarios(
     base_config: SACExperimentConfig = EXPERIMENT_CONFIG,
 ) -> list[ScenarioSpec]:    # 构建主要场景
+    base_config = replace(base_config, training_scene_mixture_enabled=False)
     scenarios = [
         ScenarioSpec(
             name="train_distribution",

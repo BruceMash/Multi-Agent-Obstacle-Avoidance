@@ -1,0 +1,308 @@
+import copy
+from collections.abc import Callable
+from dataclasses import dataclass
+
+import gymnasium as gym
+import numpy as np
+from gymnasium import spaces
+
+# 复用dmp框架和实体框架
+from Controller.dmp_rl import DMPConfig, SecondOrderDMPController
+from Controller.dmp_rl import DMPConfig, SecondOrderDMPController
+from Entity.KinematicModel import PartialDynamic
+from Entity.sensors import LocalObstacleSensor
+from Environment.single_agent_dmp_env import EnvConfig
+
+
+@dataclass
+class MultiAgentEnvConfig(EnvConfig):
+    """
+    Multi-agent environment-level configuration.
+
+    The base task and reward fields are inherited from the single-agent
+    environment. The fields below only describe inter-agent constraints.
+    """
+
+    num_agents: int = 4
+
+    # 机间奖励值参数
+    inter_agent_safe_distance: float = 0.6
+    inter_agent_collision_penalty: float = 20.0
+    inter_agent_potential_weight: float = 1.0
+    inter_agent_influence_distance: float = 1.2
+
+    def __post_init__(self) -> None:        # 检查传入参数合法性
+        self.num_agents = int(self.num_agents)
+        if self.num_agents <= 0:
+            raise ValueError("num_agents must be positive")
+        self.inter_agent_safe_distance = float(self.inter_agent_safe_distance)
+        self.inter_agent_collision_penalty = float(self.inter_agent_collision_penalty)
+        self.inter_agent_potential_weight = float(self.inter_agent_potential_weight)
+        self.inter_agent_influence_distance = float(self.inter_agent_influence_distance)
+        if self.inter_agent_safe_distance <= 0.0:
+            raise ValueError("inter_agent_safe_distance must be positive")
+        if self.inter_agent_influence_distance <= 0.0:
+            raise ValueError("inter_agent_influence_distance must be positive")
+
+
+class MultiAgentDMPEnv(gym.Env):    # 复用gym
+    """
+    Multi-agent DMP-RL environment skeleton.
+
+    Module 1 only defines construction-time ownership:
+    - one point-mass dynamics module per agent;
+    - one DMP controller per agent;
+    - one local obstacle sensor per agent;
+    - per-agent action matrix with shape (num_agents, single_agent_action_dim).
+
+    reset(), step(), observation construction, reward and collision logic will be
+    implemented in later reviewed modules.
+    """
+
+    metadata = {"render_modes": ["human"], "render_fps": 30}
+
+    def __init__(
+        self,
+        dynamics_config,    # 动力学模型的参数设置
+        sensor_config=None, # 传感器设置
+        dmp_config=None,    # dmp设置
+        env_config=None,    # 环境设置
+        start_goal_generator: Callable[[np.random.Generator], tuple[np.ndarray, np.ndarray]] | None = None, # 训练采样策略
+        static_obstacles=None,  # 静态障碍物字典传入
+        static_obstacle_generator=None, # 静态障碍物生成
+        dynamic_obstacles=None, # 同静态障碍物
+        dynamic_obstacle_generator=None,
+        render_mode=None,
+    ):
+        if render_mode not in {None, "human"}:
+            raise ValueError("render_mode must be None or 'human'")     # gym.env只允许两个值
+
+        self.env_config = env_config or MultiAgentEnvConfig()   # 
+        if not isinstance(self.env_config, MultiAgentEnvConfig):    # 判断是否为单机类型，若是，则转化为多机参数类
+            self.env_config = MultiAgentEnvConfig(**vars(self.env_config))  # 
+
+        self.num_agents = int(self.env_config.num_agents)   # 获取智能体数量
+
+        # 构建self，得到对应的变量关系
+        self.dynamics_config = copy.deepcopy(dynamics_config)   
+        self.sensor_config = copy.deepcopy(sensor_config or {})
+        self.dmp_config = dmp_config or DMPConfig(dt=float(self.dynamics_config["time_step"]))  # 入参指定值或默认值
+
+        self.dynamics = [PartialDynamic(copy.deepcopy(self.dynamics_config)) for _ in range(self.num_agents)]
+        self.sensors = [LocalObstacleSensor(**copy.deepcopy(self.sensor_config)) for _ in range(self.num_agents)]
+        self.dmps = [SecondOrderDMPController(copy.deepcopy(self.dmp_config)) for _ in range(self.num_agents)]
+
+        self.state_dim = int(self.dynamics[0].p.shape[0])
+        for agent_index, dmp in enumerate(self.dmps):
+
+            if dmp.config.dims != self.state_dim:   # 检查每个agent的dmp维度和动力学维度是否吻合
+                raise ValueError(
+                    f"agent {agent_index} dmp dims ({dmp.config.dims}) must match dynamics dimension ({self.state_dim})"
+                )
+
+        # 初始化障碍物信息
+        self._initial_static_obstacles = copy.deepcopy(static_obstacles or [])
+        self._static_obstacle_generator = static_obstacle_generator
+        self._initial_dynamic_obstacles = copy.deepcopy(dynamic_obstacles or [])
+        self._dynamic_obstacle_generator = dynamic_obstacle_generator
+        self._start_goal_generator = start_goal_generator
+
+        # 默认起点和目标点构建
+        self._default_starts = np.zeros((self.num_agents, self.state_dim), dtype=float)
+        self._default_goals = np.zeros((self.num_agents, self.state_dim), dtype=float)
+        for agent_index in range(self.num_agents):
+            self._default_starts[agent_index] = np.array([0.0, float(agent_index), 0.0], dtype=float)
+            self._default_goals[agent_index] = np.array([8.0, float(agent_index), 0.0], dtype=float)
+
+        self.static_obstacles = copy.deepcopy(self._initial_static_obstacles)
+        self.dynamic_obstacles = copy.deepcopy(self._initial_dynamic_obstacles)
+        self.starts = self._default_starts.copy()
+        self.goals = self._default_goals.copy()
+        self.steps = 0
+        self.render_mode = render_mode
+
+        self.latest_sensor_packets = [None for _ in range(self.num_agents)]
+        self.latest_controller_infos = [{} for _ in range(self.num_agents)]
+        self.latest_observation = None
+
+        self.action_space = self._build_action_space()
+        self.observation_space = self._build_observation_space()
+
+    @property   # property：类似成员的调用方式，而非类似
+    def single_agent_action_dim(self) -> int:   # 解包action_dim 
+        return 2 * int(self.dmp_config.dims)    # 当前输出：三维度DMP动作 + 三维度
+
+    @property
+    def action_shape(self) -> tuple[int, int]:  # 解包动作形状
+        return self.num_agents, self.single_agent_action_dim
+    
+    @property
+    def sensor_observation_dim(self) -> int:    # 解包传感器观测形状
+        return int(self.sensors[0].observation_dim)
+    
+    @property
+    def inter_agent_observation_dim(self) -> int:   # 解包机间编队维度
+        return (self.)
+
+    def _build_single_agent_action_bounds(self) -> tuple[np.ndarray, np.ndarray]:   # 构建动作上下界
+        dims = int(self.dmp_config.dims)
+        low = np.concatenate(
+            [
+                np.full(dims, self.dmp_config.forcing_term_min, dtype=np.float32),
+                np.full(dims, -self.dmp_config.goal_offset_max, dtype=np.float32),
+            ],
+            axis=0,
+        )
+        high = np.concatenate(
+            [
+                np.full(dims, self.dmp_config.forcing_term_max, dtype=np.float32),
+                np.full(dims, self.dmp_config.goal_offset_max, dtype=np.float32),
+            ],
+            axis=0,
+        )
+        return low, high
+
+    def _build_action_space(self) -> spaces.Box:    # 构建动作空间
+        single_low, single_high = self._build_single_agent_action_bounds()
+        low = np.tile(single_low, (self.num_agents, 1))
+        high = np.tile(single_high, (self.num_agents, 1))
+        return spaces.Box(low=low, high=high, dtype=np.float32)
+
+    def _build_observation_space(self) -> spaces.Box:   # 构建观测空间
+        # Placeholder until the reviewed observation module is implemented.
+
+
+        return spaces.Box(
+            low=np.zeros(0, dtype=np.float32),
+            high=np.zeros(0, dtype=np.float32),
+            dtype=np.float32,
+        )
+
+    def _validate_agent_points(self, name: str, value) -> np.ndarray:   # 验证智能体点是否为期望的形状
+        points = np.asarray(value, dtype=float)
+        expected_shape = (self.num_agents, self.state_dim)
+        if points.shape != expected_shape:
+            raise ValueError(f"{name} must have shape {expected_shape}")
+        return points.copy()
+
+    def _resolve_starts_goals(self, options: dict) -> tuple[np.ndarray, np.ndarray]:
+        has_starts = "starts" in options
+        has_goals = "goals" in options
+
+        if self._start_goal_generator is not None and not has_starts and not has_goals: # 不指定就随机生成
+            starts, goals = self._start_goal_generator(self.np_random)
+        else:
+            starts = options.get("starts", self._default_starts)
+            goals = options.get("goals", self._default_goals)
+        starts = self._validate_agent_points("starts", starts)
+        goals = self._validate_agent_points("goals", goals)
+        return starts, goals
+
+    def _generate_static_obstacles(self, starts: np.ndarray, goals: np.ndarray) -> list:
+
+        if self._static_obstacle_generator is None: # 不存在生成器
+            return copy.deepcopy(self._initial_static_obstacles)    # 采用固定障碍物
+        generator_seed = int(self.np_random.integers(0, np.iinfo(np.uint32).max))   # 生成随机种子
+        try:    # 多智能体版本的
+            return copy.deepcopy(
+                self._static_obstacle_generator(
+                    starts=starts.copy(),
+                    goals=goals.copy(),
+                    seed=generator_seed,
+                )
+            )
+        except TypeError:   # 单智能体版本的
+            return copy.deepcopy(
+                self._static_obstacle_generator(
+                    start=starts[0].copy(),
+                    goal=goals[0].copy(),
+                    seed=generator_seed,
+                )
+            )
+
+    def _generate_dynamic_obstacles(self, starts: np.ndarray, goals: np.ndarray) -> list:   # 生成动态障碍物，同静态障碍物逻辑
+        if self._dynamic_obstacle_generator is None:
+            return copy.deepcopy(self._initial_dynamic_obstacles)
+        generator_seed = int(self.np_random.integers(0, np.iinfo(np.uint32).max))
+        try:
+            return copy.deepcopy(
+                self._dynamic_obstacle_generator(
+                    starts=starts.copy(),
+                    goals=goals.copy(),
+                    seed=generator_seed,
+                    static_obstacles=copy.deepcopy(self.static_obstacles),
+                )
+            )
+        except TypeError:
+            return copy.deepcopy(
+                self._dynamic_obstacle_generator(
+                    start=starts[0].copy(),
+                    goal=goals[0].copy(),
+                    seed=generator_seed,
+                    static_obstacles=copy.deepcopy(self.static_obstacles),
+                )
+            )
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        options = options or {}
+
+        # 生成起点与目标点
+        starts, goals = self._resolve_starts_goals(options)
+        self.starts = starts.copy()
+        self.goals = goals.copy()
+        self.steps = 0
+
+        # 索引生成障碍物
+        if "static_obstacles" in options:
+            self.static_obstacles = copy.deepcopy(options["static_obstacles"])
+        else:
+            self.static_obstacles = self._generate_static_obstacles(starts, goals)
+
+        if "dynamic_obstacles" in options:
+            self.dynamic_obstacles = copy.deepcopy(options["dynamic_obstacles"])
+        else:
+            self.dynamic_obstacles = self._generate_dynamic_obstacles(starts, goals)
+
+        # 初始化agents
+        zero_velocity = np.zeros(self.state_dim, dtype=float)
+        for agent_index in range(self.num_agents):
+            self.dynamics[agent_index].reset(   # 重置位置，生成0速度
+                {
+                    "position": starts[agent_index].copy(),
+                    "velocity": zero_velocity.copy(),
+                }
+            )
+
+            # 初始化dmps和传感器
+            self.dmps[agent_index].reset(starts[agent_index], goals[agent_index])
+            self.sensors[agent_index].reset()
+
+            # 记录传感器观测
+            self.latest_sensor_packets[agent_index] = self.sensors[agent_index].sense(
+                self.dynamics[agent_index].p,
+                self.dynamics[agent_index].v,
+                goals[agent_index],
+                self.static_obstacles,
+                self.dynamic_obstacles,
+            )
+            # 记录上一时刻的dmps参数
+            self.latest_controller_infos[agent_index] = {
+                "phase": float(self.dmps[agent_index].phase),
+                "tau": float(self.dmps[agent_index].config.tau),
+            }
+
+        # 返回observation
+        observation = np.zeros(0, dtype=np.float32)
+        self.latest_observation = observation.copy()
+        info = {
+            "starts": starts.copy(),
+            "goals": goals.copy(),
+            "num_agents": int(self.num_agents),
+            "static_obstacle_count": len(self.static_obstacles),
+            "dynamic_obstacle_count": len(self.dynamic_obstacles),
+        }
+        return observation, info
+
+    def step(self, action):
+        raise NotImplementedError("multi-agent step will be implemented after reset and observation modules")

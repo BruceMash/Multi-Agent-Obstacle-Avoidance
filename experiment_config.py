@@ -10,8 +10,9 @@ from typing import Any, Callable
 import numpy as np
 
 from Controller.dmp_rl import DMPConfig
+from Entity.dynamic_obstacles import MovingSphereObstacle
 from Entity.obstacle_generators import DynamicSpherePositionGenerate, StaticCylinderPositionGenerate, StaticSpherePositionGenerate
-from Entity.static_obstacles import AxisAlignedBoxObstacle
+from Entity.static_obstacles import AxisAlignedBoxObstacle, StaticCylinderObstacle, StaticSphereObstacle
 from Environment.single_agent_dmp_env import EnvConfig
 
 
@@ -90,7 +91,7 @@ class SACExperimentConfig:
     sensor_output_dim: int = 128
     num_sensor_layers: int = 2
     num_observation_layers: int = 2
-    total_timesteps: int = 4_000_000
+    total_timesteps: int = 6_000_000
     output_root: str = "artifacts"
     save_freq: int = 50_000
     eval_freq: int = 50_000
@@ -146,6 +147,50 @@ class SACExperimentConfig:
         (7.3, 1.5, 1.0),
     )
     dynamic_obstacle_min_speed: float = 0.4
+
+    training_scene_mixture_enabled: bool = True
+    training_allow_obstacle_overlap: bool = True
+    training_dense_scene_probability: float = 0.3
+    training_dense_dynamic_probability: float = 0.5
+    curriculum_enabled: bool = True
+    curriculum_window_episodes: int = 100
+    curriculum_check_interval_episodes: int = 20
+    curriculum_min_level_episodes: int = 100
+    curriculum_rollback_success_threshold: float = 0.45
+    curriculum_dense_scene_probabilities: tuple[float, ...] = (0.0, 0.10, 0.20, 0.30, 0.40)
+    curriculum_dense_dynamic_probabilities: tuple[float, ...] = (0.0, 0.00, 0.20, 0.50, 0.50)
+    curriculum_advance_success_thresholds: tuple[float, ...] = (0.85, 0.80, 0.75, 0.75)
+    training_dense_static_obstacle_center: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (1.0, -1.15, -0.45),
+        (8.0, 1.15, 0.45),
+    )
+    training_dense_static_obstacle_radius: float = 0.38
+    training_dense_static_obstacle_safety_margin: float = 0.08
+    training_dense_static_obstacle_num: int = 4
+    training_dense_static_cylinder_center: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (1.0, -1.15, 0.0),
+        (8.0, 1.15, 0.0),
+    )
+    training_dense_static_cylinder_radius: float = 0.36
+    training_dense_static_cylinder_half_height: float = 0.62
+    training_dense_static_cylinder_safety_margin: float = 0.08
+    training_dense_static_cylinder_num: int = 2
+    training_dense_dynamic_obstacle_center: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (1.2, -1.35, -0.90),
+        (8.0, 1.35, 0.70),
+    )
+    training_dense_dynamic_obstacle_radius: float = 0.22
+    training_dense_dynamic_obstacle_velocity: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (-0.3, -1.0, -0.2),
+        (0.3, 1.0, 0.2),
+    )
+    training_dense_dynamic_obstacle_safety_margin: float = 0.06
+    training_dense_dynamic_obstacle_num: int = 2
+    training_dense_dynamic_obstacle_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (0.8, -1.55, -1.00),
+        (8.2, 1.55, 0.85),
+    )
+    training_dense_dynamic_obstacle_min_speed: float = 0.4
 
     def build_dynamics_config(self) -> dict[str, Any]:
         return {
@@ -228,6 +273,33 @@ class SACExperimentConfig:
             boundary_distance_epsilon=self.boundary_distance_epsilon,
         )
 
+    def build_curriculum_state(self) -> dict[str, float | int | bool]:
+        if bool(self.curriculum_enabled):
+            dense_probabilities = tuple(float(value) for value in self.curriculum_dense_scene_probabilities)
+            dynamic_probabilities = tuple(float(value) for value in self.curriculum_dense_dynamic_probabilities)
+            if len(dense_probabilities) != len(dynamic_probabilities):
+                raise ValueError("curriculum dense and dynamic probability schedules must have equal length")
+            if len(dense_probabilities) < 1:
+                raise ValueError("curriculum schedule must contain at least one level")
+            return {
+                "enabled": True,
+                "level": 0,
+                "dense_scene_probability": dense_probabilities[0],
+                "dense_dynamic_probability": dynamic_probabilities[0],
+                "episode_count": 0,
+                "level_episode_count": 0,
+                "success_rate": 0.0,
+            }
+        return {
+            "enabled": False,
+            "level": 0,
+            "dense_scene_probability": float(self.training_dense_scene_probability),
+            "dense_dynamic_probability": float(self.training_dense_dynamic_probability),
+            "episode_count": 0,
+            "level_episode_count": 0,
+            "success_rate": 0.0,
+        }
+
     def build_fixed_box(self) -> AxisAlignedBoxObstacle:
         return AxisAlignedBoxObstacle(
             center=list(self.fixed_box_center),
@@ -235,49 +307,396 @@ class SACExperimentConfig:
             safety_margin=self.fixed_box_safety_margin,
         )
 
-    def build_static_obstacle_generator(
-        self, fixed_box: AxisAlignedBoxObstacle
-    ) -> Callable[[np.ndarray, np.ndarray, int], list[Any]]:
-        def static_obstacle_generator(start, goal, seed):
-            obstacles: list[Any] = []
-            cylinder_seed = None if seed is None else int(seed) + 10007
-            if self.static_cylinder_num > 0:
-                cylinder_center = np.asarray(self.static_cylinder_center, dtype=float).copy()
-                workspace_bottom_z = float(np.asarray(self.workspace_bounds, dtype=float)[0, 2])
-                cylinder_center_z = workspace_bottom_z + self.static_cylinder_half_height
-                cylinder_center[0, 2] = cylinder_center_z
-                cylinder_center[1, 2] = cylinder_center_z + 1e-6
-                cylinders = StaticCylinderPositionGenerate(
-                    center=cylinder_center.tolist(),
-                    radius=self.static_cylinder_radius,
-                    half_height=self.static_cylinder_half_height,
-                    safety_margin=self.static_cylinder_safety_margin,
-                    num=self.static_cylinder_num,
-                    existing_obstacles=[fixed_box],
-                    seed=cylinder_seed,
-                    protected_points=[start, goal],
-                )
-                for cylinder in cylinders:
-                    cylinder.center[2] = cylinder_center_z
-                obstacles.extend(cylinders)
+    def _sample_probability_event(self, seed: int | None, probability: float) -> bool:
+        probability = float(probability)
+        if probability <= 0.0:
+            return False
+        if probability >= 1.0:
+            return True
+        rng = np.random.default_rng(None if seed is None else int(seed))
+        return bool(rng.random() < probability)
 
-            spheres = StaticSpherePositionGenerate(
-                center=[list(point) for point in self.static_obstacle_center],
-                radius=self.static_obstacle_radius,
-                safety_margin=self.static_obstacle_safety_margin,
-                num=self.static_obstacle_num,
-                existing_obstacles=[fixed_box, *obstacles],
+    def _curriculum_probability(
+        self,
+        curriculum_state: dict[str, Any] | None,
+        key: str,
+        default_value: float,
+    ) -> float:
+        if curriculum_state is None:
+            return float(default_value)
+        return float(curriculum_state.get(key, default_value))
+
+    def _cylinder_center_bounds_on_workspace_floor(
+        self,
+        center_bounds: tuple[tuple[float, float, float], tuple[float, float, float]],
+        half_height: float,
+    ) -> np.ndarray:
+        cylinder_center = np.asarray(center_bounds, dtype=float).copy()
+        workspace_bottom_z = float(np.asarray(self.workspace_bounds, dtype=float)[0, 2])
+        cylinder_center_z = workspace_bottom_z + float(half_height)
+        cylinder_center[0, 2] = cylinder_center_z
+        cylinder_center[1, 2] = cylinder_center_z + 1e-6
+        return cylinder_center
+
+    def _sample_center_avoiding_protected_points(
+        self,
+        rng: np.random.Generator,
+        lower: np.ndarray,
+        upper: np.ndarray,
+        protected_points: list[np.ndarray],
+        protected_clearance: float,
+        max_attempts: int = 1000,
+    ) -> np.ndarray:
+        for _ in range(max(1, int(max_attempts))):
+            center = rng.uniform(lower, upper)
+            if not any(float(np.linalg.norm(center - point)) < protected_clearance for point in protected_points):
+                return center
+        raise RuntimeError("failed to sample obstacle center away from protected start/goal points")
+
+    def _sample_velocity_with_min_speed(
+        self,
+        rng: np.random.Generator,
+        lower: np.ndarray,
+        upper: np.ndarray,
+        min_speed: float,
+        max_attempts: int = 1000,
+    ) -> np.ndarray:
+        min_speed = float(min_speed)
+        for _ in range(max(1, int(max_attempts))):
+            velocity = rng.uniform(lower, upper)
+            if float(np.linalg.norm(velocity)) >= min_speed:
+                return velocity
+        raise RuntimeError("failed to sample dynamic obstacle velocity above min_speed")
+
+    def _generate_static_obstacles_allow_overlap(
+        self,
+        start: np.ndarray,
+        goal: np.ndarray,
+        seed: int | None,
+        static_center: tuple[tuple[float, float, float], tuple[float, float, float]],
+        static_radius: float,
+        static_safety_margin: float,
+        static_num: int,
+        cylinder_center: tuple[tuple[float, float, float], tuple[float, float, float]],
+        cylinder_radius: float,
+        cylinder_half_height: float,
+        cylinder_safety_margin: float,
+        cylinder_num: int,
+        scene_name: str,
+    ) -> list[Any]:
+        rng = np.random.default_rng(None if seed is None else int(seed))
+        protected_points = [np.asarray(start, dtype=float).copy(), np.asarray(goal, dtype=float).copy()]
+        obstacles: list[Any] = []
+
+        cylinder_bounds = self._cylinder_center_bounds_on_workspace_floor(cylinder_center, cylinder_half_height)
+        cylinder_lower = cylinder_bounds[0]
+        cylinder_upper = cylinder_bounds[1]
+        cylinder_effective_radius = float(
+            np.sqrt(
+                (float(cylinder_radius) + float(cylinder_safety_margin)) ** 2
+                + (float(cylinder_half_height) + float(cylinder_safety_margin)) ** 2
+            )
+        )
+        for _ in range(max(0, int(cylinder_num))):
+            center = self._sample_center_avoiding_protected_points(
+                rng=rng,
+                lower=cylinder_lower,
+                upper=cylinder_upper,
+                protected_points=protected_points,
+                protected_clearance=cylinder_effective_radius + 0.8,
+            )
+            center[2] = float(cylinder_lower[2])
+            obstacles.append(
+                StaticCylinderObstacle(
+                    center=center,
+                    radius=cylinder_radius,
+                    half_height=cylinder_half_height,
+                    safety_margin=cylinder_safety_margin,
+                )
+            )
+
+        sphere_bounds = np.asarray(static_center, dtype=float)
+        sphere_lower = sphere_bounds[0]
+        sphere_upper = sphere_bounds[1]
+        sphere_effective_radius = float(static_radius) + float(static_safety_margin)
+        for _ in range(max(0, int(static_num))):
+            center = self._sample_center_avoiding_protected_points(
+                rng=rng,
+                lower=sphere_lower,
+                upper=sphere_upper,
+                protected_points=protected_points,
+                protected_clearance=sphere_effective_radius + 0.8,
+            )
+            obstacles.append(
+                StaticSphereObstacle(
+                    center=center,
+                    radius=static_radius,
+                    safety_margin=static_safety_margin,
+                )
+            )
+
+        for obstacle in obstacles:
+            obstacle.training_scene_name = scene_name
+        return obstacles
+
+    def _generate_static_obstacles(
+        self,
+        start: np.ndarray,
+        goal: np.ndarray,
+        seed: int | None,
+        static_center: tuple[tuple[float, float, float], tuple[float, float, float]],
+        static_radius: float,
+        static_safety_margin: float,
+        static_num: int,
+        cylinder_center: tuple[tuple[float, float, float], tuple[float, float, float]],
+        cylinder_radius: float,
+        cylinder_half_height: float,
+        cylinder_safety_margin: float,
+        cylinder_num: int,
+        scene_name: str,
+        curriculum_state: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        if (
+            bool(self.training_scene_mixture_enabled)
+            and bool(self.training_allow_obstacle_overlap)
+            and curriculum_state is not None
+        ):
+            return self._generate_static_obstacles_allow_overlap(
+                start=start,
+                goal=goal,
                 seed=seed,
+                static_center=static_center,
+                static_radius=static_radius,
+                static_safety_margin=static_safety_margin,
+                static_num=static_num,
+                cylinder_center=cylinder_center,
+                cylinder_radius=cylinder_radius,
+                cylinder_half_height=cylinder_half_height,
+                cylinder_safety_margin=cylinder_safety_margin,
+                cylinder_num=cylinder_num,
+                scene_name=scene_name,
+            )
+
+        obstacles: list[Any] = []
+        cylinder_seed = None if seed is None else int(seed) + 10007
+        if int(cylinder_num) > 0:
+            cylinder_center_bounds = self._cylinder_center_bounds_on_workspace_floor(
+                cylinder_center,
+                cylinder_half_height,
+            )
+            cylinders = StaticCylinderPositionGenerate(
+                center=cylinder_center_bounds.tolist(),
+                radius=cylinder_radius,
+                half_height=cylinder_half_height,
+                safety_margin=cylinder_safety_margin,
+                num=cylinder_num,
+                existing_obstacles=[],
+                seed=cylinder_seed,
                 protected_points=[start, goal],
             )
-            obstacles.extend(spheres)
-            obstacles.append(fixed_box)
-            return obstacles
+            cylinder_center_z = float(cylinder_center_bounds[0, 2])
+            for cylinder in cylinders:
+                cylinder.center[2] = cylinder_center_z
+            obstacles.extend(cylinders)
+
+        spheres = StaticSpherePositionGenerate(
+            center=[list(point) for point in static_center],
+            radius=static_radius,
+            safety_margin=static_safety_margin,
+            num=static_num,
+            existing_obstacles=obstacles,
+            seed=seed,
+            protected_points=[start, goal],
+        )
+        obstacles.extend(spheres)
+        for obstacle in obstacles:
+            obstacle.training_scene_name = scene_name
+        return obstacles
+
+    def _static_obstacles_use_dense_training_scene(self, static_obstacles: list[Any]) -> bool:
+        return any(getattr(obstacle, "training_scene_name", None) == "dense_training" for obstacle in static_obstacles)
+
+    def _generate_dynamic_obstacles_allow_overlap(
+        self,
+        start: np.ndarray,
+        goal: np.ndarray,
+        seed: int | None,
+        center: tuple[tuple[float, float, float], tuple[float, float, float]],
+        radius: float,
+        velocity: tuple[tuple[float, float, float], tuple[float, float, float]],
+        safety_margin: float,
+        num: int,
+        movement_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None,
+        min_speed: float,
+    ) -> list[Any]:
+        rng = np.random.default_rng(None if seed is None else int(seed))
+        center_bounds = np.asarray(center, dtype=float)
+        velocity_bounds = np.asarray(velocity, dtype=float)
+        if center_bounds.shape != (2, 3) or velocity_bounds.shape != (2, 3):
+            raise ValueError("dynamic obstacle center and velocity bounds must have shape (2, 3)")
+        sample_lower = center_bounds[0].copy()
+        sample_upper = center_bounds[1].copy()
+
+        obstacle_bounds = None
+        effective_radius = float(radius) + float(safety_margin)
+        if movement_bounds is not None:
+            bounds = np.asarray(movement_bounds, dtype=float)
+            if bounds.shape != (2, 3):
+                raise ValueError("dynamic obstacle movement_bounds must have shape (2, 3)")
+            obstacle_bounds = (bounds[0].copy(), bounds[1].copy())
+            sample_lower = np.maximum(sample_lower, obstacle_bounds[0] + effective_radius)
+            sample_upper = np.minimum(sample_upper, obstacle_bounds[1] - effective_radius)
+            if np.any(sample_lower >= sample_upper):
+                raise ValueError("center sampling range must leave room for dynamic obstacle movement_bounds")
+
+        protected_points = [np.asarray(start, dtype=float).copy(), np.asarray(goal, dtype=float).copy()]
+        obstacles = []
+        for _ in range(max(0, int(num))):
+            obstacle_center = self._sample_center_avoiding_protected_points(
+                rng=rng,
+                lower=sample_lower,
+                upper=sample_upper,
+                protected_points=protected_points,
+                protected_clearance=effective_radius + 0.8,
+            )
+            obstacle_velocity = self._sample_velocity_with_min_speed(
+                rng=rng,
+                lower=velocity_bounds[0],
+                upper=velocity_bounds[1],
+                min_speed=min_speed,
+            )
+            obstacles.append(
+                MovingSphereObstacle(
+                    center=obstacle_center,
+                    radius=radius,
+                    velocity=obstacle_velocity,
+                    safety_margin=safety_margin,
+                    bounds=obstacle_bounds,
+                )
+            )
+        return obstacles
+
+    def build_static_obstacle_generator(
+        self,
+        fixed_box: AxisAlignedBoxObstacle,
+        curriculum_state: dict[str, Any] | None = None,
+    ) -> Callable[[np.ndarray, np.ndarray, int], list[Any]]:
+        def static_obstacle_generator(start, goal, seed):
+            dense_scene_probability = self._curriculum_probability(
+                curriculum_state,
+                key="dense_scene_probability",
+                default_value=self.training_dense_scene_probability,
+            )
+            use_dense_scene = bool(self.training_scene_mixture_enabled) and self._sample_probability_event(
+                seed=seed,
+                probability=dense_scene_probability,
+            )
+            if use_dense_scene:
+                return self._generate_static_obstacles(
+                    start=start,
+                    goal=goal,
+                    seed=seed,
+                    static_center=self.training_dense_static_obstacle_center,
+                    static_radius=self.training_dense_static_obstacle_radius,
+                    static_safety_margin=self.training_dense_static_obstacle_safety_margin,
+                    static_num=self.training_dense_static_obstacle_num,
+                    cylinder_center=self.training_dense_static_cylinder_center,
+                    cylinder_radius=self.training_dense_static_cylinder_radius,
+                    cylinder_half_height=self.training_dense_static_cylinder_half_height,
+                    cylinder_safety_margin=self.training_dense_static_cylinder_safety_margin,
+                    cylinder_num=self.training_dense_static_cylinder_num,
+                    scene_name="dense_training",
+                    curriculum_state=curriculum_state,
+                )
+            return self._generate_static_obstacles(
+                start=start,
+                goal=goal,
+                seed=seed,
+                static_center=self.static_obstacle_center,
+                static_radius=self.static_obstacle_radius,
+                static_safety_margin=self.static_obstacle_safety_margin,
+                static_num=self.static_obstacle_num,
+                cylinder_center=self.static_cylinder_center,
+                cylinder_radius=self.static_cylinder_radius,
+                cylinder_half_height=self.static_cylinder_half_height,
+                cylinder_safety_margin=self.static_cylinder_safety_margin,
+                cylinder_num=self.static_cylinder_num,
+                scene_name="base_training",
+                curriculum_state=curriculum_state,
+            )
 
         return static_obstacle_generator
 
-    def build_dynamic_obstacle_generator(self) -> Callable[[np.ndarray, np.ndarray, int, list[Any]], list[Any]]:
+    def build_dynamic_obstacle_generator(
+        self,
+        curriculum_state: dict[str, Any] | None = None,
+    ) -> Callable[[np.ndarray, np.ndarray, int, list[Any]], list[Any]]:
         def dynamic_obstacle_generator(start, goal, seed, static_obstacles):
+            dense_dynamic_probability = self._curriculum_probability(
+                curriculum_state,
+                key="dense_dynamic_probability",
+                default_value=self.training_dense_dynamic_probability,
+            )
+            use_dense_dynamic_scene = (
+                bool(self.training_scene_mixture_enabled)
+                and self._static_obstacles_use_dense_training_scene(static_obstacles)
+                and self._sample_probability_event(
+                    seed=seed,
+                    probability=dense_dynamic_probability,
+                )
+            )
+            if use_dense_dynamic_scene:
+                if (
+                    bool(self.training_scene_mixture_enabled)
+                    and bool(self.training_allow_obstacle_overlap)
+                    and curriculum_state is not None
+                ):
+                    return self._generate_dynamic_obstacles_allow_overlap(
+                        start=start,
+                        goal=goal,
+                        seed=seed,
+                        center=self.training_dense_dynamic_obstacle_center,
+                        radius=self.training_dense_dynamic_obstacle_radius,
+                        velocity=self.training_dense_dynamic_obstacle_velocity,
+                        safety_margin=self.training_dense_dynamic_obstacle_safety_margin,
+                        num=self.training_dense_dynamic_obstacle_num,
+                        movement_bounds=self.training_dense_dynamic_obstacle_bounds,
+                        min_speed=self.training_dense_dynamic_obstacle_min_speed,
+                    )
+                return DynamicSpherePositionGenerate(
+                    center=[list(point) for point in self.training_dense_dynamic_obstacle_center],
+                    radius=self.training_dense_dynamic_obstacle_radius,
+                    velocity=[list(vec) for vec in self.training_dense_dynamic_obstacle_velocity],
+                    safety_margin=self.training_dense_dynamic_obstacle_safety_margin,
+                    num=self.training_dense_dynamic_obstacle_num,
+                    movement_bounds=[list(point) for point in self.training_dense_dynamic_obstacle_bounds],
+                    existing_obstacles=static_obstacles,
+                    seed=seed,
+                    protected_points=[start, goal],
+                    min_speed=self.training_dense_dynamic_obstacle_min_speed,
+                )
+            if (
+                bool(self.training_scene_mixture_enabled)
+                and self._static_obstacles_use_dense_training_scene(static_obstacles)
+            ):
+                return []
+            if (
+                bool(self.training_scene_mixture_enabled)
+                and bool(self.training_allow_obstacle_overlap)
+                and curriculum_state is not None
+            ):
+                return self._generate_dynamic_obstacles_allow_overlap(
+                    start=start,
+                    goal=goal,
+                    seed=seed,
+                    center=self.dynamic_obstacle_center,
+                    radius=self.dynamic_obstacle_radius,
+                    velocity=self.dynamic_obstacle_velocity,
+                    safety_margin=self.dynamic_obstacle_safety_margin,
+                    num=self.dynamic_obstacle_num,
+                    movement_bounds=self.dynamic_obstacle_bounds,
+                    min_speed=self.dynamic_obstacle_min_speed,
+                )
             return DynamicSpherePositionGenerate(
                 center=[list(point) for point in self.dynamic_obstacle_center],
                 radius=self.dynamic_obstacle_radius,
@@ -294,7 +713,7 @@ class SACExperimentConfig:
         return dynamic_obstacle_generator
 
     def build_static_obstacles(self, fixed_box: AxisAlignedBoxObstacle) -> list[Any]:
-        return [fixed_box]
+        return []
 
     def build_policy_kwargs(self) -> dict[str, Any]:
         return {

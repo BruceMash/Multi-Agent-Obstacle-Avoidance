@@ -3,6 +3,8 @@ SAC training entry for the single-agent DMP-RL environment.
 """
 
 import csv
+from collections import deque
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,8 +30,11 @@ class _PolicyModeShim:
 def build_env(
     config: SACExperimentConfig = EXPERIMENT_CONFIG,
     action_guidance_enabled: bool | None = False,
+    curriculum_state: dict[str, Any] | None = None,
 ) -> SingleAgentDMPEnv:
     """Build the training environment from a centralized config."""
+    if curriculum_state is None and bool(config.training_scene_mixture_enabled):
+        curriculum_state = config.build_curriculum_state()
     dynamics_config = config.build_dynamics_config()
     sensor_config = config.build_sensor_config()
     dmp_config = config.build_dmp_config()
@@ -38,8 +43,8 @@ def build_env(
         env_config.action_guidance_enabled = bool(action_guidance_enabled)
     fixed_box = config.build_fixed_box()
     start_goal_generator = config.build_start_goal_generator()
-    static_obstacle_generator = config.build_static_obstacle_generator(fixed_box)
-    dynamic_obstacle_generator = config.build_dynamic_obstacle_generator()
+    static_obstacle_generator = config.build_static_obstacle_generator(fixed_box, curriculum_state=curriculum_state)
+    dynamic_obstacle_generator = config.build_dynamic_obstacle_generator(curriculum_state=curriculum_state)
     static_obstacles = config.build_static_obstacles(fixed_box)
 
     env = SingleAgentDMPEnv(
@@ -56,6 +61,7 @@ def build_env(
     env._default_start = np.asarray(config.default_start, dtype=float)
     env._default_goal = np.asarray(config.default_goal, dtype=float)
     env.goal = env._default_goal.copy()
+    env.curriculum_state = curriculum_state
     return env
 
 
@@ -204,14 +210,15 @@ class CheckpointAndBestCallback(BaseCallback):
 class TensorboardRewardCallback(BaseCallback):
     """Write reward-related metrics to TensorBoard."""
 
-    def __init__(self, log_dir: Path):
+    def __init__(self, log_dir: Path, flush_freq: int = 100):
         super().__init__(verbose=0)
         self.log_dir = log_dir
+        self.flush_freq = max(1, int(flush_freq))
         self.writer: SummaryWriter | None = None
 
     def _init_callback(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.writer = SummaryWriter(log_dir=str(self.log_dir))
+        self.writer = SummaryWriter(log_dir=str(self.log_dir), flush_secs=5)
 
     def _on_step(self) -> bool:
         if self.writer is None:
@@ -329,6 +336,145 @@ class TensorboardRewardCallback(BaseCallback):
             for episode_reward in episode_reward_values:
                 self.writer.add_scalar("episode/reward", episode_reward, self.num_timesteps)
 
+        if self.num_timesteps > 0 and self.num_timesteps % self.flush_freq == 0:
+            self.writer.flush()
+        return True
+
+    def _on_training_end(self) -> None:
+        if self.writer is not None:
+            self.writer.flush()
+            self.writer.close()
+
+
+class SuccessRateCurriculumCallback(BaseCallback):
+    """Adapt training scene difficulty from recent episode success rate."""
+
+    def __init__(
+        self,
+        config: SACExperimentConfig,
+        curriculum_state: dict[str, Any] | None,
+        log_dir: Path,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose=verbose)
+        self.config = config
+        self.curriculum_state = curriculum_state
+        self.log_dir = log_dir
+        self.writer: SummaryWriter | None = None
+        self.success_window: deque[float] = deque(maxlen=max(1, int(config.curriculum_window_episodes)))
+        self.episode_count = 0
+        self.level_episode_count = 0
+        self.episodes_since_check = 0
+        self.last_logged_timestep = -1
+
+    def _init_callback(self) -> None:
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=str(self.log_dir), flush_secs=5)
+        if self.curriculum_state is not None:
+            self._apply_level(int(self.curriculum_state.get("level", 0)))
+            self._write_tensorboard(success_rate=0.0)
+
+    def _num_levels(self) -> int:
+        dense_levels = tuple(float(value) for value in self.config.curriculum_dense_scene_probabilities)
+        dynamic_levels = tuple(float(value) for value in self.config.curriculum_dense_dynamic_probabilities)
+        if len(dense_levels) != len(dynamic_levels):
+            raise ValueError("curriculum dense and dynamic probability schedules must have equal length")
+        if len(dense_levels) < 1:
+            raise ValueError("curriculum schedule must contain at least one level")
+        return len(dense_levels)
+
+    def _apply_level(self, level: int) -> None:
+        if self.curriculum_state is None:
+            return
+        level = int(np.clip(level, 0, self._num_levels() - 1))
+        dense_levels = tuple(float(value) for value in self.config.curriculum_dense_scene_probabilities)
+        dynamic_levels = tuple(float(value) for value in self.config.curriculum_dense_dynamic_probabilities)
+        self.curriculum_state["enabled"] = bool(self.config.curriculum_enabled)
+        self.curriculum_state["level"] = level
+        self.curriculum_state["dense_scene_probability"] = dense_levels[level]
+        self.curriculum_state["dense_dynamic_probability"] = dynamic_levels[level]
+        self.curriculum_state["level_episode_count"] = self.level_episode_count
+
+    def _write_tensorboard(self, success_rate: float) -> None:
+        if self.writer is None or self.curriculum_state is None:
+            return
+        self.writer.add_scalar("curriculum/level", int(self.curriculum_state.get("level", 0)), self.num_timesteps)
+        self.writer.add_scalar(
+            "curriculum/dense_scene_probability",
+            float(self.curriculum_state.get("dense_scene_probability", 0.0)),
+            self.num_timesteps,
+        )
+        self.writer.add_scalar(
+            "curriculum/dense_dynamic_probability",
+            float(self.curriculum_state.get("dense_dynamic_probability", 0.0)),
+            self.num_timesteps,
+        )
+        self.writer.add_scalar("curriculum/recent_success_rate", float(success_rate), self.num_timesteps)
+        self.writer.flush()
+
+    def _maybe_update_level(self) -> None:
+        if self.curriculum_state is None or not bool(self.config.curriculum_enabled):
+            return
+        if len(self.success_window) < int(self.config.curriculum_window_episodes):
+            return
+        if self.episodes_since_check < int(self.config.curriculum_check_interval_episodes):
+            return
+        if self.level_episode_count < int(self.config.curriculum_min_level_episodes):
+            return
+
+        self.episodes_since_check = 0
+        success_rate = float(np.mean(self.success_window))
+        level = int(self.curriculum_state.get("level", 0))
+        next_level = level
+        advance_thresholds = tuple(float(value) for value in self.config.curriculum_advance_success_thresholds)
+        if len(advance_thresholds) != max(0, self._num_levels() - 1):
+            raise ValueError("curriculum_advance_success_thresholds must have one value per level transition")
+
+        if level < self._num_levels() - 1 and success_rate >= advance_thresholds[level]:
+            next_level = level + 1
+        elif level > 0 and success_rate < float(self.config.curriculum_rollback_success_threshold):
+            next_level = level - 1
+
+        self.curriculum_state["episode_count"] = self.episode_count
+        self.curriculum_state["success_rate"] = success_rate
+        if next_level != level:
+            self.level_episode_count = 0
+            self.success_window.clear()
+            self._apply_level(next_level)
+            if self.verbose > 0:
+                print(
+                    f"[curriculum] timesteps={self.num_timesteps}, "
+                    f"level={next_level}, recent_success={success_rate:.3f}, "
+                    f"dense_prob={float(self.curriculum_state['dense_scene_probability']):.2f}, "
+                    f"dense_dynamic_prob={float(self.curriculum_state['dense_dynamic_probability']):.2f}"
+                )
+        self._write_tensorboard(success_rate)
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        if isinstance(infos, list):
+            for info in infos:
+                if info.get("episode") is None:
+                    continue
+                self.success_window.append(float(bool(info.get("success", False))))
+                self.episode_count += 1
+                self.level_episode_count += 1
+                self.episodes_since_check += 1
+                self._maybe_update_level()
+
+        if (
+            self.writer is not None
+            and self.curriculum_state is not None
+            and self.num_timesteps > 0
+            and self.num_timesteps % 1000 == 0
+            and self.last_logged_timestep != self.num_timesteps
+        ):
+            success_rate = float(np.mean(self.success_window)) if self.success_window else 0.0
+            self.curriculum_state["episode_count"] = self.episode_count
+            self.curriculum_state["level_episode_count"] = self.level_episode_count
+            self.curriculum_state["success_rate"] = success_rate
+            self._write_tensorboard(success_rate)
+            self.last_logged_timestep = self.num_timesteps
         return True
 
     def _on_training_end(self) -> None:
@@ -385,7 +531,7 @@ class FixedSeedEvalCallback(BaseCallback):
         self.log_dir.mkdir(parents=True, exist_ok=True)
         if self.save_visualizations:
             self.visualization_dir.mkdir(parents=True, exist_ok=True)
-        self.writer = SummaryWriter(log_dir=str(self.log_dir))
+        self.writer = SummaryWriter(log_dir=str(self.log_dir), flush_secs=5)
         if not self.csv_path.exists() or self.csv_path.stat().st_size == 0:
             with self.csv_path.open("w", newline="", encoding="utf-8") as csv_file:
                 writer = csv.DictWriter(csv_file, fieldnames=self.CSV_FIELDS)
@@ -687,14 +833,26 @@ def train(
     run_dir = Path(output_root) / timestamp
     tensorboard_dir = run_dir / "tensorboard"
 
-    env = build_env(config=config, action_guidance_enabled=config.action_guidance_enabled)
-    eval_env = build_env(config=config, action_guidance_enabled=False)
+    curriculum_state = config.build_curriculum_state() if bool(config.training_scene_mixture_enabled) else None
+    env = build_env(
+        config=config,
+        action_guidance_enabled=config.action_guidance_enabled,
+        curriculum_state=curriculum_state,
+    )
+    eval_config = replace(config, training_scene_mixture_enabled=False, curriculum_enabled=False)
+    eval_env = build_env(config=eval_config, action_guidance_enabled=False)
     model = build_model(env, config=config, tensorboard_log=str(tensorboard_dir))
     if resume_from:
         model = load_checkpoint(model, resume_from)
 
     checkpoint_callback = CheckpointAndBestCallback(run_dir=run_dir, save_freq=save_freq, verbose=1)
-    tensorboard_callback = TensorboardRewardCallback(log_dir=tensorboard_dir)
+    tensorboard_callback = TensorboardRewardCallback(log_dir=tensorboard_dir, flush_freq=100)
+    curriculum_callback = SuccessRateCurriculumCallback(
+        config=config,
+        curriculum_state=curriculum_state,
+        log_dir=tensorboard_dir,
+        verbose=1,
+    )
     eval_callback = FixedSeedEvalCallback(
         eval_env=eval_env,
         run_dir=run_dir,
@@ -705,7 +863,7 @@ def train(
         save_visualizations=True,
         verbose=1,
     )
-    callback = CallbackList([checkpoint_callback, tensorboard_callback, eval_callback])
+    callback = CallbackList([checkpoint_callback, tensorboard_callback, curriculum_callback, eval_callback])
 
     model.learn(total_timesteps=total_timesteps, callback=callback)
 
@@ -716,6 +874,7 @@ def train(
         extra={
             "best_episode_reward": checkpoint_callback.best_episode_reward,
             "best_eval_mean_reward": eval_callback.best_mean_reward,
+            "curriculum_state": dict(curriculum_state or {}),
         },
     )
     env.close()
