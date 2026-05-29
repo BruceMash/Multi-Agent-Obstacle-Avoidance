@@ -1,19 +1,22 @@
 """Centralized experiment parameters for SAC training."""
 
+from __future__ import annotations
+
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 import numpy as np
 
 from Controller.dmp_rl import DMPConfig
-from Entity.dynamic_obstacles import MovingSphereObstacle
-from Entity.obstacle_generators import DynamicSpherePositionGenerate, StaticCylinderPositionGenerate, StaticSpherePositionGenerate
-from Entity.static_obstacles import AxisAlignedBoxObstacle, StaticCylinderObstacle, StaticSphereObstacle
+from Environment.multi_agent_dmp_env import MultiAgentEnvConfig
 from Environment.single_agent_dmp_env import EnvConfig
+
+if TYPE_CHECKING:
+    from Entity.static_obstacles import AxisAlignedBoxObstacle
 
 
 @dataclass(frozen=True)
@@ -301,6 +304,8 @@ class SACExperimentConfig:
         }
 
     def build_fixed_box(self) -> AxisAlignedBoxObstacle:
+        from Entity.static_obstacles import AxisAlignedBoxObstacle
+
         return AxisAlignedBoxObstacle(
             center=list(self.fixed_box_center),
             half_extents=list(self.fixed_box_half_extents),
@@ -384,6 +389,8 @@ class SACExperimentConfig:
         cylinder_num: int,
         scene_name: str,
     ) -> list[Any]:
+        from Entity.static_obstacles import StaticCylinderObstacle, StaticSphereObstacle
+
         rng = np.random.default_rng(None if seed is None else int(seed))
         protected_points = [np.asarray(start, dtype=float).copy(), np.asarray(goal, dtype=float).copy()]
         obstacles: list[Any] = []
@@ -456,6 +463,8 @@ class SACExperimentConfig:
         scene_name: str,
         curriculum_state: dict[str, Any] | None = None,
     ) -> list[Any]:
+        from Entity.obstacle_generators import StaticCylinderPositionGenerate, StaticSpherePositionGenerate
+
         if (
             bool(self.training_scene_mixture_enabled)
             and bool(self.training_allow_obstacle_overlap)
@@ -529,6 +538,8 @@ class SACExperimentConfig:
         movement_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None,
         min_speed: float,
     ) -> list[Any]:
+        from Entity.dynamic_obstacles import MovingSphereObstacle
+
         rng = np.random.default_rng(None if seed is None else int(seed))
         center_bounds = np.asarray(center, dtype=float)
         velocity_bounds = np.asarray(velocity, dtype=float)
@@ -631,6 +642,8 @@ class SACExperimentConfig:
         self,
         curriculum_state: dict[str, Any] | None = None,
     ) -> Callable[[np.ndarray, np.ndarray, int, list[Any]], list[Any]]:
+        from Entity.obstacle_generators import DynamicSpherePositionGenerate
+
         def dynamic_obstacle_generator(start, goal, seed, static_obstacles):
             dense_dynamic_probability = self._curriculum_probability(
                 curriculum_state,
@@ -724,4 +737,217 @@ class SACExperimentConfig:
         }
 
 
+@dataclass(frozen=True)
+class MAPPOExperimentConfig:
+    """Centralized parameters for MAPPO training on the multi-agent DMP environment."""
+
+    # MARLlib entry
+    environment_name: str = "multi_agent_dmp"
+    map_name: str = "default"
+    hyperparam_source: str = "test"
+    model_core_arch: str = "mlp"
+
+    # Environment and dynamics
+    num_agents: int = 5
+    velocity_clip: tuple[float, float] = (-2.0, 2.0)
+    accelerate_clip: tuple[float, float] = (-4.0, 4.0)
+    time_step: float = 0.1
+    sensing_radius: float = 5.0
+    sensor_azimuth_bins: int = 24
+    sensor_elevation_bins: int = 9
+    sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0)
+    sensor_goal_distance_clip: float | None = None
+    max_steps: int = 200
+    goal_tolerance: float = 0.3
+    workspace_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (-0.5, -2.5, -1.2),
+        (8.5, 2.0, 1.2),
+    )
+
+    # Reward and safety
+    obstacle_potential_weight: float = 2.0
+    obstacle_influence_distance: float = 1.5
+    obstacle_potential_penalty_max: float = 20.0
+    boundary_influence_distance: float = 0.6
+    boundary_potential_weight: float = 0.3
+    boundary_potential_penalty_max: float = 20.0
+    boundary_distance_epsilon: float = 1e-3
+    step_reward_weight: float = 4.0
+    step_penalty: float = 0.01
+    collision_penalty: float = 80.0
+    timeout_penalty: float = 50.0
+    success_bonus: float = 300.0
+    collision_margin: float = 0.0
+    inter_agent_safe_distance: float = 0.6
+    inter_agent_collision_penalty: float = 20.0
+    inter_agent_potential_weight: float = 1.0
+    inter_agent_influence_distance: float = 1.2
+    acceleration_penalty_weight: float = 0.01
+    acceleration_clip_penalty_weight: float = 0.05
+
+    # DMP
+    dmp_dims: int = 3
+    k_alpha: float = 20.0
+    k_beta: float = 5.0
+    alpha_s: float = 4.0
+    tau: float = 1.2
+    forcing_term_max: float = 10.0
+    forcing_term_min: float = -10.0
+    goal_offset_max: float = 1.5
+
+    # MAPPO hyperparameters
+    use_gae: bool = True
+    gae_lambda: float = 1.0
+    kl_coeff: float = 0.2
+    batch_episode: int = 64
+    num_sgd_iter: int = 2
+    vf_loss_coeff: float = 1.0
+    learning_rate: float = 1e-4
+    entropy_coeff: float = 0.01
+    clip_param: float = 0.3
+    vf_clip_param: float = 10.0
+    batch_mode: str = "truncate_episodes"
+    fixed_batch_timesteps: int | None = None
+
+    # Training and Ray
+    training_iteration: int = 500000
+    stop_timesteps: int = 8_000_000
+    stop_reward: float = 999_999.0
+    seed: int = 321
+    output_root: str = "artifacts/mappo"
+    local_mode: bool = True
+    share_policy: str = "all"
+    evaluation_interval: int | None = None
+    framework: str = "torch"
+    num_workers: int = 0
+    num_gpus: int = 0
+    num_cpus_per_worker: int = 1
+    num_gpus_per_worker: int = 0
+    checkpoint_freq: int = 0
+    checkpoint_end: bool = False
+    restore_model_path: str = ""
+    restore_params_path: str = ""
+
+    def build_dynamics_config(self) -> dict[str, Any]:
+        return {
+            "velocity_clip": self.velocity_clip,
+            "accelerate_clip": self.accelerate_clip,
+            "time_step": self.time_step,
+        }
+
+    def build_sensor_config(self) -> dict[str, Any]:
+        sensor_config: dict[str, Any] = {
+            "sensing_radius": self.sensing_radius,
+            "azimuth_bins": self.sensor_azimuth_bins,
+            "elevation_bins": self.sensor_elevation_bins,
+            "elevation_range_deg": self.sensor_elevation_range_deg,
+        }
+        if self.sensor_goal_distance_clip is not None:
+            sensor_config["goal_distance_clip"] = self.sensor_goal_distance_clip
+        return sensor_config
+
+    def build_dmp_config(self) -> dict[str, Any]:
+        return {
+            "dt": self.time_step,
+            "dims": self.dmp_dims,
+            "K_alpha": self.k_alpha,
+            "K_beta": self.k_beta,
+            "alpha_s": self.alpha_s,
+            "tau": self.tau,
+            "forcing_term_max": self.forcing_term_max,
+            "forcing_term_min": self.forcing_term_min,
+            "goal_offset_max": self.goal_offset_max,
+        }
+
+    def build_env_config(self) -> MultiAgentEnvConfig:
+        return MultiAgentEnvConfig(
+            num_agents=self.num_agents,
+            max_steps=self.max_steps,
+            goal_tolerance=self.goal_tolerance,
+            obstacle_potential_weight=self.obstacle_potential_weight,
+            obstacle_influence_distance=self.obstacle_influence_distance,
+            obstacle_potential_penalty_max=self.obstacle_potential_penalty_max,
+            step_reward_weight=self.step_reward_weight,
+            step_penalty=self.step_penalty,
+            collision_penalty=self.collision_penalty,
+            timeout_penalty=self.timeout_penalty,
+            success_bonus=self.success_bonus,
+            collision_margin=self.collision_margin,
+            workspace_bounds=self.workspace_bounds,
+            boundary_influence_distance=self.boundary_influence_distance,
+            boundary_potential_weight=self.boundary_potential_weight,
+            boundary_potential_penalty_max=self.boundary_potential_penalty_max,
+            boundary_distance_epsilon=self.boundary_distance_epsilon,
+            inter_agent_safe_distance=self.inter_agent_safe_distance,
+            inter_agent_collision_penalty=self.inter_agent_collision_penalty,
+            inter_agent_potential_weight=self.inter_agent_potential_weight,
+            inter_agent_influence_distance=self.inter_agent_influence_distance,
+            acceleration_penalty_weight=self.acceleration_penalty_weight,
+            acceleration_clip_penalty_weight=self.acceleration_clip_penalty_weight,
+        )
+
+    def build_env_config_dict(self) -> dict[str, Any]:
+        return dict(vars(self.build_env_config()))
+
+    def build_core_env_kwargs(self) -> dict[str, Any]:
+        return {
+            "dynamics_config": self.build_dynamics_config(),
+            "sensor_config": self.build_sensor_config(),
+            "dmp_config": self.build_dmp_config(),
+            "env_config": self.build_env_config_dict(),
+        }
+
+    def build_algo_args(self) -> dict[str, Any]:
+        return {
+            "use_gae": self.use_gae,
+            "lambda": self.gae_lambda,
+            "kl_coeff": self.kl_coeff,
+            "batch_episode": self.batch_episode,
+            "num_sgd_iter": self.num_sgd_iter,
+            "vf_loss_coeff": self.vf_loss_coeff,
+            "lr": self.learning_rate,
+            "entropy_coeff": self.entropy_coeff,
+            "clip_param": self.clip_param,
+            "vf_clip_param": self.vf_clip_param,
+            "batch_mode": self.batch_mode,
+        }
+
+    def build_model_preference(self) -> dict[str, Any]:
+        return {
+            "core_arch": self.model_core_arch,
+        }
+
+    def build_running_params(self, local_dir: str | None = None) -> dict[str, Any]:
+        running_params: dict[str, Any] = {
+            "local_mode": self.local_mode,
+            "share_policy": self.share_policy,
+            "evaluation_interval": self.evaluation_interval,
+            "framework": self.framework,
+            "num_workers": self.num_workers,
+            "num_gpus": self.num_gpus,
+            "num_cpus_per_worker": self.num_cpus_per_worker,
+            "num_gpus_per_worker": self.num_gpus_per_worker,
+            "checkpoint_freq": self.checkpoint_freq,
+            "checkpoint_end": self.checkpoint_end,
+            "restore_path": {
+                "model_path": self.restore_model_path,
+                "params_path": self.restore_params_path,
+            },
+            "stop_iters": self.training_iteration,
+            "stop_timesteps": self.stop_timesteps,
+            "stop_reward": self.stop_reward,
+            "seed": self.seed,
+            "local_dir": "" if local_dir is None else local_dir,
+        }
+        if self.fixed_batch_timesteps is not None:
+            running_params["fixed_batch_timesteps"] = int(self.fixed_batch_timesteps)
+        return running_params
+
+    def build_stop_config(self, training_iteration: int | None = None) -> dict[str, Any]:
+        return {
+            "training_iteration": self.training_iteration if training_iteration is None else int(training_iteration),
+        }
+
+
 EXPERIMENT_CONFIG = SACExperimentConfig()
+MAPPO_EXPERIMENT_CONFIG = MAPPOExperimentConfig()

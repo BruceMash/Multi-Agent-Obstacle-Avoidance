@@ -1,10 +1,17 @@
+from __future__ import annotations
+
 import copy
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import gymnasium as gym
 import numpy as np
-from gymnasium import spaces
+
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+except ImportError:
+    import gym
+    from gym import spaces
 
 from Controller.dmp_rl import DMPConfig, SecondOrderDMPController
 from Entity.KinematicModel import PartialDynamic
@@ -302,7 +309,11 @@ class SingleAgentDMPEnv(gym.Env):
         - dynamic_obstacles
         """
         # 先让父类处理随机种子，保证接口合法
-        super().reset(seed=seed)
+        try:
+            super().reset(seed=seed)
+        except TypeError:
+            if seed is not None or not hasattr(self, "np_random"):
+                self.np_random = np.random.default_rng(seed)
         options = options or {}
 
         # 读取本回合场景配置；训练模式下未显式指定起终点时按配置随机采样。

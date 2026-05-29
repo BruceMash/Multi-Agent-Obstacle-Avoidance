@@ -30,8 +30,8 @@ from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.policy.torch_policy import EntropyCoeffSchedule, \
     LearningRateSchedule
 from ray.rllib.utils.typing import TensorType, TrainerConfigDict
-from marllib.marl.algos.utils.centralized_critic import CentralizedValueMixin, centralized_critic_postprocessing
-from marllib.marl.algos.core import setup_torch_mixins
+from MARL.algos.utils.centralized_critic import CentralizedValueMixin, centralized_critic_postprocessing
+from MARL.algos.core import setup_torch_mixins
 
 #############
 ### MAPPO ###

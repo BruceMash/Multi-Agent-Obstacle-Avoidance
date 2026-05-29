@@ -56,7 +56,7 @@ class SecondOrderDMPController:
         """
         计算当前 DMP 加速度。
 
-        action 的组织方式为：
+        单机action 的组织方式为：
         [forcing_x, forcing_y, forcing_z, goal_offset_x, goal_offset_y, goal_offset_z]
         """
         position = np.asarray(position, dtype=float)

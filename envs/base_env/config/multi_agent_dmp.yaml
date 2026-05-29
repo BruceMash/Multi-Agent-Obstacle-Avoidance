@@ -1,0 +1,22 @@
+env: multi_agent_dmp
+agent_level_batch_update: False
+global_state_flag: False
+opp_action_in_cc: True
+mask_flag: False
+
+env_args:
+  map_name: default
+  core_env_kwargs:
+    dynamics_config:
+      velocity_clip: [-2.0, 2.0]
+      accelerate_clip: [-4.0, 4.0]
+      time_step: 0.1
+    sensor_config:
+      sensing_radius: 5.0
+    dmp_config:
+      dt: 0.1
+      dims: 3
+    env_config:
+      num_agents: 3
+      max_steps: 64
+      goal_tolerance: 0.3

@@ -1,16 +1,18 @@
 """Single-agent generalization evaluation entry point.
 
-This script is intentionally built in small modules. The current version only
-parses command-line arguments, resolves artifact paths, and creates output
-directories. Model loading, scenario construction, episode rollout, metrics, and
-visual outputs are added in later reviewable steps.
+This script evaluates single-agent policy generalization, writes metric CSVs,
+records policy outputs, and exports terminal-state figures plus HTML animations.
 """
 
 from __future__ import annotations  # 启用延后解析，避免循环引用、前向引用带来的问题
 
 import argparse
 import csv
+import html
+import json
+import re
 from dataclasses import dataclass, fields, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +24,8 @@ from runner_sac import build_env, build_model, load_checkpoint
 
 DEFAULT_MODEL_NAME = "best_eval_model.pt"
 DEFAULT_OUTPUT_DIR_NAME = "generalization_eval"
-DEFAULT_GIF_FPS = 10
-DEFAULT_GIF_MAX_FRAMES = 40
+DEFAULT_HTML_FPS = 10
+DEFAULT_HTML_MAX_FRAMES = 40
 ANIMATION_BG_COLOR = "#06111f"
 ANIMATION_PANEL_COLOR = "#0b1b2b"
 ANIMATION_GRID_COLOR = "#27445e"
@@ -43,13 +45,19 @@ class EvalPaths:    # 数据类
 
     run_dir: Path
     model_path: Path
+    output_root_dir: Path
+    event_name: str
     output_dir: Path
     terminal_state_dir: Path
-    gif_dir: Path
-    chase_gif_dir: Path
+    trajectory_html_dir: Path
+    chase_view_html_dir: Path
+    policy_output_dir: Path
     episodes_csv: Path
     summary_csv: Path
     failed_cases_csv: Path
+    visualization_manifest_csv: Path
+    visualization_index_html: Path
+    event_metadata_json: Path
 
 
 @dataclass(frozen=True)
@@ -96,12 +104,18 @@ class EpisodeMetrics:   # 一个验证episode的统计量获取
 
 @dataclass(frozen=True)
 class EpisodeTrace: # 收集路径数据
-    """Trajectory data retained for later terminal-state figures and GIFs."""
+    """Trajectory data retained for later terminal-state figures and HTML animations."""
 
     scenario: str
     seed: int
     trajectory: np.ndarray
     acceleration_history: np.ndarray
+    action_history: np.ndarray
+    scaled_action_history: np.ndarray
+    forcing_action_history: np.ndarray
+    offside_action_history: np.ndarray
+    forcing_log_prob_history: np.ndarray
+    offside_log_prob_history: np.ndarray
     start: np.ndarray
     goal: np.ndarray
     obstacles: list[dict[str, Any]]
@@ -115,6 +129,18 @@ class EpisodeResult:    # Episode结果
 
     metrics: EpisodeMetrics
     trace: EpisodeTrace
+
+
+@dataclass(frozen=True)
+class PolicyStepOutput:
+    """Policy outputs recorded for one environment step."""
+
+    action: np.ndarray
+    scaled_action: np.ndarray
+    forcing_action: np.ndarray
+    offside_action: np.ndarray
+    forcing_log_prob: float
+    offside_log_prob: float
 
 
 @dataclass(frozen=True)
@@ -153,8 +179,17 @@ def parse_args() -> argparse.Namespace: # 构造parser参数类
         type=Path,
         default=None,
         help=(
-            "Directory for evaluation outputs. If omitted, the script uses "
+            "Root directory for evaluation events. If omitted, the script uses "
             "<run-dir>/generalization_eval."
+        ),
+    )
+    parser.add_argument(
+        "--event-name",
+        type=str,
+        default=None,
+        help=(
+            "Name of the current evaluation event directory. If omitted, the "
+            "script uses eval_<timestamp>_seed_<base-seed>."
         ),
     )
     parser.add_argument(
@@ -172,9 +207,22 @@ def parse_args() -> argparse.Namespace: # 构造parser参数类
     parser.add_argument(
         "--no-visualizations",
         action="store_true",
-        help="Disable terminal-state figures and GIF exports.",
+        help="Disable terminal-state figures and HTML animation exports.",
     )
     return parser.parse_args()
+
+
+def sanitize_event_name(event_name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", event_name.strip())
+    cleaned = cleaned.strip("._-")
+    if not cleaned:
+        raise ValueError("--event-name must contain at least one valid filename character")
+    return cleaned
+
+
+def make_default_event_name(base_seed: int) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"eval_{timestamp}_seed_{int(base_seed)}"
 
 
 def resolve_arguments(args: argparse.Namespace) -> EvalArguments:   # 读取参数类
@@ -184,7 +232,7 @@ def resolve_arguments(args: argparse.Namespace) -> EvalArguments:   # 读取参�
         if args.model_path is not None
         else run_dir / DEFAULT_MODEL_NAME
     )
-    output_dir = (
+    output_root_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir is not None
         else run_dir / DEFAULT_OUTPUT_DIR_NAME
@@ -193,30 +241,41 @@ def resolve_arguments(args: argparse.Namespace) -> EvalArguments:   # 读取参�
     if args.episodes_per_scenario <= 0:
         raise ValueError("--episodes-per-scenario must be positive")
 
+    base_seed = int(args.base_seed)
+    event_name = sanitize_event_name(args.event_name) if args.event_name is not None else make_default_event_name(base_seed)
+    output_dir = output_root_dir / event_name
+
     return EvalArguments(
         paths=EvalPaths(
             run_dir=run_dir,
             model_path=model_path,
+            output_root_dir=output_root_dir,
+            event_name=event_name,
             output_dir=output_dir,
             terminal_state_dir=output_dir / "terminal_states",
-            gif_dir=output_dir / "gifs",
-            chase_gif_dir=output_dir / "chase_gifs",
+            trajectory_html_dir=output_dir / "trajectory_html",
+            chase_view_html_dir=output_dir / "chase_view_html",
+            policy_output_dir=output_dir / "policy_outputs",
             episodes_csv=output_dir / "episodes.csv",
             summary_csv=output_dir / "summary.csv",
             failed_cases_csv=output_dir / "failed_cases.csv",
+            visualization_manifest_csv=output_dir / "visualization_manifest.csv",
+            visualization_index_html=output_dir / "visualization_index.html",
+            event_metadata_json=output_dir / "event_metadata.json",
         ),
         episodes_per_scenario=int(args.episodes_per_scenario),
-        base_seed=int(args.base_seed),
+        base_seed=base_seed,
         save_visualizations=not bool(args.no_visualizations),
     )
 
 
 def prepare_output_directories(eval_args: EvalArguments) -> None:   # 组织输出字典
     eval_args.paths.output_dir.mkdir(parents=True, exist_ok=True)
+    eval_args.paths.policy_output_dir.mkdir(parents=True, exist_ok=True)
     if eval_args.save_visualizations:
         eval_args.paths.terminal_state_dir.mkdir(parents=True, exist_ok=True)
-        eval_args.paths.gif_dir.mkdir(parents=True, exist_ok=True)
-        eval_args.paths.chase_gif_dir.mkdir(parents=True, exist_ok=True)
+        eval_args.paths.trajectory_html_dir.mkdir(parents=True, exist_ok=True)
+        eval_args.paths.chase_view_html_dir.mkdir(parents=True, exist_ok=True)
 
 
 def validate_input_paths(eval_args: EvalArguments) -> None: # 验证输入路径
@@ -400,6 +459,92 @@ def extract_obstacles(env: Any) -> list[dict[str, Any]]:
     return obstacles
 
 
+def _first_scalar(value: np.ndarray, default: float = float("nan")) -> float:
+    flat = np.asarray(value, dtype=float).reshape(-1)
+    if flat.size == 0:
+        return default
+    return float(flat[0])
+
+
+def _scale_action_if_available(model: Any, action: np.ndarray) -> np.ndarray:
+    if not hasattr(model, "_scale_action"):
+        return np.full_like(np.asarray(action, dtype=float), np.nan, dtype=float)
+    try:
+        return np.asarray(model._scale_action(np.asarray(action, dtype=float)), dtype=float)
+    except Exception:
+        return np.full_like(np.asarray(action, dtype=float), np.nan, dtype=float)
+
+
+def _split_scaled_action(scaled_action: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    scaled_action = np.asarray(scaled_action, dtype=float)
+    if scaled_action.ndim != 1 or scaled_action.size % 2 != 0:
+        return np.empty(0, dtype=float), np.empty(0, dtype=float)
+    split_index = scaled_action.size // 2
+    return scaled_action[:split_index].copy(), scaled_action[split_index:].copy()
+
+
+def predict_policy_step_output(
+    model: Any,
+    observation: np.ndarray,
+    deterministic: bool,
+) -> PolicyStepOutput:
+    if all(hasattr(model, attr) for attr in ("actor", "_split_observations", "_unscale_action", "device")):
+        try:
+            import torch as th
+
+            obs_array = np.asarray(observation, dtype=np.float32)
+            vectorized = obs_array.ndim > 1
+            if not vectorized:
+                obs_array = obs_array[None, :]
+
+            obs_tensor = th.as_tensor(obs_array, device=model.device, dtype=th.float32)
+            with th.no_grad():
+                sensor_observation, extra_observation = model._split_observations(obs_tensor)
+                forcing_action, offside_action, forcing_log_prob, offside_log_prob = model.actor(
+                    sensor_observation,
+                    extra_observation,
+                    deterministic=deterministic,
+                )
+                scaled_action_tensor = th.cat([forcing_action, offside_action], dim=-1)
+
+            scaled_action = scaled_action_tensor.detach().cpu().numpy()
+            action = np.asarray(model._unscale_action(scaled_action), dtype=float)
+            forcing_action_np = forcing_action.detach().cpu().numpy()
+            offside_action_np = offside_action.detach().cpu().numpy()
+            forcing_log_prob_np = forcing_log_prob.detach().cpu().numpy()
+            offside_log_prob_np = offside_log_prob.detach().cpu().numpy()
+
+            if not vectorized:
+                action = action.squeeze(axis=0)
+                scaled_action = scaled_action.squeeze(axis=0)
+                forcing_action_np = forcing_action_np.squeeze(axis=0)
+                offside_action_np = offside_action_np.squeeze(axis=0)
+
+            return PolicyStepOutput(
+                action=np.asarray(action, dtype=float),
+                scaled_action=np.asarray(scaled_action, dtype=float),
+                forcing_action=np.asarray(forcing_action_np, dtype=float),
+                offside_action=np.asarray(offside_action_np, dtype=float),
+                forcing_log_prob=_first_scalar(forcing_log_prob_np),
+                offside_log_prob=_first_scalar(offside_log_prob_np),
+            )
+        except Exception:
+            pass
+
+    action, _ = model.predict(observation, deterministic=deterministic)
+    action_array = np.asarray(action, dtype=float)
+    scaled_action = _scale_action_if_available(model, action_array)
+    forcing_action, offside_action = _split_scaled_action(scaled_action)
+    return PolicyStepOutput(
+        action=action_array,
+        scaled_action=scaled_action,
+        forcing_action=forcing_action,
+        offside_action=offside_action,
+        forcing_log_prob=float("nan"),
+        offside_log_prob=float("nan"),
+    )
+
+
 def run_single_episode(     # 运行单个场景
     model: Any,
     scenario: ScenarioSpec,
@@ -414,6 +559,12 @@ def run_single_episode(     # 运行单个场景
         trajectory = [start.copy()]
         acceleration_history = [np.zeros(3, dtype=float)]
         obstacle_history = [extract_obstacles(env)]
+        action_history: list[np.ndarray] = []
+        scaled_action_history: list[np.ndarray] = []
+        forcing_action_history: list[np.ndarray] = []
+        offside_action_history: list[np.ndarray] = []
+        forcing_log_prob_history: list[float] = []
+        offside_log_prob_history: list[float] = []
         total_reward = 0.0
         episode_length = 0
 
@@ -434,8 +585,15 @@ def run_single_episode(     # 运行单个场景
         truncated = False
 
         while not (terminated or truncated):    # 推进环境
-            action, _ = model.predict(observation, deterministic=deterministic) # 模型决策网络输出
-            observation, reward, terminated, truncated, info = env.step(action) # 收集环境信息
+            policy_output = predict_policy_step_output(model, observation, deterministic=deterministic)
+            action_history.append(policy_output.action.copy())
+            scaled_action_history.append(policy_output.scaled_action.copy())
+            forcing_action_history.append(policy_output.forcing_action.copy())
+            offside_action_history.append(policy_output.offside_action.copy())
+            forcing_log_prob_history.append(policy_output.forcing_log_prob)
+            offside_log_prob_history.append(policy_output.offside_log_prob)
+
+            observation, reward, terminated, truncated, info = env.step(policy_output.action) # 收集环境信息
             total_reward += float(reward)   # 累加reward
             episode_length += 1     # 长度+1
             trajectory.append(env.dynamics.p.copy())    # 记录动态过程的位置
@@ -482,6 +640,12 @@ def run_single_episode(     # 运行单个场景
             seed=int(seed),
             trajectory=trajectory_array,
             acceleration_history=np.asarray(acceleration_history, dtype=float),
+            action_history=np.asarray(action_history, dtype=float),
+            scaled_action_history=np.asarray(scaled_action_history, dtype=float),
+            forcing_action_history=np.asarray(forcing_action_history, dtype=float),
+            offside_action_history=np.asarray(offside_action_history, dtype=float),
+            forcing_log_prob_history=np.asarray(forcing_log_prob_history, dtype=float),
+            offside_log_prob_history=np.asarray(offside_log_prob_history, dtype=float),
             start=start,
             goal=goal,
             obstacles=obstacle_history[-1],
@@ -642,6 +806,33 @@ def write_evaluation_outputs(
     summary_rows = write_summary_csv(results, scenarios, paths.summary_csv)
     write_failed_cases_csv(results, paths.failed_cases_csv)
     return summary_rows
+
+
+def write_event_metadata(eval_args: EvalArguments, scenarios: list[ScenarioSpec]) -> Path:
+    metadata = {
+        "event_name": eval_args.paths.event_name,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "run_dir": str(eval_args.paths.run_dir),
+        "model_path": str(eval_args.paths.model_path),
+        "output_root_dir": str(eval_args.paths.output_root_dir),
+        "event_dir": str(eval_args.paths.output_dir),
+        "base_seed": eval_args.base_seed,
+        "episodes_per_scenario": eval_args.episodes_per_scenario,
+        "save_visualizations": eval_args.save_visualizations,
+        "scenario_count": len(scenarios),
+        "scenarios": [
+            {
+                "name": scenario.name,
+                "description": scenario.description,
+            }
+            for scenario in scenarios
+        ],
+    }
+    eval_args.paths.event_metadata_json.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return eval_args.paths.event_metadata_json
 
 
 def set_equal_3d_axes(ax: Any, points: list[np.ndarray]) -> None:
@@ -906,7 +1097,7 @@ def save_terminal_state_figures(results: list[EpisodeResult], output_dir: Path) 
     return saved_paths
 
 
-def make_animation_frame_indices(trajectory_length: int, max_frames: int = DEFAULT_GIF_MAX_FRAMES) -> np.ndarray:
+def make_animation_frame_indices(trajectory_length: int, max_frames: int = DEFAULT_HTML_MAX_FRAMES) -> np.ndarray:
     if trajectory_length <= 1:
         return np.array([0], dtype=int)
     frame_count = min(int(max_frames), int(trajectory_length))
@@ -1384,19 +1575,23 @@ def plot_dynamic_sphere_range(ax: Any, center: np.ndarray, radius: float) -> lis
     return [surface, wire]
 
 
-def save_trajectory_gif(result: EpisodeResult, output_dir: Path) -> Path:
+def episode_artifact_stem(trace: EpisodeTrace) -> str:
+    return f"{trace.scenario}_seed_{trace.seed}_{trace.terminal_status}"
+
+
+def save_trajectory_html(result: EpisodeResult, output_dir: Path) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation, PillowWriter
+    from matplotlib.animation import FuncAnimation, HTMLWriter
     from matplotlib.patches import Circle
 
     metrics = result.metrics
     trace = result.trace
     trajectory = trace.trajectory
     frame_indices = make_animation_frame_indices(len(trajectory))
-    save_path = output_dir / f"{trace.scenario}_seed_{trace.seed}_{trace.terminal_status}.gif"
+    save_path = output_dir / f"{episode_artifact_stem(trace)}.html"
 
     fig = plt.figure(figsize=(14, 7), facecolor=ANIMATION_BG_COLOR)
     ax_3d = fig.add_subplot(1, 2, 1, projection="3d")
@@ -1569,18 +1764,18 @@ def save_trajectory_gif(result: EpisodeResult, output_dir: Path) -> Path:
             acceleration_line_top,
         )
 
-    animation = FuncAnimation(fig, update, frames=len(frame_indices), interval=1000 / DEFAULT_GIF_FPS, blit=False)
+    animation = FuncAnimation(fig, update, frames=len(frame_indices), interval=1000 / DEFAULT_HTML_FPS, blit=False)
     fig.subplots_adjust(left=0.04, right=0.98, bottom=0.08, top=0.88, wspace=0.36)
-    animation.save(save_path, writer=PillowWriter(fps=DEFAULT_GIF_FPS))
+    animation.save(save_path, writer=HTMLWriter(fps=DEFAULT_HTML_FPS, embed_frames=True))
     plt.close(fig)
     return save_path
 
 
-def save_trajectory_gifs(results: list[EpisodeResult], output_dir: Path) -> list[Path]:
+def save_trajectory_htmls(results: list[EpisodeResult], output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
     for result in results:
-        saved_paths.append(save_trajectory_gif(result, output_dir))
+        saved_paths.append(save_trajectory_html(result, output_dir))
     return saved_paths
 
 
@@ -1620,18 +1815,18 @@ def set_chase_camera_axes(ax: Any, position: np.ndarray, direction: np.ndarray) 
         ax.set_box_aspect((forward_distance + backward_distance, 2.0 * side_distance, vertical_distance + 0.45))
 
 
-def save_chase_view_gif(result: EpisodeResult, output_dir: Path) -> Path:
+def save_chase_view_html(result: EpisodeResult, output_dir: Path) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation, PillowWriter
+    from matplotlib.animation import FuncAnimation, HTMLWriter
 
     metrics = result.metrics
     trace = result.trace
     trajectory = trace.trajectory
     frame_indices = make_animation_frame_indices(len(trajectory))
-    save_path = output_dir / f"{trace.scenario}_seed_{trace.seed}_{trace.terminal_status}_chase.gif"
+    save_path = output_dir / f"{episode_artifact_stem(trace)}_chase.html"
 
     fig = plt.figure(figsize=(9, 6), facecolor=ANIMATION_BG_COLOR)
     ax = fig.add_subplot(1, 1, 1, projection="3d")
@@ -1736,25 +1931,272 @@ def save_chase_view_gif(result: EpisodeResult, output_dir: Path) -> Path:
         )
         return path_line, current_point, dynamic_points, clearance_line, acceleration_line, *dynamic_range_artists
 
-    animation = FuncAnimation(fig, update, frames=len(frame_indices), interval=1000 / DEFAULT_GIF_FPS, blit=False)
+    animation = FuncAnimation(fig, update, frames=len(frame_indices), interval=1000 / DEFAULT_HTML_FPS, blit=False)
     fig.subplots_adjust(left=0.06, right=0.97, bottom=0.08, top=0.88)
-    animation.save(save_path, writer=PillowWriter(fps=DEFAULT_GIF_FPS))
+    animation.save(save_path, writer=HTMLWriter(fps=DEFAULT_HTML_FPS, embed_frames=True))
     plt.close(fig)
     return save_path
 
 
-def save_chase_view_gifs(results: list[EpisodeResult], output_dir: Path) -> list[Path]:
+def save_chase_view_htmls(results: list[EpisodeResult], output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
     for result in results:
-        saved_paths.append(save_chase_view_gif(result, output_dir))
+        saved_paths.append(save_chase_view_html(result, output_dir))
     return saved_paths
+
+
+def terminal_state_path_for_result(result: EpisodeResult, paths: EvalPaths) -> Path:
+    return paths.terminal_state_dir / f"{episode_artifact_stem(result.trace)}.png"
+
+
+def trajectory_html_path_for_result(result: EpisodeResult, paths: EvalPaths) -> Path:
+    return paths.trajectory_html_dir / f"{episode_artifact_stem(result.trace)}.html"
+
+
+def chase_view_html_path_for_result(result: EpisodeResult, paths: EvalPaths) -> Path:
+    return paths.chase_view_html_dir / f"{episode_artifact_stem(result.trace)}_chase.html"
+
+
+def policy_output_path_for_result(result: EpisodeResult, paths: EvalPaths) -> Path:
+    return paths.policy_output_dir / f"{episode_artifact_stem(result.trace)}.npz"
+
+
+def relative_artifact_path(path: Path, output_dir: Path) -> str:
+    try:
+        return path.relative_to(output_dir).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def save_policy_output_npz(result: EpisodeResult, output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trace = result.trace
+    save_path = output_dir / f"{episode_artifact_stem(trace)}.npz"
+    np.savez_compressed(
+        save_path,
+        scenario=np.asarray(trace.scenario),
+        seed=np.asarray(trace.seed, dtype=np.int64),
+        terminal_status=np.asarray(trace.terminal_status),
+        trajectory=trace.trajectory,
+        acceleration_history=trace.acceleration_history,
+        action_history=trace.action_history,
+        scaled_action_history=trace.scaled_action_history,
+        forcing_action_history=trace.forcing_action_history,
+        offside_action_history=trace.offside_action_history,
+        forcing_log_prob_history=trace.forcing_log_prob_history,
+        offside_log_prob_history=trace.offside_log_prob_history,
+    )
+    return save_path
+
+
+def save_policy_output_npzs(results: list[EpisodeResult], output_dir: Path) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths = []
+    for result in results:
+        saved_paths.append(save_policy_output_npz(result, output_dir))
+    return saved_paths
+
+
+def visualization_manifest_row(
+    result: EpisodeResult,
+    paths: EvalPaths,
+    include_visualizations: bool,
+) -> dict[str, Any]:
+    metrics = result.metrics
+    row = episode_metrics_to_row(metrics)
+    row["terminal_status"] = result.trace.terminal_status
+    row["policy_output_npz"] = relative_artifact_path(policy_output_path_for_result(result, paths), paths.output_dir)
+    row["terminal_state_png"] = (
+        relative_artifact_path(terminal_state_path_for_result(result, paths), paths.output_dir)
+        if include_visualizations
+        else ""
+    )
+    row["trajectory_html"] = (
+        relative_artifact_path(trajectory_html_path_for_result(result, paths), paths.output_dir)
+        if include_visualizations
+        else ""
+    )
+    row["chase_view_html"] = (
+        relative_artifact_path(chase_view_html_path_for_result(result, paths), paths.output_dir)
+        if include_visualizations
+        else ""
+    )
+    return row
+
+
+def write_visualization_manifest(
+    results: list[EpisodeResult],
+    paths: EvalPaths,
+    include_visualizations: bool,
+) -> Path:
+    artifact_fieldnames = [
+        "terminal_status",
+        "terminal_state_png",
+        "trajectory_html",
+        "chase_view_html",
+        "policy_output_npz",
+    ]
+    fieldnames = episode_metric_fieldnames() + artifact_fieldnames
+    with paths.visualization_manifest_csv.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in results:
+            writer.writerow(visualization_manifest_row(result, paths, include_visualizations))
+    return paths.visualization_manifest_csv
+
+
+def _format_index_float(value: float) -> str:
+    if not np.isfinite(value):
+        return "nan"
+    return f"{value:.3f}"
+
+
+def _artifact_link(relative_path: str, label: str) -> str:
+    if not relative_path:
+        return ""
+    return f'<a href="{html.escape(relative_path, quote=True)}">{html.escape(label)}</a>'
+
+
+def write_visualization_index(
+    results: list[EpisodeResult],
+    paths: EvalPaths,
+    include_visualizations: bool,
+) -> Path:
+    rows = []
+    for result in results:
+        manifest_row = visualization_manifest_row(result, paths, include_visualizations)
+        metrics = result.metrics
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(metrics.scenario)}</td>"
+            f"<td>{metrics.seed}</td>"
+            f"<td>{html.escape(result.trace.terminal_status)}</td>"
+            f"<td>{metrics.success}</td>"
+            f"<td>{_format_index_float(metrics.reward)}</td>"
+            f"<td>{metrics.episode_length}</td>"
+            f"<td>{_format_index_float(metrics.distance_to_goal)}</td>"
+            f"<td>{_format_index_float(metrics.path_efficiency)}</td>"
+            f"<td>{_artifact_link(manifest_row['terminal_state_png'], 'png')}</td>"
+            f"<td>{_artifact_link(manifest_row['trajectory_html'], 'trajectory')}</td>"
+            f"<td>{_artifact_link(manifest_row['chase_view_html'], 'chase')}</td>"
+            f"<td>{_artifact_link(manifest_row['policy_output_npz'], 'npz')}</td>"
+            "</tr>"
+        )
+
+    manifest_link = relative_artifact_path(paths.visualization_manifest_csv, paths.output_dir)
+    metadata_link = relative_artifact_path(paths.event_metadata_json, paths.output_dir)
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Single-agent generalization artifacts</title>
+<style>
+:root {{
+  color-scheme: dark;
+  --bg: #06111f;
+  --panel: #0b1b2b;
+  --grid: #27445e;
+  --text: #d8ecff;
+  --muted: #8fb2cc;
+  --accent: #27e8ff;
+}}
+body {{
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, Helvetica, sans-serif;
+}}
+main {{
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 28px;
+}}
+h1 {{
+  margin: 0 0 8px;
+  font-size: 26px;
+  font-weight: 700;
+}}
+p {{
+  margin: 0 0 20px;
+  color: var(--muted);
+}}
+table {{
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--grid);
+}}
+th, td {{
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--grid);
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+}}
+th {{
+  color: #ffffff;
+  background: #10253a;
+  position: sticky;
+  top: 0;
+}}
+a {{
+  color: var(--accent);
+  text-decoration: none;
+}}
+a:hover {{
+  text-decoration: underline;
+}}
+.table-wrap {{
+  overflow-x: auto;
+}}
+</style>
+</head>
+<body>
+<main>
+<h1>Single-agent generalization artifacts</h1>
+<p>
+Manifest: {_artifact_link(manifest_link, 'visualization_manifest.csv')} |
+Metadata: {_artifact_link(metadata_link, 'event_metadata.json')}
+</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>scenario</th>
+<th>seed</th>
+<th>status</th>
+<th>success</th>
+<th>reward</th>
+<th>length</th>
+<th>distance</th>
+<th>efficiency</th>
+<th>terminal</th>
+<th>trajectory</th>
+<th>chase</th>
+<th>policy</th>
+</tr>
+</thead>
+<tbody>
+{chr(10).join(rows)}
+</tbody>
+</table>
+</div>
+</main>
+</body>
+</html>
+"""
+    paths.visualization_index_html.write_text(page, encoding="utf-8")
+    return paths.visualization_index_html
 
 
 def print_output_summary(paths: EvalPaths, summary_rows: list[dict[str, Any]]) -> None:
     print(f"episodes_csv: {paths.episodes_csv}")
     print(f"summary_csv: {paths.summary_csv}")
     print(f"failed_cases_csv: {paths.failed_cases_csv}")
+    print(f"visualization_manifest_csv: {paths.visualization_manifest_csv}")
+    print(f"visualization_index_html: {paths.visualization_index_html}")
+    print(f"event_metadata_json: {paths.event_metadata_json}")
     for row in summary_rows:
         print(
             f"[summary] {row['scenario']} | "
@@ -1770,17 +2212,23 @@ def print_run_summary(eval_args: EvalArguments) -> None:    # 打印总结信息
     print("Single-agent generalization evaluation")
     print(f"run_dir: {eval_args.paths.run_dir}")
     print(f"model_path: {eval_args.paths.model_path}")
-    print(f"output_dir: {eval_args.paths.output_dir}")
+    print(f"output_root_dir: {eval_args.paths.output_root_dir}")
+    print(f"event_name: {eval_args.paths.event_name}")
+    print(f"event_dir: {eval_args.paths.output_dir}")
     print(f"episodes_csv: {eval_args.paths.episodes_csv}")
     print(f"summary_csv: {eval_args.paths.summary_csv}")
     print(f"failed_cases_csv: {eval_args.paths.failed_cases_csv}")
+    print(f"visualization_manifest_csv: {eval_args.paths.visualization_manifest_csv}")
+    print(f"visualization_index_html: {eval_args.paths.visualization_index_html}")
+    print(f"event_metadata_json: {eval_args.paths.event_metadata_json}")
+    print(f"policy_output_dir: {eval_args.paths.policy_output_dir}")
     print(f"episodes_per_scenario: {eval_args.episodes_per_scenario}")
     print(f"base_seed: {eval_args.base_seed}")
     print(f"save_visualizations: {eval_args.save_visualizations}")
     if eval_args.save_visualizations:
         print(f"terminal_state_dir: {eval_args.paths.terminal_state_dir}")
-        print(f"gif_dir: {eval_args.paths.gif_dir}")
-        print(f"chase_gif_dir: {eval_args.paths.chase_gif_dir}")
+        print(f"trajectory_html_dir: {eval_args.paths.trajectory_html_dir}")
+        print(f"chase_view_html_dir: {eval_args.paths.chase_view_html_dir}")
 
 
 def print_runtime_summary(runtime: EvalRuntime) -> None:    # 运行读取场景总结
@@ -1812,6 +2260,7 @@ def main() -> None:
     print_run_summary(eval_args)
     scenarios = build_generalization_scenarios()
     print_scenario_summary(scenarios)
+    write_event_metadata(eval_args, scenarios)
 
     runtime: EvalRuntime | None = None
     try:
@@ -1825,16 +2274,22 @@ def main() -> None:
             deterministic=runtime.config.eval_deterministic,
         )
         summary_rows = write_evaluation_outputs(results, scenarios, eval_args.paths)
+        policy_output_paths = save_policy_output_npzs(results, eval_args.paths.policy_output_dir)
+        print(f"policy_output_npzs: {len(policy_output_paths)}")
         if eval_args.save_visualizations:
             terminal_state_paths = save_terminal_state_figures(results, eval_args.paths.terminal_state_dir)
             print(f"terminal_state_figures: {len(terminal_state_paths)}")
-            gif_paths = save_trajectory_gifs(results, eval_args.paths.gif_dir)
-            print(f"trajectory_gifs: {len(gif_paths)}")
-            chase_gif_paths = save_chase_view_gifs(results, eval_args.paths.chase_gif_dir)
-            print(f"chase_view_gifs: {len(chase_gif_paths)}")
-            print("status: batch evaluation, CSV outputs, terminal-state figures, GIFs, and chase-view GIFs completed")
+            trajectory_html_paths = save_trajectory_htmls(results, eval_args.paths.trajectory_html_dir)
+            print(f"trajectory_htmls: {len(trajectory_html_paths)}")
+            chase_view_html_paths = save_chase_view_htmls(results, eval_args.paths.chase_view_html_dir)
+            print(f"chase_view_htmls: {len(chase_view_html_paths)}")
+            write_visualization_manifest(results, eval_args.paths, include_visualizations=True)
+            write_visualization_index(results, eval_args.paths, include_visualizations=True)
+            print("status: batch evaluation, CSV outputs, policy outputs, terminal-state figures, and HTML animations completed")
         else:
-            print("status: batch evaluation and CSV outputs completed")
+            write_visualization_manifest(results, eval_args.paths, include_visualizations=False)
+            write_visualization_index(results, eval_args.paths, include_visualizations=False)
+            print("status: batch evaluation, CSV outputs, and policy outputs completed")
         print_output_summary(eval_args.paths, summary_rows)
     finally:    # 无论前面的try通不通过，都执行finally
         close_runtime(runtime)

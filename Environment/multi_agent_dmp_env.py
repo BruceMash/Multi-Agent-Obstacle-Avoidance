@@ -1,92 +1,116 @@
+from __future__ import annotations
+
 import copy
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import gymnasium as gym
 import numpy as np
-from gymnasium import spaces
 
-# 复用dmp框架和实体框架
-from Controller.dmp_rl import DMPConfig, SecondOrderDMPController
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+except ImportError:
+    import gym
+    from gym import spaces
+
 from Controller.dmp_rl import DMPConfig, SecondOrderDMPController
 from Entity.KinematicModel import PartialDynamic
 from Entity.sensors import LocalObstacleSensor
 from Environment.single_agent_dmp_env import EnvConfig
 
 
-@dataclass
+@dataclass  # 简化数据类的表示
 class MultiAgentEnvConfig(EnvConfig):
     """
-    Multi-agent environment-level configuration.
+    Multi-agent DMP-RL environment configuration.
 
-    The base task and reward fields are inherited from the single-agent
-    environment. The fields below only describe inter-agent constraints.
+    The base waypoint, obstacle, boundary, and reward fields are inherited from
+    EnvConfig. The fields below define inter-agent safety and control penalties.
     """
 
+    # 默认参数
     num_agents: int = 4
-
-    # 机间奖励值参数
     inter_agent_safe_distance: float = 0.6
     inter_agent_collision_penalty: float = 20.0
     inter_agent_potential_weight: float = 1.0
     inter_agent_influence_distance: float = 1.2
+    acceleration_penalty_weight: float = 0.01
+    acceleration_clip_penalty_weight: float = 0.05
 
-    def __post_init__(self) -> None:        # 检查传入参数合法性
+    def __post_init__(self) -> None:    # 初始化场景元素的初始位置
         self.num_agents = int(self.num_agents)
         if self.num_agents <= 0:
             raise ValueError("num_agents must be positive")
+
+        # 奖励参数
         self.inter_agent_safe_distance = float(self.inter_agent_safe_distance)
         self.inter_agent_collision_penalty = float(self.inter_agent_collision_penalty)
         self.inter_agent_potential_weight = float(self.inter_agent_potential_weight)
         self.inter_agent_influence_distance = float(self.inter_agent_influence_distance)
+        self.acceleration_penalty_weight = float(self.acceleration_penalty_weight)
+        self.acceleration_clip_penalty_weight = float(self.acceleration_clip_penalty_weight)
+
+        # 安全检查，确保生成的元素位置都合理
         if self.inter_agent_safe_distance <= 0.0:
             raise ValueError("inter_agent_safe_distance must be positive")
         if self.inter_agent_influence_distance <= 0.0:
             raise ValueError("inter_agent_influence_distance must be positive")
+        if self.acceleration_penalty_weight < 0.0:
+            raise ValueError("acceleration_penalty_weight must be non-negative")
+        if self.acceleration_clip_penalty_weight < 0.0:
+            raise ValueError("acceleration_clip_penalty_weight must be non-negative")
 
 
-class MultiAgentDMPEnv(gym.Env):    # 复用gym
+class MultiAgentDMPEnv(gym.Env):
     """
-    Multi-agent DMP-RL environment skeleton.
+    Matrix-style core environment for multi-agent DMP-RL.
 
-    Module 1 only defines construction-time ownership:
-    - one point-mass dynamics module per agent;
-    - one DMP controller per agent;
-    - one local obstacle sensor per agent;
-    - per-agent action matrix with shape (num_agents, single_agent_action_dim).
-
-    reset(), step(), observation construction, reward and collision logic will be
-    implemented in later reviewed modules.
+    External training adapters may convert this interface to RLlib, HARL, or
+    other multi-agent formats. This class keeps the physical simulation,
+    observation construction, reward calculation, and termination logic.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
     def __init__(
         self,
-        dynamics_config,    # 动力学模型的参数设置
-        sensor_config=None, # 传感器设置
-        dmp_config=None,    # dmp设置
-        env_config=None,    # 环境设置
-        start_goal_generator: Callable[[np.random.Generator], tuple[np.ndarray, np.ndarray]] | None = None, # 训练采样策略
-        static_obstacles=None,  # 静态障碍物字典传入
-        static_obstacle_generator=None, # 静态障碍物生成
-        dynamic_obstacles=None, # 同静态障碍物
-        dynamic_obstacle_generator=None,
+        dynamics_config,    # 动力学参数
+        sensor_config=None, # 传感器参数
+        dmp_config=None,    # DMP参数
+        env_config=None,    # 环境参数
+        start_goal_generator: Callable[[np.random.Generator], tuple[np.ndarray, np.ndarray]] | None = None, # 随机生成起始点、目标点
+        static_obstacles=None,  # 静态障碍物指定
+        static_obstacle_generator=None, # 随机生成静态障碍物
+        dynamic_obstacles=None,  # 动态障碍物
+        dynamic_obstacle_generator=None, # 随机生成动态障碍物
         render_mode=None,
     ):
-        if render_mode not in {None, "human"}:
-            raise ValueError("render_mode must be None or 'human'")     # gym.env只允许两个值
+        if render_mode not in {None, "human"}:  
+            raise ValueError("render_mode must be None or 'human'")
 
-        self.env_config = env_config or MultiAgentEnvConfig()   # 
-        if not isinstance(self.env_config, MultiAgentEnvConfig):    # 判断是否为单机类型，若是，则转化为多机参数类
-            self.env_config = MultiAgentEnvConfig(**vars(self.env_config))  # 
-
-        self.num_agents = int(self.env_config.num_agents)   # 获取智能体数量
-
-        # 构建self，得到对应的变量关系
-        self.dynamics_config = copy.deepcopy(dynamics_config)   
+        self.dynamics_config = copy.deepcopy(dynamics_config)
         self.sensor_config = copy.deepcopy(sensor_config or {})
-        self.dmp_config = dmp_config or DMPConfig(dt=float(self.dynamics_config["time_step"]))  # 入参指定值或默认值
+
+        if env_config is None:
+            self.env_config = MultiAgentEnvConfig()
+        elif isinstance(env_config, MultiAgentEnvConfig):
+            self.env_config = env_config
+        elif isinstance(env_config, dict):
+            self.env_config = MultiAgentEnvConfig(**env_config)
+        else:
+            self.env_config = MultiAgentEnvConfig(**vars(env_config))
+
+        self.num_agents = int(self.env_config.num_agents)
+
+        if dmp_config is None:
+            dt = self.dynamics_config.get("time_step", self.dynamics_config.get("timestep"))
+            if dt is None:
+                raise ValueError("dynamics_config must contain 'time_step' or 'timestep'")
+            self.dmp_config = DMPConfig(dt=float(dt))
+        elif isinstance(dmp_config, dict):
+            self.dmp_config = DMPConfig(**dmp_config)
+        else:
+            self.dmp_config = dmp_config
 
         self.dynamics = [PartialDynamic(copy.deepcopy(self.dynamics_config)) for _ in range(self.num_agents)]
         self.sensors = [LocalObstacleSensor(**copy.deepcopy(self.sensor_config)) for _ in range(self.num_agents)]
@@ -94,26 +118,26 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
 
         self.state_dim = int(self.dynamics[0].p.shape[0])
         for agent_index, dmp in enumerate(self.dmps):
-
-            if dmp.config.dims != self.state_dim:   # 检查每个agent的dmp维度和动力学维度是否吻合
+            if dmp.config.dims != self.state_dim:
                 raise ValueError(
                     f"agent {agent_index} dmp dims ({dmp.config.dims}) must match dynamics dimension ({self.state_dim})"
                 )
 
-        # 初始化障碍物信息
+        # 获取初始场景元素 指定位置优先考虑
         self._initial_static_obstacles = copy.deepcopy(static_obstacles or [])
         self._static_obstacle_generator = static_obstacle_generator
         self._initial_dynamic_obstacles = copy.deepcopy(dynamic_obstacles or [])
         self._dynamic_obstacle_generator = dynamic_obstacle_generator
         self._start_goal_generator = start_goal_generator
 
-        # 默认起点和目标点构建
+        # 默认起始点、目标点
         self._default_starts = np.zeros((self.num_agents, self.state_dim), dtype=float)
         self._default_goals = np.zeros((self.num_agents, self.state_dim), dtype=float)
         for agent_index in range(self.num_agents):
             self._default_starts[agent_index] = np.array([0.0, float(agent_index), 0.0], dtype=float)
             self._default_goals[agent_index] = np.array([8.0, float(agent_index), 0.0], dtype=float)
-
+        
+        # 初始场景元素 确保可复现
         self.static_obstacles = copy.deepcopy(self._initial_static_obstacles)
         self.dynamic_obstacles = copy.deepcopy(self._initial_dynamic_obstacles)
         self.starts = self._default_starts.copy()
@@ -121,38 +145,53 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
         self.steps = 0
         self.render_mode = render_mode
 
+        # 缓存最新的传感器数据、控制器信息、观测值、碰撞信息等，供观察构建、奖励计算和信息输出使用
         self.latest_sensor_packets = [None for _ in range(self.num_agents)]
         self.latest_controller_infos = [{} for _ in range(self.num_agents)]
         self.latest_observation = None
+        self.latest_collision_info = None
 
         self.action_space = self._build_action_space()
         self.observation_space = self._build_observation_space()
 
-    @property   # property：类似成员的调用方式，而非类似
-    def single_agent_action_dim(self) -> int:   # 解包action_dim 
-        return 2 * int(self.dmp_config.dims)    # 当前输出：三维度DMP动作 + 三维度
+    @property
+    def single_agent_action_dim(self) -> int:
+        return 2 * int(self.dmp_config.dims)
 
     @property
-    def action_shape(self) -> tuple[int, int]:  # 解包动作形状
+    def action_shape(self) -> tuple[int, int]:
         return self.num_agents, self.single_agent_action_dim
-    
+
     @property
-    def sensor_observation_dim(self) -> int:    # 解包传感器观测形状
+    def sensor_observation_dim(self) -> int:
         return int(self.sensors[0].observation_dim)
-    
+
     @property
-    def inter_agent_observation_dim(self) -> int:   # 解包机间编队维度
+    def extra_observation_dim(self) -> int:
+        return 3
+
+    @property
+    def single_pair_observation_dim(self) -> int:
+        return 2 * self.state_dim + 1
+
+    @property
+    def inter_agent_observation_dim(self) -> int:
         return (self.num_agents - 1) * self.single_pair_observation_dim
 
     @property
-    def single_agent_observation_dim(self) -> int:  # 解包单智能体观测维度
+    def single_agent_observation_dim(self) -> int:
         return self.sensor_observation_dim + self.extra_observation_dim + self.inter_agent_observation_dim
 
     @property
     def observation_shape(self) -> tuple[int, int]:
-        return self.num_agents, self.single_agent_observation_dim   # 获取所有智能体的观测维度形状
+        return self.num_agents, self.single_agent_observation_dim
 
-    def _build_single_agent_action_bounds(self) -> tuple[np.ndarray, np.ndarray]:   # 构建动作上下界
+    @staticmethod
+    def _as_state_vector(value, state_dim: int) -> np.ndarray:
+        return np.broadcast_to(np.asarray(value, dtype=np.float32), (state_dim,)).astype(np.float32, copy=True)
+    
+    # 构建动作上下界
+    def _build_single_agent_action_bounds(self) -> tuple[np.ndarray, np.ndarray]:
         dims = int(self.dmp_config.dims)
         low = np.concatenate(
             [
@@ -170,58 +209,42 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
         )
         return low, high
 
-    def _build_action_space(self) -> spaces.Box:    # 构建动作空间
-        single_low, single_high = self._build_single_agent_action_bounds()
-        low = np.tile(single_low, (self.num_agents, 1))
-        high = np.tile(single_high, (self.num_agents, 1))
-        return spaces.Box(low=low, high=high, dtype=np.float32)
+    # 构建动作上下界
+    def _build_action_space(self) -> spaces.Box:
+        single_low, single_high = self._build_single_agent_action_bounds()  # 获取动作上下界
+        return spaces.Box(
+            low=np.tile(single_low, (self.num_agents, 1)),
+            high=np.tile(single_high, (self.num_agents, 1)),
+            dtype=np.float32,
+        )
 
     def _build_observation_space(self) -> spaces.Box:   # 构建观测空间
-        velocity_low = np.broadcast_to(
-            np.asarray(self.dynamics[0].velocity_min, dtype=np.float32),
-            (self.state_dim,),
-        ).astype(np.float32, copy=True)
-        velocity_high = np.broadcast_to(
-            np.asarray(self.dynamics[0].velocity_max, dtype=np.float32),
-            (self.state_dim,),
-        ).astype(np.float32, copy=True)
-
+        
+        # 获取观测空间元素的上下界
+        velocity_low = self._as_state_vector(self.dynamics[0].velocity_min, self.state_dim)
+        velocity_high = self._as_state_vector(self.dynamics[0].velocity_max, self.state_dim)
         goal_direction_low = np.full(self.state_dim, -1.0, dtype=np.float32)
         goal_direction_high = np.full(self.state_dim, 1.0, dtype=np.float32)
-
         goal_distance_low = np.zeros(1, dtype=np.float32)
         goal_distance_high = np.ones(1, dtype=np.float32)
-
         scan_low = np.zeros(2 * self.sensors[0].n_rays, dtype=np.float32)
         scan_high = np.ones(2 * self.sensors[0].n_rays, dtype=np.float32)
 
-        sensor_low = np.concatenate(
-            [velocity_low, goal_direction_low, goal_distance_low, scan_low],
+        sensor_low = np.concatenate([velocity_low, goal_direction_low, goal_distance_low, scan_low], axis=0)
+        sensor_high = np.concatenate([velocity_high, goal_direction_high, goal_distance_high, scan_high], axis=0)
+        extra_low = np.array([0.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
+        extra_high = np.array([1.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
+
+        # 构建智能体对观测空间边界,包含相对位置和碰撞指示
+        pair_low = np.concatenate(  
+            [
+                np.full(self.state_dim, -1.0, dtype=np.float32),
+                np.full(self.state_dim, -1.0, dtype=np.float32),
+                np.zeros(1, dtype=np.float32),
+            ],
             axis=0,
         )
-        sensor_high = np.concatenate(
-            [velocity_high, goal_direction_high, goal_distance_high, scan_high],
-            axis=0,
-        )
-
-        phase_low = np.zeros(1, dtype=np.float32)
-        phase_high = np.ones(1, dtype=np.float32)
-
-        k_alpha = self.dmp_config.K_alpha
-        k_beta = self.dmp_config.K_beta
-
-        extra_low = np.array([phase_low[0], k_alpha, k_beta], dtype=np.float32)
-        extra_high = np.array([phase_high[0], k_alpha, k_beta], dtype=np.float32)
-
-        pair_low = np.concatenate(
-        [
-            np.full(self.state_dim, -1.0, dtype=np.float32),
-            np.full(self.state_dim, -1.0, dtype=np.float32),
-            np.zeros(1, dtype=np.float32),
-        ],
-        axis=0,
-        )
-        pair_high = np.concatenate(
+        pair_high = np.concatenate( 
             [
                 np.full(self.state_dim, 1.0, dtype=np.float32),
                 np.full(self.state_dim, 1.0, dtype=np.float32),
@@ -230,59 +253,44 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
             axis=0,
         )
 
-        inter_low = np.tile(pair_low, (self.num_agents - 1))    # np.tile: 按指定次数重复数组
-        inter_high = np.tile(pair_high, (self.num_agents - 1))
+        # 封装智能体对观测空间边界
+        inter_low = np.tile(pair_low, self.num_agents - 1)
+        inter_high = np.tile(pair_high, self.num_agents - 1)
 
+        # 封装单个智能体的观测空间边界
         single_low = np.concatenate([sensor_low, extra_low, inter_low], axis=0)
         single_high = np.concatenate([sensor_high, extra_high, inter_high], axis=0)
-
-        low = np.tile(single_low, (self.num_agents, 1))
-        high = np.tile(single_high, (self.num_agents, 1))
         
+        # 封装多个智能体的观测空间边界
         return spaces.Box(
-            low=low,
-            high=high,
+            low=np.tile(single_low, (self.num_agents, 1)),
+            high=np.tile(single_high, (self.num_agents, 1)),
             dtype=np.float32,
         )
 
-    def _validate_agent_points(self, name: str, value) -> np.ndarray:   # 验证智能体点是否为期望的形状
+    def _validate_agent_points(self, name: str, value) -> np.ndarray:   # 验证智能体点的组织形式
         points = np.asarray(value, dtype=float)
         expected_shape = (self.num_agents, self.state_dim)
         if points.shape != expected_shape:
             raise ValueError(f"{name} must have shape {expected_shape}")
         return points.copy()
 
-    @property
-    def sensor_observation_dim(self) -> int:
-        return int(self.sensors[0].observation_dim)
-
-    @property
-    def extra_observation_dim(self) -> int:
-        return 3
-
-    @property
-    def single_pair_observation_dim(self) -> int:
-        return 2 * self.state_dim + 1
-
-    def _resolve_starts_goals(self, options: dict) -> tuple[np.ndarray, np.ndarray]:
+    def _resolve_starts_goals(self, options: dict) -> tuple[np.ndarray, np.ndarray]:    # 解析起始点与目标点
         has_starts = "starts" in options
         has_goals = "goals" in options
-
-        if self._start_goal_generator is not None and not has_starts and not has_goals: # 不指定就随机生成
+        if self._start_goal_generator is not None and not has_starts and not has_goals:
             starts, goals = self._start_goal_generator(self.np_random)
         else:
             starts = options.get("starts", self._default_starts)
             goals = options.get("goals", self._default_goals)
-        starts = self._validate_agent_points("starts", starts)
-        goals = self._validate_agent_points("goals", goals)
-        return starts, goals
+        return self._validate_agent_points("starts", starts), self._validate_agent_points("goals", goals)
 
-    def _generate_static_obstacles(self, starts: np.ndarray, goals: np.ndarray) -> list:
+    def _generate_static_obstacles(self, starts: np.ndarray, goals: np.ndarray) -> list:    # 生成静态障碍物
+        if self._static_obstacle_generator is None:
+            return copy.deepcopy(self._initial_static_obstacles)
 
-        if self._static_obstacle_generator is None: # 不存在生成器
-            return copy.deepcopy(self._initial_static_obstacles)    # 采用固定障碍物
-        generator_seed = int(self.np_random.integers(0, np.iinfo(np.uint32).max))   # 生成随机种子
-        try:    # 多智能体版本的
+        generator_seed = int(self.np_random.integers(0, np.iinfo(np.uint32).max))
+        try:
             return copy.deepcopy(
                 self._static_obstacle_generator(
                     starts=starts.copy(),
@@ -290,7 +298,7 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
                     seed=generator_seed,
                 )
             )
-        except TypeError:   # 单智能体版本的
+        except TypeError:
             return copy.deepcopy(
                 self._static_obstacle_generator(
                     start=starts[0].copy(),
@@ -299,10 +307,12 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
                 )
             )
 
-    def _generate_dynamic_obstacles(self, starts: np.ndarray, goals: np.ndarray) -> list:   # 生成动态障碍物，同静态障碍物逻辑
+    def _generate_dynamic_obstacles(self, starts: np.ndarray, goals: np.ndarray) -> list:   # 生成动态障碍物
         if self._dynamic_obstacle_generator is None:
             return copy.deepcopy(self._initial_dynamic_obstacles)
-        generator_seed = int(self.np_random.integers(0, np.iinfo(np.uint32).max))
+
+        generator_seed = int(self.np_random.integers(0, np.iinfo(np.uint32).max))   # 生成动态障碍物生成器的种子
+        
         try:
             return copy.deepcopy(
                 self._dynamic_obstacle_generator(
@@ -322,96 +332,386 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
                 )
             )
 
-    def _compose_sensor_observations(self, sensor_packet: dict) -> np.ndarray:
+    def _compose_sensor_observation(self, sensor_packet) -> np.ndarray:     # 组合传感器观测
         return sensor_packet.observation.astype(np.float32, copy=True)
-    
-    def _compose_extra_observations(self, agent_index: int) -> np.ndarray:  # 引入dmp参数作为观测
+
+    def _compose_extra_observation(self, agent_index: int) -> np.ndarray:   # 组合额外观测
         dmp = self.dmps[agent_index]
-        return np.array(
-            [
-                float(dmp.phase),
-                float(dmp.config.K_alpha),
-                float(dmp.config.K_beta),
-            ],
-            dtype=np.float32,
-        )
-    
-    def _compose_inter_agent_observations(self, agent_index: int) -> np.ndarray:    # 观测其他智能体的动作参数
-        '''
-        包含其他无人机相对位置、相对速度和友机距离三部分
-        '''
-        
+        return np.array([dmp.phase, dmp.config.K_alpha, dmp.config.K_beta], dtype=np.float32)
+
+    def _compose_inter_agent_observation(self, agent_index: int) -> np.ndarray: # 组合智能体之间的观测
+        if self.num_agents <= 1:
+            return np.zeros(0, dtype=np.float32)
+
         position = self.dynamics[agent_index].p
         velocity = self.dynamics[agent_index].v
-
         influence_distance = max(float(self.env_config.inter_agent_influence_distance), 1e-5)
-        velocity_max = np.asarray(self.dynamics[agent_index].velocity_max, dtype=float)
-        velocity_scale = max(float(np.max(np.abs(velocity_max))), 1e-5)
+        velocity_scale = max(float(np.max(np.abs(np.asarray(self.dynamics[agent_index].velocity_max, dtype=float)))), 1e-5)
 
         features = []
         for other_index in range(self.num_agents):
             if other_index == agent_index:
                 continue
-
             other_position = self.dynamics[other_index].p
             other_velocity = self.dynamics[other_index].v
-
-            ralative_position = (other_position - position) / influence_distance    # 友机相对位置
-            ralative_velocity = (other_velocity - velocity) / velocity_scale    # 友机相对速度
-            distance = np.linalg.norm(other_position - position) / influence_distance   # 友机距离
-
-            pair_features = np.concatenate(
-                [
-                    np.clip(ralative_position, -1.0, 1.0),
-                    np.clip(ralative_velocity, -1.0, 1.0),
-                    np.array([np.clip(distance, 0.0, 1.0)], dtype=float),
-                ],
-                axis=0,
+            relative_position = (other_position - position) / influence_distance
+            relative_velocity = (other_velocity - velocity) / velocity_scale
+            distance = np.linalg.norm(other_position - position) / influence_distance
+            features.append(
+                np.concatenate(
+                    [
+                        np.clip(relative_position, -1.0, 1.0),
+                        np.clip(relative_velocity, -1.0, 1.0),
+                        np.array([np.clip(distance, 0.0, 1.0)], dtype=float),
+                    ],
+                    axis=0,
+                )
             )
-            features.append(pair_features)
-        
-        if not features:   # 没有其他智能体
-            return np.zeros((0,), dtype=np.float32)
-        
         return np.concatenate(features, axis=0).astype(np.float32)
-    
-    def get_observation(self) -> np.ndarray:
-        if any(packet is None for packet in self.latest_sensor_packets):    # 不存在packet
-            raise ValueError("sensor packets not available, cannot construct observation")
-        
+
+    def get_observation(self) -> np.ndarray:    # 获取观测
+        if any(packet is None for packet in self.latest_sensor_packets):
+            raise RuntimeError("reset must be called before reading observation")
+
         observations = []
+        for agent_index in range(self.num_agents):
+            observations.append(
+                np.concatenate(
+                    [
+                        self._compose_sensor_observation(self.latest_sensor_packets[agent_index]),
+                        self._compose_extra_observation(agent_index),
+                        self._compose_inter_agent_observation(agent_index),
+                    ],
+                    axis=0,
+                ).astype(np.float32)
+            )
+        observation = np.stack(observations, axis=0).astype(np.float32)
+        self.latest_observation = observation.copy()
+        return observation
+
+    def _positions(self) -> np.ndarray:
+        return np.stack([dynamic.p.copy() for dynamic in self.dynamics], axis=0)
+
+    def _velocities(self) -> np.ndarray:
+        return np.stack([dynamic.v.copy() for dynamic in self.dynamics], axis=0)
+
+    # 获取智能体之间的距离
+    def _compute_pairwise_distances(self) -> np.ndarray:
+        positions = self._positions()
+        deltas = positions[:, None, :] - positions[None, :, :]
+        return np.linalg.norm(deltas, axis=-1).astype(np.float32)
+
+    # 获取智能体之间的碰撞矩阵和碰撞掩码 数据组织形式：一张agent_n * agent_n 的布尔值矩阵
+    def _compute_inter_agent_collision_mask(self, pairwise_distances: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        collision_matrix = np.zeros((self.num_agents, self.num_agents), dtype=bool)
+        if self.num_agents <= 1:
+            return np.zeros(self.num_agents, dtype=bool), collision_matrix
+
+        threshold = float(self.env_config.inter_agent_safe_distance)
+        for i in range(self.num_agents):
+            for j in range(i + 1, self.num_agents):
+                if pairwise_distances[i, j] <= threshold:
+                    collision_matrix[i, j] = True
+                    collision_matrix[j, i] = True
+        return np.any(collision_matrix, axis=1), collision_matrix
+
+    def _compute_obstacle_collision_mask(self) -> np.ndarray:   # 计算障碍物碰撞矩阵
+        collision_mask = np.zeros(self.num_agents, dtype=bool)
+        margin = float(self.env_config.collision_margin)
+        obstacles = self.static_obstacles + self.dynamic_obstacles
+        for agent_index, dynamic in enumerate(self.dynamics):
+            for obstacle in obstacles:
+                if obstacle.contains(dynamic.p, margin=margin):
+                    collision_mask[agent_index] = True
+                    break
+        return collision_mask
+
+    def _check_collision(self) -> dict: # 检查碰撞
+        pairwise_distances = self._compute_pairwise_distances()
+        inter_agent_mask, inter_agent_matrix = self._compute_inter_agent_collision_mask(pairwise_distances)
+        obstacle_mask = self._compute_obstacle_collision_mask()
+        collision_mask = np.logical_or(obstacle_mask, inter_agent_mask)
+        min_inter_agent_distance = float("inf")
+        if self.num_agents > 1:
+            upper = pairwise_distances[np.triu_indices(self.num_agents, k=1)]
+            min_inter_agent_distance = float(np.min(upper)) if upper.size else float("inf")
+        return {
+            "obstacle_collision_mask": obstacle_mask,
+            "inter_agent_collision_mask": inter_agent_mask,
+            "inter_agent_collision_matrix": inter_agent_matrix,
+            "collision_mask": collision_mask,
+            "pairwise_distances": pairwise_distances,
+            "min_inter_agent_distance": min_inter_agent_distance,
+            "collision": bool(np.any(collision_mask)),
+        }
+
+    def _compute_min_boundary_distances(self) -> np.ndarray:   # 计算边界最小距离，用于给出APF惩罚项的值
+        bounds = np.asarray(self.env_config.workspace_bounds, dtype=float)
+        if bounds.shape != (2, self.state_dim):
+            raise ValueError(f"workspace_bounds must have shape (2, {self.state_dim})")
+        lower, upper = bounds
+        return np.array(
+            [
+                np.min(np.concatenate([dynamic.p - lower, upper - dynamic.p]))
+                for dynamic in self.dynamics
+            ],
+            dtype=np.float32,
+        )
+    
+    # 计算智能体动作方向
+    def _compute_policy_action_direction(self, agent_index: int, policy_action: np.ndarray) -> np.ndarray | None:
+        
+        # 解包输出量，前几个维度为forcing term，后几个为pffset量
+        forcing_component = np.asarray(policy_action[: self.state_dim], dtype=float)
+        goal_offset = np.asarray(policy_action[self.state_dim : 2 * self.state_dim], dtype=float)
+        
+        # 创建动力学
+        dynamic = self.dynamics[agent_index]    # 创建动力学
+        dmp = self.dmps[agent_index]    # 创建DMP
+        goal_eff = self.goals[agent_index] + goal_offset    # 创建目标偏移量
+        forcing_gate = np.tanh(np.abs(goal_eff - dynamic.p))    # DMP forcing term门控量
+        action_component = (
+            dmp.config.K_alpha * dmp.config.K_beta * goal_offset
+            + forcing_component * forcing_gate
+        )   # 组合DMP
+        action_norm = float(np.linalg.norm(action_component))   # 动作方向的归一化尺度
+        if action_norm < 1e-8:
+            return None
+        return action_component / action_norm
+
+    def _compute_obstacle_potential_penalties(self, policy_actions: np.ndarray) -> np.ndarray:  # 计算障碍物势场
+        penalties = np.zeros(self.num_agents, dtype=np.float32)
+        influence_distance = float(self.env_config.obstacle_influence_distance)
+        if influence_distance <= 0.0:
+            return penalties
+
+        obstacles = self.static_obstacles + self.dynamic_obstacles  # 获取障碍物集合
+        if not obstacles:
+            return penalties
 
         for agent_index in range(self.num_agents):
-            sensor_observation = self._compose_sensor_observations(
-                self.latest_sensor_packets[agent_index]
+            action_dir = self._compute_policy_action_direction(agent_index, policy_actions[agent_index])
+            if action_dir is None:
+                continue
+            dynamic = self.dynamics[agent_index]
+            velocity_norm = float(np.linalg.norm(dynamic.v))
+            velocity_dir = dynamic.v / velocity_norm if velocity_norm >= 1e-8 else None
+            penalty_sum = 0.0
+
+            for obstacle in obstacles:
+                closest_point = obstacle.closest_point(dynamic.p)   # 当前位置到障碍物的最近点
+                to_obstacle = closest_point - dynamic.p # 当前位置到障碍物最近点的向量
+                distance_to_surface = float(np.linalg.norm(to_obstacle))    # 当前位置到障碍物最近点的距离
+                if distance_to_surface < 1e-8 or distance_to_surface >= influence_distance: # 足够小已经碰撞，足够大不参与计算
+                    continue
+
+                obstacle_dir = to_obstacle / distance_to_surface    # 计算方向向量
+                action_gate = max(0.0, float(np.dot(action_dir, obstacle_dir))) # 计算动作方向与障碍物方向的门控量
+                # 这里action_dir和obstacle_dir都是单位向量，直接得到余弦值
+                if action_gate <= 0.0:  # 余弦值为0，则动作方向与障碍物方向平行或相反，不参与计算
+                    continue
+                velocity_gate = 0.0 if velocity_dir is None else max(0.0, float(np.dot(velocity_dir, obstacle_dir)))
+                directional_gate = action_gate * (0.5 + 0.5 * velocity_gate)
+                d = max(distance_to_surface, 1e-3)
+                penalty_sum += ((1.0 / d - 1.0 / influence_distance) ** 2) * directional_gate   # 改进的APF值
+
+            penalty = float(self.env_config.obstacle_potential_weight) * penalty_sum    # 计算障碍物市场的值
+            penalties[agent_index] = min(float(penalty), float(self.env_config.obstacle_potential_penalty_max)) # 截断
+        return penalties
+
+    def _compute_boundary_potential_penalties(self, policy_actions: np.ndarray) -> np.ndarray:  # 计算环境边界惩罚
+
+        """
+        计算智能体靠近环境边界时的势场惩罚。
+
+        基于改进的人工势场法(APF)，当智能体的策略动作方向朝向边界且距离边界小于影响距离时，
+        施加方向性感知的势场惩罚。惩罚值考虑了动作方向和速度方向的组合门控效应，确保只有
+        真正朝向边界运动的智能体才会受到惩罚。
+
+        Args:
+            policy_actions: 策略网络输出的动作数组，形状为 (num_agents, action_dim)。
+                           每个智能体的动作包含 forcing term 和 goal offset 两部分。
+
+        Returns:
+            每个智能体的边界势场惩罚值数组，形状为 (num_agents,)，数据类型为 float32。
+            惩罚值已根据配置参数进行加权并限制在最大值范围内。
+
+        Raises:
+            ValueError: 当 workspace_bounds 的形状不符合 (2, state_dim) 要求时抛出。
+        """
+         
+        penalties = np.zeros(self.num_agents, dtype=np.float32)
+        bounds = np.asarray(self.env_config.workspace_bounds, dtype=float)
+        if bounds.shape != (2, self.state_dim):
+            raise ValueError(f"workspace_bounds must have shape (2, {self.state_dim})")
+
+        influence_distance = float(self.env_config.boundary_influence_distance)
+        if influence_distance <= 0.0:
+            return penalties
+
+        lower, upper = bounds
+        epsilon = max(float(self.env_config.boundary_distance_epsilon), 1e-8)
+        for agent_index in range(self.num_agents):
+            action_dir = self._compute_policy_action_direction(agent_index, policy_actions[agent_index])
+            if action_dir is None:
+                continue
+            dynamic = self.dynamics[agent_index]
+            velocity_norm = float(np.linalg.norm(dynamic.v))
+            velocity_dir = dynamic.v / velocity_norm if velocity_norm >= 1e-8 else None
+            penalty_sum = 0.0
+
+            for axis in range(self.state_dim):
+                boundary_cases = (
+                    (float(dynamic.p[axis] - lower[axis]), -1.0),
+                    (float(upper[axis] - dynamic.p[axis]), 1.0),
                 )
-            extra_observation = self._compose_extra_observations(agent_index)
-            inter_agent_observation = self._compose_inter_agent_observations(agent_index)            
-            agent_observation = np.concatenate(   # 组合观测
-                [
-                    sensor_observation,
-                    extra_observation,
-                    inter_agent_observation,
-                ],
-                axis = 0,
-            ).astype(np.float32)
 
-            observations.append(agent_observation)
+                for signed_distance, direction_sign in boundary_cases:  # 遍历边界情况
+                    if signed_distance >= influence_distance:
+                        continue
+                    boundary_dir = np.zeros(self.state_dim, dtype=float)
+                    boundary_dir[axis] = direction_sign
+                    action_gate = max(0.0, float(np.dot(action_dir, boundary_dir)))
+                    if action_gate <= 0.0:
+                        continue
+                    velocity_gate = 0.0 if velocity_dir is None else max(0.0, float(np.dot(velocity_dir, boundary_dir)))
+                    directional_gate = action_gate * (0.5 + 0.5 * velocity_gate)
+                    d = max(signed_distance, epsilon)
+                    penalty_sum += ((1.0 / d - 1.0 / influence_distance) ** 2) * directional_gate
 
-        observations = np.stack(observations, axis=0).astype(np.float32)
-        self.latest_observation = observations.copy()
-        return observations
-    def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
+            penalty = float(self.env_config.boundary_potential_weight) * penalty_sum
+            penalties[agent_index] = min(float(penalty), float(self.env_config.boundary_potential_penalty_max))
+        return penalties
+
+    def _compute_inter_agent_potential_penalties(self, pairwise_distances: np.ndarray) -> np.ndarray:   # 智能体间避障惩罚
+        
+        """
+        计算智能体间基于人工势场法的避障惩罚值。
+
+        使用改进的人工势场法计算智能体之间的碰撞惩罚。当两个智能体之间的距离
+        小于设定的影响距离时，会产生惩罚值，且距离越近惩罚越大。惩罚值会同时
+        分配给相互作用的两个智能体。
+
+        Args:
+            pairwise_distances: 智能体间的两两距离矩阵，形状为 (num_agents, num_agents)，
+                              其中 pairwise_distances[i, j] 表示智能体 i 和 j 之间的距离。
+
+        Returns:
+            每个智能体的避障惩罚值数组，形状为 (num_agents,)，索引 i 对应第 i 个智能体的总惩罚值。
+        """
+
+        penalties = np.zeros(self.num_agents, dtype=np.float32)
+        if self.num_agents <= 1:
+            return penalties
+
+        influence_distance = float(self.env_config.inter_agent_influence_distance)
+        if influence_distance <= 0.0:
+            return penalties
+
+        for i in range(self.num_agents):
+            for j in range(i + 1, self.num_agents):
+                distance = float(pairwise_distances[i, j])
+                if distance >= influence_distance:
+                    continue
+                d = max(distance, 1e-3) # 防止除0
+
+                # 平方反比加入惩罚项
+                penalty = float(self.env_config.inter_agent_potential_weight) * (
+                    1.0 / d - 1.0 / influence_distance
+                ) ** 2
+                # 同时作用于双方无人机
+                penalties[i] += penalty
+                penalties[j] += penalty
+
+        return penalties
+
+    def _build_info(    # 构建信息字典
+        self,
+        *,
+        success_mask,
+        collision_info,
+        truncated,
+        distances_to_goals,
+        progress,
+        commanded_accelerations,
+        applied_accelerations,
+        next_states,
+        raw_action,
+        step_rewards,
+        obstacle_potential_penalties,
+        boundary_potential_penalties,
+        inter_agent_potential_penalties,
+        acceleration_penalties,
+        acceleration_clip_penalties,
+        collision_penalties,
+        timeout_penalties,
+    ) -> dict:
+        min_clearances = np.array(
+            [
+                float(packet.min_clearance) if packet is not None else np.nan
+                for packet in self.latest_sensor_packets
+            ],
+            dtype=np.float32,
+        )
+        phases = np.array(
+            [
+                float(info.get("phase", self.dmps[index].phase))
+                for index, info in enumerate(self.latest_controller_infos)
+            ],
+            dtype=np.float32,
+        )
+        taus = np.array(
+            [
+                float(info.get("tau", self.dmps[index].config.tau))
+                for index, info in enumerate(self.latest_controller_infos)
+            ],
+            dtype=np.float32,
+        )
+        return {
+            "success": bool(np.all(success_mask)),
+            "success_mask": success_mask.astype(bool).copy(),
+            "collision": bool(collision_info["collision"]),
+            "collision_mask": collision_info["collision_mask"].astype(bool).copy(),
+            "obstacle_collision_mask": collision_info["obstacle_collision_mask"].astype(bool).copy(),
+            "inter_agent_collision_mask": collision_info["inter_agent_collision_mask"].astype(bool).copy(),
+            "inter_agent_collision_matrix": collision_info["inter_agent_collision_matrix"].astype(bool).copy(),
+            "truncated": bool(truncated),
+            "steps": int(self.steps),
+            "distance_to_goals": distances_to_goals.astype(np.float32).copy(),
+            "progress": progress.astype(np.float32).copy(),
+            "pairwise_distances": collision_info["pairwise_distances"].astype(np.float32).copy(),
+            "min_inter_agent_distance": float(collision_info["min_inter_agent_distance"]),
+            "min_boundary_distances": self._compute_min_boundary_distances(),
+            "min_clearances": min_clearances,
+            "phases": phases,
+            "taus": taus,
+            "commanded_accelerations": commanded_accelerations.astype(np.float32).copy(),
+            "applied_accelerations": applied_accelerations.astype(np.float32).copy(),
+            "next_states": next_states.astype(np.float32).copy(),
+            "raw_action": raw_action.astype(np.float32).copy(),
+            "reward_step": step_rewards.astype(np.float32).copy(),
+            "reward_obstacle_potential_penalty": obstacle_potential_penalties.astype(np.float32).copy(),
+            "reward_boundary_potential_penalty": boundary_potential_penalties.astype(np.float32).copy(),
+            "reward_inter_agent_potential_penalty": inter_agent_potential_penalties.astype(np.float32).copy(),
+            "reward_acceleration_penalty": acceleration_penalties.astype(np.float32).copy(),
+            "reward_acceleration_clip_penalty": acceleration_clip_penalties.astype(np.float32).copy(),
+            "reward_collision_penalty": collision_penalties.astype(np.float32).copy(),
+            "reward_timeout_penalty": timeout_penalties.astype(np.float32).copy(),
+        }
+
+    def reset(self, *, seed=None, options=None):    # 重置环境
+        try:
+            super().reset(seed=seed)
+        except TypeError:
+            if seed is not None or not hasattr(self, "np_random"):
+                self.np_random = np.random.default_rng(seed)
         options = options or {}
 
-        # 生成起点与目标点
         starts, goals = self._resolve_starts_goals(options)
         self.starts = starts.copy()
         self.goals = goals.copy()
         self.steps = 0
 
-        # 索引生成障碍物
         if "static_obstacles" in options:
             self.static_obstacles = copy.deepcopy(options["static_obstacles"])
         else:
@@ -422,21 +722,16 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
         else:
             self.dynamic_obstacles = self._generate_dynamic_obstacles(starts, goals)
 
-        # 初始化agents
         zero_velocity = np.zeros(self.state_dim, dtype=float)
         for agent_index in range(self.num_agents):
-            self.dynamics[agent_index].reset(   # 重置位置，生成0速度
+            self.dynamics[agent_index].reset(
                 {
                     "position": starts[agent_index].copy(),
                     "velocity": zero_velocity.copy(),
                 }
             )
-
-            # 初始化dmps和传感器
             self.dmps[agent_index].reset(starts[agent_index], goals[agent_index])
             self.sensors[agent_index].reset()
-
-            # 记录传感器观测
             self.latest_sensor_packets[agent_index] = self.sensors[agent_index].sense(
                 self.dynamics[agent_index].p,
                 self.dynamics[agent_index].v,
@@ -444,110 +739,174 @@ class MultiAgentDMPEnv(gym.Env):    # 复用gym
                 self.static_obstacles,
                 self.dynamic_obstacles,
             )
-            # 记录上一时刻的dmps参数
             self.latest_controller_infos[agent_index] = {
                 "phase": float(self.dmps[agent_index].phase),
                 "tau": float(self.dmps[agent_index].config.tau),
             }
 
-        # 返回observation
         observation = self.get_observation()
- 
+        collision_info = self._check_collision()
+        self.latest_collision_info = collision_info
+        distances_to_goals = np.array(
+            [np.linalg.norm(self.goals[index] - self.dynamics[index].p) for index in range(self.num_agents)],
+            dtype=np.float32,
+        )
         info = {
             "starts": starts.copy(),
             "goals": goals.copy(),
             "num_agents": int(self.num_agents),
             "static_obstacle_count": len(self.static_obstacles),
             "dynamic_obstacle_count": len(self.dynamic_obstacles),
+            "distance_to_goals": distances_to_goals,
+            "collision": bool(collision_info["collision"]),
+            "collision_mask": collision_info["collision_mask"].copy(),
+            "pairwise_distances": collision_info["pairwise_distances"].copy(),
+            "min_inter_agent_distance": float(collision_info["min_inter_agent_distance"]),
         }
         return observation, info
 
-
     def step(self, action):
-        if any(packet is None for packet in self.latest_sensor_packets):   # 不存在传感器观测，说明环境未重置
+        if any(packet is None for packet in self.latest_sensor_packets):    # 确保传感器数据已更新
             raise RuntimeError("reset must be called before step")
 
-        action = np.asarray(action, dtype=np.float32)   # 转换动作向量为float32
-        if action.shape != self.action_shape:   # 动作向量大小错误
+        action = np.asarray(action, dtype=np.float32)   # 构建动作形状并检查
+        if action.shape != self.action_shape:
             raise ValueError(f"action must have shape {self.action_shape}")
-        action = np.clip(action, self.action_space.low, self.action_space.high)  # 将动作向量裁剪到动作空间范围内
+        
+        action = np.clip(action, self.action_space.low, self.action_space.high) # 裁剪动作
+        raw_action = action.copy()
 
-        previous_distances = np.array(  # 获取当前距离目标点的距离
-            [
-                np.linalg.norm(self.goals[agent_index] - self.dynamics[agent_index].p)
-                for agent_index in range(self.num_agents)
-            ],
+        previous_distances = np.array(
+            [np.linalg.norm(self.goals[index] - self.dynamics[index].p) for index in range(self.num_agents)],
             dtype=float,
-        )
+        )   # 获取当前到目标点的距离
 
-        # 获取命令加速度和实际加速度，并推进动力学
-        commanded_accelerations = np.zeros((self.num_agents, self.state_dim), dtype=np.float32)
+        # 计算命令加速度和实际加速度
+        commanded_accelerations = np.zeros((self.num_agents, self.state_dim), dtype=np.float32) 
         applied_accelerations = np.zeros((self.num_agents, self.state_dim), dtype=np.float32)
         next_states = np.zeros((self.num_agents, 2 * self.state_dim), dtype=np.float32)
 
-        for agent_index in range(self.num_agents):  # 迭代所有智能体
+        for agent_index in range(self.num_agents):
             acceleration, controller_info = self.dmps[agent_index].compute_acceleration(
                 self.dynamics[agent_index].p,
                 self.dynamics[agent_index].v,
                 action[agent_index],
                 sensor_packet=self.latest_sensor_packets[agent_index],
-            )
+            )   # 由动作输出获取命令加速度
             applied_acceleration = np.clip(
                 acceleration,
                 self.dynamics[agent_index].accelerate_min,
                 self.dynamics[agent_index].accelerate_max,
-            )
+            )   # 应用加速度
+            self.latest_controller_infos[agent_index] = controller_info     # 更新控制器信息
+            commanded_accelerations[agent_index] = np.asarray(acceleration, dtype=np.float32)   # 记录命令加速度
+            applied_accelerations[agent_index] = np.asarray(applied_acceleration, dtype=np.float32) # 应用加速度
+            next_states[agent_index] = self.dynamics[agent_index].step(applied_acceleration)    # 更新动力学并记录下一状态
 
-            self.latest_controller_infos[agent_index] = controller_info
-            commanded_accelerations[agent_index] = np.asarray(acceleration, dtype=np.float32)
-            applied_accelerations[agent_index] = np.asarray(applied_acceleration, dtype=np.float32)
-            next_states[agent_index] = self.dynamics[agent_index].step(applied_acceleration)
-
-        for obstacle in self.dynamic_obstacles:
+        for obstacle in self.dynamic_obstacles: # 更新动态障碍物状态
             obstacle.step(self.dynamics[0].dt)
 
-        self.steps += 1
-        for agent_index in range(self.num_agents):
+        self.steps += 1 # 步数加1
+        for agent_index in range(self.num_agents):  # 更新传感器数据
             self.latest_sensor_packets[agent_index] = self.sensors[agent_index].sense(
                 self.dynamics[agent_index].p,
                 self.dynamics[agent_index].v,
                 self.goals[agent_index],
                 self.static_obstacles,
                 self.dynamic_obstacles,
-            )
+            )   # 获取传感器数据
 
-        observation = self.get_observation()
+        observation = self.get_observation()    # 获取传感器数据
         current_distances = np.array(
-            [
-                np.linalg.norm(self.goals[agent_index] - self.dynamics[agent_index].p)
-                for agent_index in range(self.num_agents)
-            ],
+            [np.linalg.norm(self.goals[index] - self.dynamics[index].p) for index in range(self.num_agents)],
             dtype=float,
-        )
-        progress = previous_distances - current_distances
+        )   # 获取当前到目标点的距离
+        progress = previous_distances - current_distances   # 获取进度
+        step_rewards = float(self.env_config.step_reward_weight) * progress # 获取奖励
+
+        collision_info = self._check_collision()    # 检查碰撞
+        self.latest_collision_info = collision_info # 更新碰撞信息
+        obstacle_potential_penalties = self._compute_obstacle_potential_penalties(raw_action)   # 计算障碍物势能惩罚
+        boundary_potential_penalties = self._compute_boundary_potential_penalties(raw_action)   # 计算边界势能惩罚
+        inter_agent_potential_penalties = self._compute_inter_agent_potential_penalties(
+            collision_info["pairwise_distances"]
+        )   # 获取智能体间的势能惩罚
+        acceleration_penalties = (
+            float(self.env_config.acceleration_penalty_weight)
+            * np.sum(applied_accelerations.astype(float) ** 2, axis=1)  # 加速度越大惩罚越大
+        )   # 获取加速度惩罚
+        acceleration_clip_penalties = (
+            float(self.env_config.acceleration_clip_penalty_weight)
+            * np.sum((commanded_accelerations.astype(float) - applied_accelerations.astype(float)) ** 2, axis=1)
+        )   # 获取加速度裁剪惩罚
+
         rewards = (
-            float(self.env_config.step_reward_weight) * progress
+            step_rewards
+            - obstacle_potential_penalties
+            - boundary_potential_penalties
+            - inter_agent_potential_penalties
+            # - acceleration_penalties
+            # - acceleration_clip_penalties
             - float(self.env_config.step_penalty)
         ).astype(np.float32)
 
         success_mask = current_distances <= float(self.env_config.goal_tolerance)
-        terminated = bool(np.all(success_mask))
-        truncated = bool((not terminated) and (self.steps >= self.env_config.max_steps))
-        if terminated:
-            rewards += float(self.env_config.success_bonus)
-        if truncated:
-            rewards -= float(self.env_config.timeout_penalty)
+        full_success = bool(np.all(success_mask))
+        collision = bool(collision_info["collision"])
+        terminated = bool(full_success or collision)
+        truncated = bool((not terminated) and (self.steps >= int(self.env_config.max_steps)))
 
-        info = {
-            "success": bool(terminated),
-            "success_mask": success_mask.copy(),
-            "truncated": bool(truncated),
+        collision_penalties = np.zeros(self.num_agents, dtype=np.float32)
+        if np.any(collision_info["obstacle_collision_mask"]):
+            obstacle_mask = collision_info["obstacle_collision_mask"]
+            collision_penalties[obstacle_mask] += float(self.env_config.collision_penalty)
+        if np.any(collision_info["inter_agent_collision_mask"]):
+            inter_mask = collision_info["inter_agent_collision_mask"]
+            collision_penalties[inter_mask] += float(self.env_config.inter_agent_collision_penalty)
+        rewards -= collision_penalties
+
+        if full_success and not collision:
+            rewards += float(self.env_config.success_bonus)
+
+        timeout_penalties = np.zeros(self.num_agents, dtype=np.float32)
+        if truncated:
+            timeout_penalties[:] = float(self.env_config.timeout_penalty)
+            rewards -= timeout_penalties
+
+        info = self._build_info(
+            success_mask=success_mask,
+            collision_info=collision_info,
+            truncated=truncated,
+            distances_to_goals=current_distances.astype(np.float32),
+            progress=progress.astype(np.float32),
+            commanded_accelerations=commanded_accelerations,
+            applied_accelerations=applied_accelerations,
+            next_states=next_states,
+            raw_action=raw_action,
+            step_rewards=step_rewards.astype(np.float32),
+            obstacle_potential_penalties=obstacle_potential_penalties,
+            boundary_potential_penalties=boundary_potential_penalties,
+            inter_agent_potential_penalties=inter_agent_potential_penalties,
+            acceleration_penalties=acceleration_penalties.astype(np.float32),
+            acceleration_clip_penalties=acceleration_clip_penalties.astype(np.float32),
+            collision_penalties=collision_penalties,
+            timeout_penalties=timeout_penalties,
+        )
+        return observation, rewards.astype(np.float32), terminated, truncated, info
+
+    def render(self):
+        if self.render_mode != "human":
+            return None
+        collision_info = self.latest_collision_info or self._check_collision()
+        return {
+            "positions": self._positions(),
+            "velocities": self._velocities(),
+            "goals": self.goals.copy(),
             "steps": int(self.steps),
-            "distance_to_goals": current_distances.astype(np.float32),
-            "progress": progress.astype(np.float32),
-            "commanded_accelerations": commanded_accelerations.copy(),
-            "applied_accelerations": applied_accelerations.copy(),
-            "next_states": next_states.copy(),
-            "raw_action": action.copy(),
+            "collision": bool(collision_info["collision"]),
+            "collision_mask": collision_info["collision_mask"].copy(),
+            "pairwise_distances": collision_info["pairwise_distances"].copy(),
         }
-        return observation, rewards, terminated, truncated, info
+
+    def close(self):
+        return None
