@@ -61,6 +61,85 @@ class MultiAgentEnvConfig(EnvConfig):
             raise ValueError("acceleration_clip_penalty_weight must be non-negative")
 
 
+@dataclass
+class _AgentAsDynamicObstacle:
+    center: np.ndarray
+    velocity: np.ndarray
+    radius: float
+    safety_margin: float = 0.0
+
+    def __post_init__(self):
+        self.center = np.asarray(self.center, dtype=float)
+        self.velocity = np.asarray(self.velocity, dtype=float)
+        self.radius = float(self.radius)
+        self.safety_margin = float(self.safety_margin)
+        if self.center.shape != (3,) or self.velocity.shape != (3,):
+            raise ValueError("agent obstacle center and velocity must have shape (3,)")
+        if self.radius <= 0.0:
+            raise ValueError("agent obstacle radius must be positive")
+
+    @property
+    def effective_radius(self):
+        return self.radius + self.safety_margin
+
+    def signed_distance(self, point):
+        point = np.asarray(point, dtype=float)
+        return np.linalg.norm(point - self.center) - self.effective_radius
+
+    def contains(self, point, margin=0.0):
+        return self.signed_distance(point) <= float(margin)
+
+    def closest_point(self, point):
+        point = np.asarray(point, dtype=float)
+        direction = point - self.center
+        distance = np.linalg.norm(direction)
+        if distance < 1e-8:
+            direction = np.array([1.0, 0.0, 0.0], dtype=float)
+            distance = 1.0
+        return self.center + direction / distance * self.effective_radius
+
+    def ray_intersection(self, origin, direction, max_distance):
+        origin = np.asarray(origin, dtype=float)
+        direction = np.asarray(direction, dtype=float)
+        max_distance = float(max_distance)
+
+        direction_norm = np.linalg.norm(direction)
+        if direction_norm < 1e-8:
+            raise ValueError("direction must be non-zero")
+        direction = direction / direction_norm
+
+        if self.contains(origin):
+            return 0.0
+
+        offset = origin - self.center
+        b = float(np.dot(direction, offset))
+        c = float(np.dot(offset, offset) - self.effective_radius ** 2)
+        discriminant = b * b - c
+        if discriminant < 0.0:
+            return None
+
+        sqrt_discriminant = np.sqrt(discriminant)
+        candidates = [-b - sqrt_discriminant, -b + sqrt_discriminant]
+        positive_candidates = [distance for distance in candidates if distance >= 0.0]
+        if not positive_candidates:
+            return None
+
+        hit_distance = min(positive_candidates)
+        if hit_distance > max_distance:
+            return None
+        return float(hit_distance)
+
+    def to_feature(self, point):
+        closest = self.closest_point(point)
+        return {
+            "closest_point": closest,
+            "center": self.center.copy(),
+            "velocity": self.velocity.copy(),
+            "clearance": self.signed_distance(point),
+            "size": self.effective_radius,
+        }
+
+
 class MultiAgentDMPEnv(gym.Env):
     """
     Matrix-style core environment for multi-agent DMP-RL.
@@ -150,6 +229,7 @@ class MultiAgentDMPEnv(gym.Env):
         self.latest_controller_infos = [{} for _ in range(self.num_agents)]
         self.latest_observation = None
         self.latest_collision_info = None
+        self.success_rewarded_mask = np.zeros(self.num_agents, dtype=bool)
 
         self.action_space = self._build_action_space()
         self.observation_space = self._build_observation_space()
@@ -176,11 +256,11 @@ class MultiAgentDMPEnv(gym.Env):
 
     @property
     def inter_agent_observation_dim(self) -> int:
-        return (self.num_agents - 1) * self.single_pair_observation_dim
+        return 0
 
     @property
     def single_agent_observation_dim(self) -> int:
-        return self.sensor_observation_dim + self.extra_observation_dim + self.inter_agent_observation_dim
+        return self.sensor_observation_dim + self.extra_observation_dim
 
     @property
     def observation_shape(self) -> tuple[int, int]:
@@ -235,31 +315,9 @@ class MultiAgentDMPEnv(gym.Env):
         extra_low = np.array([0.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
         extra_high = np.array([1.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
 
-        # 构建智能体对观测空间边界,包含相对位置和碰撞指示
-        pair_low = np.concatenate(  
-            [
-                np.full(self.state_dim, -1.0, dtype=np.float32),
-                np.full(self.state_dim, -1.0, dtype=np.float32),
-                np.zeros(1, dtype=np.float32),
-            ],
-            axis=0,
-        )
-        pair_high = np.concatenate( 
-            [
-                np.full(self.state_dim, 1.0, dtype=np.float32),
-                np.full(self.state_dim, 1.0, dtype=np.float32),
-                np.ones(1, dtype=np.float32),
-            ],
-            axis=0,
-        )
-
-        # 封装智能体对观测空间边界
-        inter_low = np.tile(pair_low, self.num_agents - 1)
-        inter_high = np.tile(pair_high, self.num_agents - 1)
-
         # 封装单个智能体的观测空间边界
-        single_low = np.concatenate([sensor_low, extra_low, inter_low], axis=0)
-        single_high = np.concatenate([sensor_high, extra_high, inter_high], axis=0)
+        single_low = np.concatenate([sensor_low, extra_low], axis=0)
+        single_high = np.concatenate([sensor_high, extra_high], axis=0)
         
         # 封装多个智能体的观测空间边界
         return spaces.Box(
@@ -335,6 +393,21 @@ class MultiAgentDMPEnv(gym.Env):
     def _compose_sensor_observation(self, sensor_packet) -> np.ndarray:     # 组合传感器观测
         return sensor_packet.observation.astype(np.float32, copy=True)
 
+    def _sensor_dynamic_obstacles(self, agent_index: int) -> list:
+        obstacles = list(self.dynamic_obstacles)
+        agent_radius = float(self.env_config.inter_agent_safe_distance)
+        for other_index in range(self.num_agents):
+            if other_index == agent_index:
+                continue
+            obstacles.append(
+                _AgentAsDynamicObstacle(
+                    center=self.dynamics[other_index].p.copy(),
+                    velocity=self.dynamics[other_index].v.copy(),
+                    radius=agent_radius,
+                )
+            )
+        return obstacles
+
     def _compose_extra_observation(self, agent_index: int) -> np.ndarray:   # 组合额外观测
         dmp = self.dmps[agent_index]
         return np.array([dmp.phase, dmp.config.K_alpha, dmp.config.K_beta], dtype=np.float32)
@@ -380,7 +453,6 @@ class MultiAgentDMPEnv(gym.Env):
                     [
                         self._compose_sensor_observation(self.latest_sensor_packets[agent_index]),
                         self._compose_extra_observation(agent_index),
-                        self._compose_inter_agent_observation(agent_index),
                     ],
                     axis=0,
                 ).astype(np.float32)
@@ -629,6 +701,8 @@ class MultiAgentDMPEnv(gym.Env):
         self,
         *,
         success_mask,
+        new_success_mask,
+        success_reward_bonus,
         collision_info,
         truncated,
         distances_to_goals,
@@ -670,6 +744,9 @@ class MultiAgentDMPEnv(gym.Env):
         return {
             "success": bool(np.all(success_mask)),
             "success_mask": success_mask.astype(bool).copy(),
+            "new_success_mask": new_success_mask.astype(bool).copy(),
+            "success_rewarded_mask": self.success_rewarded_mask.astype(bool).copy(),
+            "per_agent_success_bonus": float(success_reward_bonus),
             "collision": bool(collision_info["collision"]),
             "collision_mask": collision_info["collision_mask"].astype(bool).copy(),
             "obstacle_collision_mask": collision_info["obstacle_collision_mask"].astype(bool).copy(),
@@ -711,6 +788,7 @@ class MultiAgentDMPEnv(gym.Env):
         self.starts = starts.copy()
         self.goals = goals.copy()
         self.steps = 0
+        self.success_rewarded_mask = np.zeros(self.num_agents, dtype=bool)
 
         if "static_obstacles" in options:
             self.static_obstacles = copy.deepcopy(options["static_obstacles"])
@@ -732,17 +810,19 @@ class MultiAgentDMPEnv(gym.Env):
             )
             self.dmps[agent_index].reset(starts[agent_index], goals[agent_index])
             self.sensors[agent_index].reset()
+            self.latest_controller_infos[agent_index] = {
+                "phase": float(self.dmps[agent_index].phase),
+                "tau": float(self.dmps[agent_index].config.tau),
+            }
+
+        for agent_index in range(self.num_agents):
             self.latest_sensor_packets[agent_index] = self.sensors[agent_index].sense(
                 self.dynamics[agent_index].p,
                 self.dynamics[agent_index].v,
                 goals[agent_index],
                 self.static_obstacles,
-                self.dynamic_obstacles,
+                self._sensor_dynamic_obstacles(agent_index),
             )
-            self.latest_controller_infos[agent_index] = {
-                "phase": float(self.dmps[agent_index].phase),
-                "tau": float(self.dmps[agent_index].config.tau),
-            }
 
         observation = self.get_observation()
         collision_info = self._check_collision()
@@ -813,7 +893,7 @@ class MultiAgentDMPEnv(gym.Env):
                 self.dynamics[agent_index].v,
                 self.goals[agent_index],
                 self.static_obstacles,
-                self.dynamic_obstacles,
+                self._sensor_dynamic_obstacles(agent_index),
             )   # 获取传感器数据
 
         observation = self.get_observation()    # 获取传感器数据
@@ -851,6 +931,7 @@ class MultiAgentDMPEnv(gym.Env):
         ).astype(np.float32)
 
         success_mask = current_distances <= float(self.env_config.goal_tolerance)
+        new_success_mask = np.logical_and(success_mask, np.logical_not(self.success_rewarded_mask))
         full_success = bool(np.all(success_mask))
         collision = bool(collision_info["collision"])
         terminated = bool(full_success or collision)
@@ -865,8 +946,10 @@ class MultiAgentDMPEnv(gym.Env):
             collision_penalties[inter_mask] += float(self.env_config.inter_agent_collision_penalty)
         rewards -= collision_penalties
 
-        if full_success and not collision:
-            rewards += float(self.env_config.success_bonus)
+        success_reward_bonus = float(self.env_config.success_bonus) / float(self.num_agents)
+        if not collision:
+            rewards[new_success_mask] += success_reward_bonus
+            self.success_rewarded_mask = np.logical_or(self.success_rewarded_mask, new_success_mask)
 
         timeout_penalties = np.zeros(self.num_agents, dtype=np.float32)
         if truncated:
@@ -875,6 +958,8 @@ class MultiAgentDMPEnv(gym.Env):
 
         info = self._build_info(
             success_mask=success_mask,
+            new_success_mask=new_success_mask,
+            success_reward_bonus=success_reward_bonus,
             collision_info=collision_info,
             truncated=truncated,
             distances_to_goals=current_distances.astype(np.float32),

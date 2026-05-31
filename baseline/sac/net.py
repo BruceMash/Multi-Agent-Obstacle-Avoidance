@@ -1,10 +1,6 @@
 # coding: utf-8
 
 '''
-当前脚本定义一套面向本项目的 SAC 网络。
-
-这里的设计不是直接复用 stable-baselines 里那套通用 actor/critic，
-而是围绕当前环境的观测结构单独组织：
 1. sensor observation 单独编码
 2. extra observation 作为额外信息直接拼接
 3. actor 输出 forcing / offside 两组动作

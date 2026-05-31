@@ -44,7 +44,7 @@ class SACExperimentConfig:
     start_goal_max_attempts: int = 1000
 
     # Reward and termination
-    max_steps: int = 220    # 单个Episode的最大步数
+    max_steps: int = 50    # 单个Episode的最大步数
     goal_tolerance: float = 0.3     # 
     
     obstacle_potential_weight: float = 1.5  # 障碍物势场权重
@@ -739,13 +739,18 @@ class SACExperimentConfig:
 
 @dataclass(frozen=True)
 class MAPPOExperimentConfig:
-    """Centralized parameters for MAPPO training on the multi-agent DMP environment."""
-
+    """ 面向ray训练的MAPPO实验配置，包含环境、奖励、DMP和训练相关的参数 """
     # MARLlib entry
     environment_name: str = "multi_agent_dmp"
     map_name: str = "default"
     hyperparam_source: str = "test"
     model_core_arch: str = "mlp"
+    hidden_dim: int = 256
+    sensor_output_dim: int = 128
+    num_sensor_layers: int = 2
+    num_observation_layers: int = 2
+    actor_log_std_min: float = -5.0
+    actor_log_std_max: float = 1.0
 
     # Environment and dynamics
     num_agents: int = 5
@@ -799,15 +804,15 @@ class MAPPOExperimentConfig:
     use_gae: bool = True
     gae_lambda: float = 1.0
     kl_coeff: float = 0.2
-    batch_episode: int = 64
-    num_sgd_iter: int = 2
+    batch_episode: int = 16
+    num_sgd_iter: int = 1
     vf_loss_coeff: float = 1.0
     learning_rate: float = 1e-4
     entropy_coeff: float = 0.01
-    clip_param: float = 0.3
+    clip_param: float = 0.2
     vf_clip_param: float = 10.0
     batch_mode: str = "truncate_episodes"
-    fixed_batch_timesteps: int | None = None
+    fixed_batch_timesteps: int | None = 1024   
 
     # Training and Ray
     training_iteration: int = 500000
@@ -815,16 +820,17 @@ class MAPPOExperimentConfig:
     stop_reward: float = 999_999.0
     seed: int = 321
     output_root: str = "artifacts/mappo"
-    local_mode: bool = True
+    local_mode: bool = False    # ray调度模式，True为单进程调试，False为多进程训练
     share_policy: str = "all"
     evaluation_interval: int | None = None
     framework: str = "torch"
-    num_workers: int = 0
-    num_gpus: int = 0
+    num_workers: int = 2
+    num_gpus: int = 1
     num_cpus_per_worker: int = 1
     num_gpus_per_worker: int = 0
-    checkpoint_freq: int = 0
-    checkpoint_end: bool = False
+    checkpoint_freq: int = 50
+    checkpoint_end: bool = True
+    max_failures: int = 3
     restore_model_path: str = ""
     restore_params_path: str = ""
 
@@ -915,6 +921,12 @@ class MAPPOExperimentConfig:
     def build_model_preference(self) -> dict[str, Any]:
         return {
             "core_arch": self.model_core_arch,
+            "hidden_dim": self.hidden_dim,
+            "sensor_output_dim": self.sensor_output_dim,
+            "num_sensor_layers": self.num_sensor_layers,
+            "num_observation_layers": self.num_observation_layers,
+            "actor_log_std_min": self.actor_log_std_min,
+            "actor_log_std_max": self.actor_log_std_max,
         }
 
     def build_running_params(self, local_dir: str | None = None) -> dict[str, Any]:
@@ -929,6 +941,7 @@ class MAPPOExperimentConfig:
             "num_gpus_per_worker": self.num_gpus_per_worker,
             "checkpoint_freq": self.checkpoint_freq,
             "checkpoint_end": self.checkpoint_end,
+            "max_failures": self.max_failures,
             "restore_path": {
                 "model_path": self.restore_model_path,
                 "params_path": self.restore_params_path,

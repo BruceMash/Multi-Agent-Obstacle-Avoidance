@@ -25,7 +25,6 @@ from runner_sac import build_env, build_model, load_checkpoint
 DEFAULT_MODEL_NAME = "best_eval_model.pt"
 DEFAULT_OUTPUT_DIR_NAME = "generalization_eval"
 DEFAULT_HTML_FPS = 10
-DEFAULT_HTML_MAX_FRAMES = 40
 ANIMATION_BG_COLOR = "#06111f"
 ANIMATION_PANEL_COLOR = "#0b1b2b"
 ANIMATION_GRID_COLOR = "#27445e"
@@ -49,8 +48,8 @@ class EvalPaths:    # 数据类
     event_name: str
     output_dir: Path
     terminal_state_dir: Path
+    trace_json_dir: Path
     trajectory_html_dir: Path
-    chase_view_html_dir: Path
     policy_output_dir: Path
     episodes_csv: Path
     summary_csv: Path
@@ -253,8 +252,8 @@ def resolve_arguments(args: argparse.Namespace) -> EvalArguments:   # 读取参�
             event_name=event_name,
             output_dir=output_dir,
             terminal_state_dir=output_dir / "terminal_states",
+            trace_json_dir=output_dir / "trace_json",
             trajectory_html_dir=output_dir / "trajectory_html",
-            chase_view_html_dir=output_dir / "chase_view_html",
             policy_output_dir=output_dir / "policy_outputs",
             episodes_csv=output_dir / "episodes.csv",
             summary_csv=output_dir / "summary.csv",
@@ -274,8 +273,8 @@ def prepare_output_directories(eval_args: EvalArguments) -> None:   # 组织输�
     eval_args.paths.policy_output_dir.mkdir(parents=True, exist_ok=True)
     if eval_args.save_visualizations:
         eval_args.paths.terminal_state_dir.mkdir(parents=True, exist_ok=True)
+        eval_args.paths.trace_json_dir.mkdir(parents=True, exist_ok=True)
         eval_args.paths.trajectory_html_dir.mkdir(parents=True, exist_ok=True)
-        eval_args.paths.chase_view_html_dir.mkdir(parents=True, exist_ok=True)
 
 
 def validate_input_paths(eval_args: EvalArguments) -> None: # 验证输入路径
@@ -1097,13 +1096,6 @@ def save_terminal_state_figures(results: list[EpisodeResult], output_dir: Path) 
     return saved_paths
 
 
-def make_animation_frame_indices(trajectory_length: int, max_frames: int = DEFAULT_HTML_MAX_FRAMES) -> np.ndarray:
-    if trajectory_length <= 1:
-        return np.array([0], dtype=int)
-    frame_count = min(int(max_frames), int(trajectory_length))
-    return np.unique(np.linspace(0, trajectory_length - 1, frame_count, dtype=int))
-
-
 def style_animation_3d_axis(ax: Any) -> None:
     ax.set_facecolor(ANIMATION_PANEL_COLOR)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
@@ -1555,394 +1547,634 @@ def nearest_obstacle_surface(trace: EpisodeTrace, point_index: int) -> tuple[np.
     return nearest_surface_point, nearest_surface_distance
 
 
-def plot_dynamic_sphere_range(ax: Any, center: np.ndarray, radius: float) -> list[Any]:
-    u = np.linspace(0.0, 2.0 * np.pi, 18)
-    v = np.linspace(0.0, np.pi, 10)
-    x = center[0] + radius * np.outer(np.cos(u), np.sin(v))
-    y = center[1] + radius * np.outer(np.sin(u), np.sin(v))
-    z = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
-    surface = ax.plot_surface(
-        x,
-        y,
-        z,
-        color=ANIMATION_DYNAMIC_COLOR,
-        alpha=0.16,
-        linewidth=0.25,
-        edgecolor="#ffd6ff",
-        shade=True,
-    )
-    wire = ax.plot_wireframe(x, y, z, color="#ffd6ff", linewidth=0.25, alpha=0.55)
-    return [surface, wire]
-
-
 def episode_artifact_stem(trace: EpisodeTrace) -> str:
     return f"{trace.scenario}_seed_{trace.seed}_{trace.terminal_status}"
 
 
-def save_trajectory_html(result: EpisodeResult, output_dir: Path) -> Path:
-    import matplotlib
+def json_ready(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return json_ready(value.tolist())
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        value = float(value)
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_ready(item) for item in value]
+    return value
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation, HTMLWriter
-    from matplotlib.patches import Circle
 
-    metrics = result.metrics
+def trace_json_payload(result: EpisodeResult) -> dict[str, Any]:
     trace = result.trace
-    trajectory = trace.trajectory
-    frame_indices = make_animation_frame_indices(len(trajectory))
-    save_path = output_dir / f"{episode_artifact_stem(trace)}.html"
-
-    fig = plt.figure(figsize=(14, 7), facecolor=ANIMATION_BG_COLOR)
-    ax_3d = fig.add_subplot(1, 2, 1, projection="3d")
-    ax_top = fig.add_subplot(1, 2, 2)
-
-    axis_points_3d = draw_static_scene_for_animation(ax_3d, trace)
-    set_equal_3d_axes(ax_3d, axis_points_3d)
-    style_animation_3d_axis(ax_3d)
-    ax_3d.set_xlabel("x")
-    ax_3d.set_ylabel("y")
-    ax_3d.set_zlabel("z")
-    ax_3d.view_init(elev=34.0, azim=-56.0)
-
-    axis_points_top = draw_top_down_scene_for_animation(ax_top, trace)
-    set_equal_xy_axes(ax_top, axis_points_top)
-    style_animation_2d_axis(ax_top)
-    ax_top.set_xlabel("x")
-    ax_top.set_ylabel("y")
-
-    path_line_3d, = ax_3d.plot([], [], [], color=ANIMATION_TRAJECTORY_COLOR, linewidth=3.0, label="trajectory")
-    current_point_3d = ax_3d.scatter(
-        [],
-        [],
-        [],
-        color=ANIMATION_CURRENT_COLOR,
-        edgecolor="white",
-        linewidth=0.8,
-        marker="o",
-        s=72,
-        label="current",
-    )
-    dynamic_points_3d = ax_3d.scatter(
-        [],
-        [],
-        [],
-        color=ANIMATION_DYNAMIC_COLOR,
-        edgecolor="white",
-        linewidth=0.6,
-        marker="o",
-        s=70,
-        label="dynamic obstacle",
+    return json_ready(
+        {
+            "schema_version": 1,
+            "scenario": trace.scenario,
+            "seed": trace.seed,
+            "terminal_status": trace.terminal_status,
+            "metrics": episode_metrics_to_row(result.metrics),
+            "start": trace.start,
+            "goal": trace.goal,
+            "trajectory": trace.trajectory,
+            "acceleration_history": trace.acceleration_history,
+            "obstacles": trace.obstacles,
+            "obstacle_history": trace.obstacle_history,
+            "policy_outputs": {
+                "action_history": trace.action_history,
+                "scaled_action_history": trace.scaled_action_history,
+                "forcing_action_history": trace.forcing_action_history,
+                "offside_action_history": trace.offside_action_history,
+                "forcing_log_prob_history": trace.forcing_log_prob_history,
+                "offside_log_prob_history": trace.offside_log_prob_history,
+            },
+        }
     )
 
-    path_line_top, = ax_top.plot([], [], color=ANIMATION_TRAJECTORY_COLOR, linewidth=3.2, label="trajectory", zorder=8)
-    current_point_top = ax_top.scatter(
-        [],
-        [],
-        color=ANIMATION_CURRENT_COLOR,
-        edgecolor="white",
-        linewidth=0.8,
-        marker="o",
-        s=82,
-        label="current",
-        zorder=6,
+
+def save_trace_json(result: EpisodeResult, output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_path = output_dir / f"{episode_artifact_stem(result.trace)}.json"
+    payload = trace_json_payload(result)
+    save_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
     )
-    dynamic_points_top = ax_top.scatter(
-        [],
-        [],
-        color=ANIMATION_DYNAMIC_COLOR,
-        edgecolor="white",
-        linewidth=0.6,
-        marker="o",
-        s=78,
-        label="dynamic obstacle",
-        zorder=6,
-    )
-
-    legend_3d = ax_3d.legend(loc="upper left", fontsize=8, facecolor=ANIMATION_PANEL_COLOR, edgecolor=ANIMATION_GRID_COLOR)
-    legend_top = ax_top.legend(loc="upper left", fontsize=8, facecolor=ANIMATION_PANEL_COLOR, edgecolor=ANIMATION_GRID_COLOR)
-    for legend in (legend_3d, legend_top):
-        for text in legend.get_texts():
-            text.set_color(ANIMATION_TEXT_COLOR)
-
-    dynamic_range_artists_3d: list[Any] = []
-    dynamic_range_patches_top: list[Any] = []
-    clearance_line_3d, = ax_3d.plot([], [], [], color="#ffffff", linestyle="--", linewidth=1.2, alpha=0.80, label="nearest obstacle")
-    clearance_line_top, = ax_top.plot([], [], color="#ffffff", linestyle="--", linewidth=1.2, alpha=0.80, zorder=7)
-    acceleration_line_3d, = ax_3d.plot([], [], [], color=ANIMATION_ACCELERATION_COLOR, linewidth=2.4, alpha=0.95, label="acc direction")
-    acceleration_line_top, = ax_top.plot([], [], color=ANIMATION_ACCELERATION_COLOR, linewidth=2.4, alpha=0.95, zorder=9)
-
-    def update(frame_index: int) -> tuple[Any, Any, Any, Any, Any, Any]:
-        nonlocal dynamic_range_artists_3d, dynamic_range_patches_top
-        point_index = int(frame_indices[frame_index])
-        partial = trajectory[: point_index + 1]
-        path_line_3d.set_data(partial[:, 0], partial[:, 1])
-        path_line_3d.set_3d_properties(partial[:, 2])
-        path_line_top.set_data(partial[:, 0], partial[:, 1])
-
-        current = trajectory[point_index]
-        current_point_3d._offsets3d = ([current[0]], [current[1]], [current[2]])
-        current_point_top.set_offsets([[current[0], current[1]]])
-
-        dynamic_centers = dynamic_obstacle_centers_at(trace, point_index)
-        if len(dynamic_centers) > 0:
-            dynamic_points_3d._offsets3d = (
-                dynamic_centers[:, 0],
-                dynamic_centers[:, 1],
-                dynamic_centers[:, 2],
-            )
-            dynamic_points_top.set_offsets(dynamic_centers[:, :2])
-        else:
-            dynamic_points_3d._offsets3d = ([], [], [])
-            dynamic_points_top.set_offsets(np.empty((0, 2)))
-
-        for artist in dynamic_range_artists_3d:
-            artist.remove()
-        dynamic_range_artists_3d = []
-        for patch in dynamic_range_patches_top:
-            patch.remove()
-        dynamic_range_patches_top = []
-
-        for obstacle in dynamic_obstacles_at(trace, point_index):
-            if obstacle["type"] != "sphere":
-                continue
-            center = np.asarray(obstacle["center"], dtype=float)
-            radius = float(obstacle["radius"])
-            dynamic_range_artists_3d.extend(plot_dynamic_sphere_range(ax_3d, center, radius))
-            range_patch = Circle(
-                (center[0], center[1]),
-                radius,
-                facecolor=ANIMATION_DYNAMIC_COLOR,
-                edgecolor="#ffd6ff",
-                linewidth=1.4,
-                alpha=0.22,
-                zorder=3,
-            )
-            ax_top.add_patch(range_patch)
-            dynamic_range_patches_top.append(range_patch)
-
-        nearest_center, surface_distance = nearest_obstacle_surface(trace, point_index)
-        if nearest_center is not None:
-            clearance_line_3d.set_data([current[0], nearest_center[0]], [current[1], nearest_center[1]])
-            clearance_line_3d.set_3d_properties([current[2], nearest_center[2]])
-            clearance_line_top.set_data([current[0], nearest_center[0]], [current[1], nearest_center[1]])
-            clearance_text = f"nearest clearance={surface_distance:.3f}"
-        else:
-            clearance_line_3d.set_data([], [])
-            clearance_line_3d.set_3d_properties([])
-            clearance_line_top.set_data([], [])
-            clearance_text = "nearest clearance=n/a"
-
-        acceleration_dir = acceleration_direction_at(trace, point_index)
-        if acceleration_dir is not None:
-            acceleration_scale = 0.65
-            acceleration_end = current + acceleration_dir * acceleration_scale
-            acceleration_line_3d.set_data([current[0], acceleration_end[0]], [current[1], acceleration_end[1]])
-            acceleration_line_3d.set_3d_properties([current[2], acceleration_end[2]])
-            acceleration_line_top.set_data([current[0], acceleration_end[0]], [current[1], acceleration_end[1]])
-        else:
-            acceleration_line_3d.set_data([], [])
-            acceleration_line_3d.set_3d_properties([])
-            acceleration_line_top.set_data([], [])
-
-        title = (
-            f"{trace.scenario} | seed={trace.seed} | {trace.terminal_status} | "
-            f"step={point_index}/{len(trajectory) - 1} | reward={metrics.reward:.2f} | {clearance_text}"
-        )
-        ax_3d.set_title("3D trajectory\n" + title, fontsize=10, color=ANIMATION_TEXT_COLOR)
-        ax_top.set_title("Top-down x-y view\n" + title, fontsize=10, color=ANIMATION_TEXT_COLOR)
-        return (
-            path_line_3d,
-            current_point_3d,
-            dynamic_points_3d,
-            path_line_top,
-            current_point_top,
-            dynamic_points_top,
-            clearance_line_3d,
-            clearance_line_top,
-            acceleration_line_3d,
-            acceleration_line_top,
-        )
-
-    animation = FuncAnimation(fig, update, frames=len(frame_indices), interval=1000 / DEFAULT_HTML_FPS, blit=False)
-    fig.subplots_adjust(left=0.04, right=0.98, bottom=0.08, top=0.88, wspace=0.36)
-    animation.save(save_path, writer=HTMLWriter(fps=DEFAULT_HTML_FPS, embed_frames=True))
-    plt.close(fig)
     return save_path
 
 
-def save_trajectory_htmls(results: list[EpisodeResult], output_dir: Path) -> list[Path]:
+def save_trace_jsons(results: list[EpisodeResult], output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
     for result in results:
-        saved_paths.append(save_trajectory_html(result, output_dir))
+        saved_paths.append(save_trace_json(result, output_dir))
     return saved_paths
 
 
-def trajectory_direction_at(trajectory: np.ndarray, point_index: int) -> np.ndarray:
-    if len(trajectory) < 2:
-        return np.array([1.0, 0.0, 0.0], dtype=float)
-    if point_index > 0:
-        direction = trajectory[point_index] - trajectory[point_index - 1]
-    else:
-        direction = trajectory[1] - trajectory[0]
-    direction_norm = float(np.linalg.norm(direction))
-    if direction_norm < 1e-8:
-        return np.array([1.0, 0.0, 0.0], dtype=float)
-    return direction / direction_norm
+def build_data_driven_trajectory_html(payload: dict[str, Any], trace_json_href: str) -> str:
+    json_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    json_text = json_text.replace("</", "<\\/")
+    template = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trajectory Viewer</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #06111f;
+  --panel: #0b1b2b;
+  --grid: #27445e;
+  --text: #d8ecff;
+  --muted: #8fb2cc;
+  --cyan: #27e8ff;
+  --yellow: #fff2a8;
+  --pink: #ff4fd8;
+  --red: #ff5a5f;
+  --green: #33d17a;
+  --orange: #ffb347;
+  --lime: #b6ff3b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, Helvetica, sans-serif;
+}
+main {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 22px;
+}
+header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+}
+.sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+  min-width: 0;
+}
+.panel h2 {
+  margin: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--grid);
+  font-size: 15px;
+}
+canvas {
+  display: block;
+  width: 100%;
+  height: 520px;
+}
+.controls {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 14px;
+  background: var(--panel);
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+}
+button {
+  height: 34px;
+  padding: 0 13px;
+  border: 1px solid var(--grid);
+  border-radius: 6px;
+  background: #10253a;
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover { border-color: var(--cyan); }
+input[type="range"] {
+  width: 100%;
+}
+.readout {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-height: 64px;
+}
+.label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+.value {
+  font-family: Consolas, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 5px;
+}
+@media (max-width: 980px) {
+  .grid { grid-template-columns: 1fr; }
+  .controls { grid-template-columns: 1fr; }
+  .readout { grid-template-columns: 1fr 1fr; }
+  canvas { height: 420px; }
+}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div>
+    <h1 id="title">Trajectory Viewer</h1>
+    <div class="sub" id="subtitle"></div>
+  </div>
+  <div class="sub">Trace JSON: <a id="jsonLink" href="%%TRACE_JSON_HREF%%">%%TRACE_JSON_HREF%%</a></div>
+</header>
+<section class="controls">
+  <button id="playButton">Play</button>
+  <input id="stepRange" type="range" min="0" max="0" value="0">
+  <span class="value" id="stepText">step 0/0</span>
+  <label class="sub">yaw <input id="yawRange" type="range" min="-180" max="180" value="-45"></label>
+  <label class="sub">pitch <input id="pitchRange" type="range" min="-65" max="65" value="28"></label>
+</section>
+<section class="grid">
+  <div class="panel">
+    <h2>Top-down x-y View</h2>
+    <canvas id="view2d"></canvas>
+  </div>
+  <div class="panel">
+    <h2>3D Projected View</h2>
+    <canvas id="view3d"></canvas>
+  </div>
+</section>
+<section class="legend">
+  <span><span class="dot" style="background: var(--green)"></span>start</span>
+  <span><span class="dot" style="background: var(--orange)"></span>goal</span>
+  <span><span class="dot" style="background: var(--cyan)"></span>trajectory</span>
+  <span><span class="dot" style="background: var(--yellow)"></span>current</span>
+  <span><span class="dot" style="background: var(--red)"></span>static obstacle</span>
+  <span><span class="dot" style="background: var(--pink)"></span>dynamic obstacle</span>
+  <span><span class="dot" style="background: var(--lime)"></span>acceleration</span>
+</section>
+<section class="readout">
+  <div class="card"><div class="label">state</div><div class="value" id="stateText"></div></div>
+  <div class="card"><div class="label">position</div><div class="value" id="positionText"></div></div>
+  <div class="card"><div class="label">action</div><div class="value" id="actionText"></div></div>
+  <div class="card"><div class="label">scaled action</div><div class="value" id="scaledActionText"></div></div>
+  <div class="card"><div class="label">forcing / offside</div><div class="value" id="branchText"></div></div>
+</section>
+</main>
+<script id="trace-data" type="application/json">%%TRACE_JSON%%</script>
+<script>
+const TRACE = JSON.parse(document.getElementById("trace-data").textContent);
+const FPS = %%FPS%%;
+const COLORS = {
+  bg: "#06111f",
+  panel: "#0b1b2b",
+  grid: "#27445e",
+  text: "#d8ecff",
+  muted: "#8fb2cc",
+  trajectory: "#27e8ff",
+  current: "#fff2a8",
+  dynamic: "#ff4fd8",
+  static: "#ff5a5f",
+  start: "#33d17a",
+  goal: "#ffb347",
+  acceleration: "#b6ff3b"
+};
+const trajectory = TRACE.trajectory || [];
+const obstacleHistory = TRACE.obstacle_history || [];
+const policy = TRACE.policy_outputs || {};
+const maxStep = Math.max(0, trajectory.length - 1);
+const playButton = document.getElementById("playButton");
+const stepRange = document.getElementById("stepRange");
+const yawRange = document.getElementById("yawRange");
+const pitchRange = document.getElementById("pitchRange");
+stepRange.max = String(maxStep);
+let playing = false;
+let timer = null;
 
+document.getElementById("title").textContent = `${TRACE.scenario} | seed=${TRACE.seed}`;
+document.getElementById("subtitle").textContent = `${TRACE.terminal_status} | reward=${fmt(TRACE.metrics.reward)} | length=${TRACE.metrics.episode_length} | path_efficiency=${fmt(TRACE.metrics.path_efficiency)}`;
 
-def set_chase_camera_axes(ax: Any, position: np.ndarray, direction: np.ndarray) -> None:
-    horizontal = np.array([direction[0], direction[1], 0.0], dtype=float)
-    horizontal_norm = float(np.linalg.norm(horizontal))
-    if horizontal_norm < 1e-8:
-        horizontal = np.array([1.0, 0.0, 0.0], dtype=float)
-    else:
-        horizontal = horizontal / horizontal_norm
+function fmt(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "nan";
+  return Number(value).toFixed(3);
+}
 
-    azimuth = float(np.degrees(np.arctan2(horizontal[1], horizontal[0])) - 180.0)
-    ax.view_init(elev=18.0, azim=azimuth)
+function vectorText(value) {
+  if (!Array.isArray(value)) return "[]";
+  return "[" + value.map(v => fmt(v)).join(", ") + "]";
+}
 
-    forward_distance = 2.2
-    backward_distance = 0.9
-    side_distance = 1.15
-    vertical_distance = 0.95
-    center = position + horizontal * 0.55 + np.array([0.0, 0.0, 0.18], dtype=float)
-    ax.set_xlim(center[0] - backward_distance, center[0] + forward_distance)
-    ax.set_ylim(center[1] - side_distance, center[1] + side_distance)
-    ax.set_zlim(center[2] - 0.45, center[2] + vertical_distance)
-    if hasattr(ax, "set_box_aspect"):
-        ax.set_box_aspect((forward_distance + backward_distance, 2.0 * side_distance, vertical_distance + 0.45))
+function resizeCanvas(canvas) {
+  const ratio = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width * ratio));
+  const height = Math.max(260, Math.floor(rect.height * ratio));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  return { width, height, ratio };
+}
 
+function obstacleExtent(obstacle) {
+  const c = obstacle.center || [0, 0, 0];
+  if (obstacle.type === "box") {
+    const h = obstacle.half_extents || [0, 0, 0];
+    return [[c[0] - h[0], c[1] - h[1], c[2] - h[2]], [c[0] + h[0], c[1] + h[1], c[2] + h[2]]];
+  }
+  const r = Number(obstacle.radius || 0);
+  const h = Number(obstacle.half_height || r);
+  return [[c[0] - r, c[1] - r, c[2] - h], [c[0] + r, c[1] + r, c[2] + h]];
+}
 
-def save_chase_view_html(result: EpisodeResult, output_dir: Path) -> Path:
-    import matplotlib
+function computeBounds() {
+  const points = [];
+  for (const p of trajectory) points.push(p);
+  points.push(TRACE.start || [0, 0, 0]);
+  points.push(TRACE.goal || [1, 1, 1]);
+  for (const frame of obstacleHistory) {
+    for (const obstacle of frame || []) {
+      const ext = obstacleExtent(obstacle);
+      points.push(ext[0], ext[1]);
+    }
+  }
+  const lower = [Infinity, Infinity, Infinity];
+  const upper = [-Infinity, -Infinity, -Infinity];
+  for (const p of points) {
+    for (let i = 0; i < 3; i += 1) {
+      const v = Number(p[i] || 0);
+      lower[i] = Math.min(lower[i], v);
+      upper[i] = Math.max(upper[i], v);
+    }
+  }
+  for (let i = 0; i < 3; i += 1) {
+    if (!Number.isFinite(lower[i]) || !Number.isFinite(upper[i]) || upper[i] - lower[i] < 0.5) {
+      const center = Number.isFinite(lower[i]) ? 0.5 * (lower[i] + upper[i]) : 0;
+      lower[i] = center - 0.25;
+      upper[i] = center + 0.25;
+    }
+    const padding = 0.12 * (upper[i] - lower[i]);
+    lower[i] -= padding;
+    upper[i] += padding;
+  }
+  return { lower, upper, center: lower.map((v, i) => 0.5 * (v + upper[i])) };
+}
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation, HTMLWriter
+const bounds = computeBounds();
 
-    metrics = result.metrics
-    trace = result.trace
-    trajectory = trace.trajectory
-    frame_indices = make_animation_frame_indices(len(trajectory))
-    save_path = output_dir / f"{episode_artifact_stem(trace)}_chase.html"
+function frameObstacles(step) {
+  return obstacleHistory[Math.min(step, Math.max(0, obstacleHistory.length - 1))] || TRACE.obstacles || [];
+}
 
-    fig = plt.figure(figsize=(9, 6), facecolor=ANIMATION_BG_COLOR)
-    ax = fig.add_subplot(1, 1, 1, projection="3d")
-    axis_points = draw_static_scene_for_animation(ax, trace)
-    set_equal_3d_axes(ax, axis_points)
-    style_animation_3d_axis(ax)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
+function map2d(point, size) {
+  const pad = 42 * size.ratio;
+  const spanX = bounds.upper[0] - bounds.lower[0];
+  const spanY = bounds.upper[1] - bounds.lower[1];
+  const scale = Math.min((size.width - 2 * pad) / spanX, (size.height - 2 * pad) / spanY);
+  const x = pad + (point[0] - bounds.lower[0]) * scale;
+  const y = size.height - pad - (point[1] - bounds.lower[1]) * scale;
+  return [x, y, scale];
+}
 
-    path_line, = ax.plot([], [], [], color=ANIMATION_TRAJECTORY_COLOR, linewidth=3.0, label="trajectory")
-    current_point = ax.scatter(
-        [],
-        [],
-        [],
-        color=ANIMATION_CURRENT_COLOR,
-        edgecolor="white",
-        linewidth=0.9,
-        marker="o",
-        s=90,
-        label="agent",
+function clear(ctx, size) {
+  ctx.fillStyle = COLORS.panel;
+  ctx.fillRect(0, 0, size.width, size.height);
+}
+
+function drawGrid2d(ctx, size) {
+  ctx.strokeStyle = COLORS.grid;
+  ctx.lineWidth = 1 * size.ratio;
+  ctx.globalAlpha = 0.55;
+  for (let i = 0; i <= 8; i += 1) {
+    const x = (size.width * i) / 8;
+    const y = (size.height * i) / 8;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, size.height);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(size.width, y);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCircle(ctx, x, y, radius, color, alpha = 1) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(x, y, Math.max(2, radius), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawObstacles2d(ctx, size, step) {
+  for (const obstacle of frameObstacles(step)) {
+    const c = obstacle.center || [0, 0, 0];
+    const [x, y, scale] = map2d(c, size);
+    const color = obstacle.kind === "dynamic" ? COLORS.dynamic : COLORS.static;
+    if (obstacle.type === "box") {
+      const h = obstacle.half_extents || [0.1, 0.1, 0.1];
+      const p1 = map2d([c[0] - h[0], c[1] - h[1], c[2]], size);
+      const p2 = map2d([c[0] + h[0], c[1] + h[1], c[2]], size);
+      ctx.save();
+      ctx.globalAlpha = obstacle.kind === "dynamic" ? 0.34 : 0.42;
+      ctx.fillStyle = color;
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.2 * size.ratio;
+      ctx.fillRect(p1[0], p2[1], p2[0] - p1[0], p1[1] - p2[1]);
+      ctx.strokeRect(p1[0], p2[1], p2[0] - p1[0], p1[1] - p2[1]);
+      ctx.restore();
+    } else {
+      const r = Number(obstacle.radius || 0.1) * scale;
+      drawCircle(ctx, x, y, r, color, obstacle.kind === "dynamic" ? 0.34 : 0.42);
+    }
+  }
+}
+
+function drawPath2d(ctx, size, step) {
+  function polyline(points, color, width, alpha) {
+    if (points.length < 2) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width * size.ratio;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const [x, y] = map2d(p, size);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+  polyline(trajectory, COLORS.trajectory, 1.4, 0.28);
+  polyline(trajectory.slice(0, step + 1), COLORS.trajectory, 3.0, 0.95);
+  const start = map2d(TRACE.start || trajectory[0] || [0, 0, 0], size);
+  const goal = map2d(TRACE.goal || trajectory[trajectory.length - 1] || [0, 0, 0], size);
+  drawCircle(ctx, start[0], start[1], 6 * size.ratio, COLORS.start, 0.95);
+  drawCircle(ctx, goal[0], goal[1], 8 * size.ratio, COLORS.goal, 0.95);
+  if (trajectory[step]) {
+    const current = map2d(trajectory[step], size);
+    drawCircle(ctx, current[0], current[1], 7 * size.ratio, COLORS.current, 1);
+  }
+}
+
+function project3d(point, size) {
+  const yaw = Number(yawRange.value) * Math.PI / 180;
+  const pitch = Number(pitchRange.value) * Math.PI / 180;
+  const dx = point[0] - bounds.center[0];
+  const dy = point[1] - bounds.center[1];
+  const dz = point[2] - bounds.center[2];
+  const x1 = dx * Math.cos(yaw) - dy * Math.sin(yaw);
+  const y1 = dx * Math.sin(yaw) + dy * Math.cos(yaw);
+  const z1 = dz;
+  const y2 = y1 * Math.cos(pitch) - z1 * Math.sin(pitch);
+  const z2 = y1 * Math.sin(pitch) + z1 * Math.cos(pitch);
+  const maxSpan = Math.max(bounds.upper[0] - bounds.lower[0], bounds.upper[1] - bounds.lower[1], bounds.upper[2] - bounds.lower[2]);
+  const scale = 0.72 * Math.min(size.width, size.height) / maxSpan;
+  return [size.width / 2 + x1 * scale, size.height / 2 - z2 * scale, y2, scale];
+}
+
+function boxCorners(obstacle) {
+  const c = obstacle.center || [0, 0, 0];
+  const h = obstacle.half_extents || [0.1, 0.1, 0.1];
+  const points = [];
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+    points.push([c[0] + sx * h[0], c[1] + sy * h[1], c[2] + sz * h[2]]);
+  }
+  return points;
+}
+
+function drawBox3d(ctx, size, obstacle, color) {
+  const points = boxCorners(obstacle).map(p => project3d(p, size));
+  const edges = [[0,1],[0,2],[0,4],[3,1],[3,2],[3,7],[5,1],[5,4],[5,7],[6,2],[6,4],[6,7]];
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.66;
+  ctx.lineWidth = 1.2 * size.ratio;
+  for (const [a, b] of edges) {
+    ctx.beginPath();
+    ctx.moveTo(points[a][0], points[a][1]);
+    ctx.lineTo(points[b][0], points[b][1]);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawObstacles3d(ctx, size, step) {
+  const items = frameObstacles(step).map(obstacle => {
+    const projected = project3d(obstacle.center || [0, 0, 0], size);
+    return { obstacle, projected, depth: projected[2] };
+  }).sort((a, b) => b.depth - a.depth);
+  for (const item of items) {
+    const obstacle = item.obstacle;
+    const color = obstacle.kind === "dynamic" ? COLORS.dynamic : COLORS.static;
+    if (obstacle.type === "box") {
+      drawBox3d(ctx, size, obstacle, color);
+    } else {
+      const radius = Number(obstacle.radius || 0.1) * item.projected[3];
+      drawCircle(ctx, item.projected[0], item.projected[1], radius, color, obstacle.kind === "dynamic" ? 0.35 : 0.42);
+    }
+  }
+}
+
+function drawPath3d(ctx, size, step) {
+  function polyline(points, color, width, alpha) {
+    if (points.length < 2) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width * size.ratio;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const projected = project3d(p, size);
+      if (i === 0) ctx.moveTo(projected[0], projected[1]);
+      else ctx.lineTo(projected[0], projected[1]);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+  polyline(trajectory, COLORS.trajectory, 1.4, 0.24);
+  polyline(trajectory.slice(0, step + 1), COLORS.trajectory, 3.0, 0.95);
+  const start = project3d(TRACE.start || trajectory[0] || [0, 0, 0], size);
+  const goal = project3d(TRACE.goal || trajectory[trajectory.length - 1] || [0, 0, 0], size);
+  drawCircle(ctx, start[0], start[1], 6 * size.ratio, COLORS.start, 0.95);
+  drawCircle(ctx, goal[0], goal[1], 8 * size.ratio, COLORS.goal, 0.95);
+  if (trajectory[step]) {
+    const current = project3d(trajectory[step], size);
+    drawCircle(ctx, current[0], current[1], 7 * size.ratio, COLORS.current, 1);
+  }
+}
+
+function actionAt(step, key) {
+  const values = policy[key] || [];
+  if (!values.length) return [];
+  return values[Math.max(0, Math.min(values.length - 1, step - 1))] || [];
+}
+
+function updateReadout(step) {
+  const point = trajectory[step] || [];
+  document.getElementById("stepText").textContent = `step ${step}/${maxStep}`;
+  document.getElementById("stateText").textContent = `${TRACE.terminal_status} | success=${TRACE.metrics.success} | collision=${TRACE.metrics.collision} | timeout=${TRACE.metrics.timeout}`;
+  document.getElementById("positionText").textContent = vectorText(point);
+  document.getElementById("actionText").textContent = vectorText(actionAt(step, "action_history"));
+  document.getElementById("scaledActionText").textContent = vectorText(actionAt(step, "scaled_action_history"));
+  document.getElementById("branchText").textContent = `forcing=${vectorText(actionAt(step, "forcing_action_history"))}\noffside=${vectorText(actionAt(step, "offside_action_history"))}`;
+}
+
+function render() {
+  const step = Number(stepRange.value);
+  const canvas2d = document.getElementById("view2d");
+  const canvas3d = document.getElementById("view3d");
+  const size2d = resizeCanvas(canvas2d);
+  const size3d = resizeCanvas(canvas3d);
+  const ctx2d = canvas2d.getContext("2d");
+  const ctx3d = canvas3d.getContext("2d");
+  clear(ctx2d, size2d);
+  clear(ctx3d, size3d);
+  drawGrid2d(ctx2d, size2d);
+  drawGrid2d(ctx3d, size3d);
+  drawObstacles2d(ctx2d, size2d, step);
+  drawPath2d(ctx2d, size2d, step);
+  drawObstacles3d(ctx3d, size3d, step);
+  drawPath3d(ctx3d, size3d, step);
+  updateReadout(step);
+}
+
+function setPlaying(enabled) {
+  playing = enabled;
+  playButton.textContent = playing ? "Pause" : "Play";
+  if (timer) window.clearInterval(timer);
+  timer = null;
+  if (playing) {
+    timer = window.setInterval(() => {
+      const next = Number(stepRange.value) + 1;
+      stepRange.value = String(next > maxStep ? 0 : next);
+      render();
+    }, 1000 / FPS);
+  }
+}
+
+playButton.addEventListener("click", () => setPlaying(!playing));
+stepRange.addEventListener("input", render);
+yawRange.addEventListener("input", render);
+pitchRange.addEventListener("input", render);
+window.addEventListener("resize", render);
+render();
+</script>
+</body>
+</html>
+"""
+    return (
+        template.replace("%%TRACE_JSON%%", json_text)
+        .replace("%%TRACE_JSON_HREF%%", html.escape(trace_json_href, quote=True))
+        .replace("%%FPS%%", str(DEFAULT_HTML_FPS))
     )
-    dynamic_points = ax.scatter(
-        [],
-        [],
-        [],
-        color=ANIMATION_DYNAMIC_COLOR,
-        edgecolor="white",
-        linewidth=0.6,
-        marker="o",
-        s=78,
-        label="dynamic obstacle",
+
+
+def save_trajectory_html(result: EpisodeResult, output_dir: Path, trace_json_href: str) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = trace_json_payload(result)
+    save_path = output_dir / f"{episode_artifact_stem(result.trace)}.html"
+    save_path.write_text(
+        build_data_driven_trajectory_html(payload, trace_json_href),
+        encoding="utf-8",
     )
-    clearance_line, = ax.plot([], [], [], color="#ffffff", linestyle="--", linewidth=1.4, alpha=0.85, label="nearest obstacle")
-    acceleration_line, = ax.plot([], [], [], color=ANIMATION_ACCELERATION_COLOR, linewidth=2.6, alpha=0.95, label="acc direction")
-
-    legend = ax.legend(loc="upper left", fontsize=8, facecolor=ANIMATION_PANEL_COLOR, edgecolor=ANIMATION_GRID_COLOR)
-    for text in legend.get_texts():
-        text.set_color(ANIMATION_TEXT_COLOR)
-
-    dynamic_range_artists: list[Any] = []
-
-    def update(frame_index: int) -> tuple[Any, ...]:
-        nonlocal dynamic_range_artists
-        point_index = int(frame_indices[frame_index])
-        current = trajectory[point_index]
-        direction = trajectory_direction_at(trajectory, point_index)
-
-        partial_start = max(0, point_index - 18)
-        partial = trajectory[partial_start: point_index + 1]
-        path_line.set_data(partial[:, 0], partial[:, 1])
-        path_line.set_3d_properties(partial[:, 2])
-        current_point._offsets3d = ([current[0]], [current[1]], [current[2]])
-
-        dynamic_centers = dynamic_obstacle_centers_at(trace, point_index)
-        if len(dynamic_centers) > 0:
-            dynamic_points._offsets3d = (
-                dynamic_centers[:, 0],
-                dynamic_centers[:, 1],
-                dynamic_centers[:, 2],
-            )
-        else:
-            dynamic_points._offsets3d = ([], [], [])
-
-        for artist in dynamic_range_artists:
-            artist.remove()
-        dynamic_range_artists = []
-        for obstacle in dynamic_obstacles_at(trace, point_index):
-            if obstacle["type"] != "sphere":
-                continue
-            center = np.asarray(obstacle["center"], dtype=float)
-            radius = float(obstacle["radius"])
-            dynamic_range_artists.extend(plot_dynamic_sphere_range(ax, center, radius))
-
-        nearest_surface_point, surface_distance = nearest_obstacle_surface(trace, point_index)
-        if nearest_surface_point is not None:
-            clearance_line.set_data([current[0], nearest_surface_point[0]], [current[1], nearest_surface_point[1]])
-            clearance_line.set_3d_properties([current[2], nearest_surface_point[2]])
-            clearance_text = f"nearest clearance={surface_distance:.3f}"
-        else:
-            clearance_line.set_data([], [])
-            clearance_line.set_3d_properties([])
-            clearance_text = "nearest clearance=n/a"
-
-        acceleration_dir = acceleration_direction_at(trace, point_index)
-        if acceleration_dir is not None:
-            acceleration_scale = 0.65
-            acceleration_end = current + acceleration_dir * acceleration_scale
-            acceleration_line.set_data([current[0], acceleration_end[0]], [current[1], acceleration_end[1]])
-            acceleration_line.set_3d_properties([current[2], acceleration_end[2]])
-        else:
-            acceleration_line.set_data([], [])
-            acceleration_line.set_3d_properties([])
-
-        set_chase_camera_axes(ax, current, direction)
-        ax.set_title(
-            "Chase view\n"
-            f"{trace.scenario} | seed={trace.seed} | {trace.terminal_status} | "
-            f"step={point_index}/{len(trajectory) - 1} | {clearance_text}",
-            fontsize=10,
-            color=ANIMATION_TEXT_COLOR,
-        )
-        return path_line, current_point, dynamic_points, clearance_line, acceleration_line, *dynamic_range_artists
-
-    animation = FuncAnimation(fig, update, frames=len(frame_indices), interval=1000 / DEFAULT_HTML_FPS, blit=False)
-    fig.subplots_adjust(left=0.06, right=0.97, bottom=0.08, top=0.88)
-    animation.save(save_path, writer=HTMLWriter(fps=DEFAULT_HTML_FPS, embed_frames=True))
-    plt.close(fig)
     return save_path
 
 
-def save_chase_view_htmls(results: list[EpisodeResult], output_dir: Path) -> list[Path]:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def save_trajectory_htmls(results: list[EpisodeResult], paths: EvalPaths) -> list[Path]:
+    paths.trajectory_html_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
     for result in results:
-        saved_paths.append(save_chase_view_html(result, output_dir))
+        trace_json_href = f"../trace_json/{episode_artifact_stem(result.trace)}.json"
+        saved_paths.append(save_trajectory_html(result, paths.trajectory_html_dir, trace_json_href))
     return saved_paths
 
 
@@ -1950,12 +2182,12 @@ def terminal_state_path_for_result(result: EpisodeResult, paths: EvalPaths) -> P
     return paths.terminal_state_dir / f"{episode_artifact_stem(result.trace)}.png"
 
 
+def trace_json_path_for_result(result: EpisodeResult, paths: EvalPaths) -> Path:
+    return paths.trace_json_dir / f"{episode_artifact_stem(result.trace)}.json"
+
+
 def trajectory_html_path_for_result(result: EpisodeResult, paths: EvalPaths) -> Path:
     return paths.trajectory_html_dir / f"{episode_artifact_stem(result.trace)}.html"
-
-
-def chase_view_html_path_for_result(result: EpisodeResult, paths: EvalPaths) -> Path:
-    return paths.chase_view_html_dir / f"{episode_artifact_stem(result.trace)}_chase.html"
 
 
 def policy_output_path_for_result(result: EpisodeResult, paths: EvalPaths) -> Path:
@@ -2007,6 +2239,11 @@ def visualization_manifest_row(
     row = episode_metrics_to_row(metrics)
     row["terminal_status"] = result.trace.terminal_status
     row["policy_output_npz"] = relative_artifact_path(policy_output_path_for_result(result, paths), paths.output_dir)
+    row["trace_json"] = (
+        relative_artifact_path(trace_json_path_for_result(result, paths), paths.output_dir)
+        if include_visualizations
+        else ""
+    )
     row["terminal_state_png"] = (
         relative_artifact_path(terminal_state_path_for_result(result, paths), paths.output_dir)
         if include_visualizations
@@ -2014,11 +2251,6 @@ def visualization_manifest_row(
     )
     row["trajectory_html"] = (
         relative_artifact_path(trajectory_html_path_for_result(result, paths), paths.output_dir)
-        if include_visualizations
-        else ""
-    )
-    row["chase_view_html"] = (
-        relative_artifact_path(chase_view_html_path_for_result(result, paths), paths.output_dir)
         if include_visualizations
         else ""
     )
@@ -2033,8 +2265,8 @@ def write_visualization_manifest(
     artifact_fieldnames = [
         "terminal_status",
         "terminal_state_png",
+        "trace_json",
         "trajectory_html",
-        "chase_view_html",
         "policy_output_npz",
     ]
     fieldnames = episode_metric_fieldnames() + artifact_fieldnames
@@ -2078,8 +2310,8 @@ def write_visualization_index(
             f"<td>{_format_index_float(metrics.distance_to_goal)}</td>"
             f"<td>{_format_index_float(metrics.path_efficiency)}</td>"
             f"<td>{_artifact_link(manifest_row['terminal_state_png'], 'png')}</td>"
+            f"<td>{_artifact_link(manifest_row['trace_json'], 'json')}</td>"
             f"<td>{_artifact_link(manifest_row['trajectory_html'], 'trajectory')}</td>"
-            f"<td>{_artifact_link(manifest_row['chase_view_html'], 'chase')}</td>"
             f"<td>{_artifact_link(manifest_row['policy_output_npz'], 'npz')}</td>"
             "</tr>"
         )
@@ -2172,8 +2404,8 @@ Metadata: {_artifact_link(metadata_link, 'event_metadata.json')}
 <th>distance</th>
 <th>efficiency</th>
 <th>terminal</th>
+<th>trace</th>
 <th>trajectory</th>
-<th>chase</th>
 <th>policy</th>
 </tr>
 </thead>
@@ -2227,8 +2459,8 @@ def print_run_summary(eval_args: EvalArguments) -> None:    # 打印总结信息
     print(f"save_visualizations: {eval_args.save_visualizations}")
     if eval_args.save_visualizations:
         print(f"terminal_state_dir: {eval_args.paths.terminal_state_dir}")
+        print(f"trace_json_dir: {eval_args.paths.trace_json_dir}")
         print(f"trajectory_html_dir: {eval_args.paths.trajectory_html_dir}")
-        print(f"chase_view_html_dir: {eval_args.paths.chase_view_html_dir}")
 
 
 def print_runtime_summary(runtime: EvalRuntime) -> None:    # 运行读取场景总结
@@ -2279,13 +2511,13 @@ def main() -> None:
         if eval_args.save_visualizations:
             terminal_state_paths = save_terminal_state_figures(results, eval_args.paths.terminal_state_dir)
             print(f"terminal_state_figures: {len(terminal_state_paths)}")
-            trajectory_html_paths = save_trajectory_htmls(results, eval_args.paths.trajectory_html_dir)
+            trace_json_paths = save_trace_jsons(results, eval_args.paths.trace_json_dir)
+            print(f"trace_jsons: {len(trace_json_paths)}")
+            trajectory_html_paths = save_trajectory_htmls(results, eval_args.paths)
             print(f"trajectory_htmls: {len(trajectory_html_paths)}")
-            chase_view_html_paths = save_chase_view_htmls(results, eval_args.paths.chase_view_html_dir)
-            print(f"chase_view_htmls: {len(chase_view_html_paths)}")
             write_visualization_manifest(results, eval_args.paths, include_visualizations=True)
             write_visualization_index(results, eval_args.paths, include_visualizations=True)
-            print("status: batch evaluation, CSV outputs, policy outputs, terminal-state figures, and HTML animations completed")
+            print("status: batch evaluation, CSV outputs, policy outputs, trace JSONs, terminal-state figures, and data-driven HTML visualizations completed")
         else:
             write_visualization_manifest(results, eval_args.paths, include_visualizations=False)
             write_visualization_index(results, eval_args.paths, include_visualizations=False)
