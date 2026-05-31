@@ -18,6 +18,7 @@ if "object" not in np.__dict__:
 import MARL as marl
 
 from experiment_config import MAPPO_EXPERIMENT_CONFIG, MAPPOExperimentConfig
+from net.net_mappo import DMPMAPPOModel
 
 
 def _patch_tensorboardx_writer() -> None:
@@ -60,12 +61,13 @@ def build_model(
     algo: Any,
     config: MAPPOExperimentConfig = MAPPO_EXPERIMENT_CONFIG,
 ) -> tuple[Any, dict[str, Any]]:
-    """Build the centralized-critic model used by MAPPO."""
-    return marl.build_model(
+    """Build the project-defined centralized-critic model used by MAPPO."""
+    _, model_config = marl.build_model(
         env,
         algo,
         config.build_model_preference(),
     )
+    return DMPMAPPOModel, model_config
 
 
 def _write_run_config(
