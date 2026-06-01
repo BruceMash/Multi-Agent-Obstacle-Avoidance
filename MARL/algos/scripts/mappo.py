@@ -82,6 +82,7 @@ def run_mappo(model: Any, exp: Dict, run: Dict, env: Dict,
     entropy_coeff = _param["entropy_coeff"]
     back_up_config = merge_dicts(exp, env)
     back_up_config.pop("algo_args")  # clean for grid_search
+    back_up_config.pop("callbacks", None)
 
     config = {
         "batch_mode": batch_mode,

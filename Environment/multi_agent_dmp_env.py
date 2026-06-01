@@ -34,6 +34,7 @@ class MultiAgentEnvConfig(EnvConfig):
     inter_agent_collision_penalty: float = 20.0
     inter_agent_potential_weight: float = 1.0
     inter_agent_influence_distance: float = 1.2
+    nearest_agent_observation_count: int = 2
     acceleration_penalty_weight: float = 0.01
     acceleration_clip_penalty_weight: float = 0.05
 
@@ -47,6 +48,7 @@ class MultiAgentEnvConfig(EnvConfig):
         self.inter_agent_collision_penalty = float(self.inter_agent_collision_penalty)
         self.inter_agent_potential_weight = float(self.inter_agent_potential_weight)
         self.inter_agent_influence_distance = float(self.inter_agent_influence_distance)
+        self.nearest_agent_observation_count = int(self.nearest_agent_observation_count)
         self.acceleration_penalty_weight = float(self.acceleration_penalty_weight)
         self.acceleration_clip_penalty_weight = float(self.acceleration_clip_penalty_weight)
 
@@ -55,6 +57,8 @@ class MultiAgentEnvConfig(EnvConfig):
             raise ValueError("inter_agent_safe_distance must be positive")
         if self.inter_agent_influence_distance <= 0.0:
             raise ValueError("inter_agent_influence_distance must be positive")
+        if self.nearest_agent_observation_count < 0:
+            raise ValueError("nearest_agent_observation_count must be non-negative")
         if self.acceleration_penalty_weight < 0.0:
             raise ValueError("acceleration_penalty_weight must be non-negative")
         if self.acceleration_clip_penalty_weight < 0.0:
@@ -255,12 +259,16 @@ class MultiAgentDMPEnv(gym.Env):
         return 2 * self.state_dim + 1
 
     @property
+    def nearest_agent_observation_count(self) -> int:
+        return min(int(self.env_config.nearest_agent_observation_count), max(self.num_agents - 1, 0))
+
+    @property
     def inter_agent_observation_dim(self) -> int:
-        return 0
+        return self.nearest_agent_observation_count * self.single_pair_observation_dim
 
     @property
     def single_agent_observation_dim(self) -> int:
-        return self.sensor_observation_dim + self.extra_observation_dim
+        return self.sensor_observation_dim + self.inter_agent_observation_dim + self.extra_observation_dim
 
     @property
     def observation_shape(self) -> tuple[int, int]:
@@ -312,12 +320,34 @@ class MultiAgentDMPEnv(gym.Env):
 
         sensor_low = np.concatenate([velocity_low, goal_direction_low, goal_distance_low, scan_low], axis=0)
         sensor_high = np.concatenate([velocity_high, goal_direction_high, goal_distance_high, scan_high], axis=0)
+        inter_agent_low = np.tile(
+            np.concatenate(
+                [
+                    np.full(self.state_dim, -1.0, dtype=np.float32),
+                    np.full(self.state_dim, -1.0, dtype=np.float32),
+                    np.zeros(1, dtype=np.float32),
+                ],
+                axis=0,
+            ),
+            self.nearest_agent_observation_count,
+        )
+        inter_agent_high = np.tile(
+            np.concatenate(
+                [
+                    np.full(self.state_dim, 1.0, dtype=np.float32),
+                    np.full(self.state_dim, 1.0, dtype=np.float32),
+                    np.ones(1, dtype=np.float32),
+                ],
+                axis=0,
+            ),
+            self.nearest_agent_observation_count,
+        )
         extra_low = np.array([0.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
         extra_high = np.array([1.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
 
         # 封装单个智能体的观测空间边界
-        single_low = np.concatenate([sensor_low, extra_low], axis=0)
-        single_high = np.concatenate([sensor_high, extra_high], axis=0)
+        single_low = np.concatenate([sensor_low, inter_agent_low, extra_low], axis=0)
+        single_high = np.concatenate([sensor_high, inter_agent_high, extra_high], axis=0)
         
         # 封装多个智能体的观测空间边界
         return spaces.Box(
@@ -413,7 +443,8 @@ class MultiAgentDMPEnv(gym.Env):
         return np.array([dmp.phase, dmp.config.K_alpha, dmp.config.K_beta], dtype=np.float32)
 
     def _compose_inter_agent_observation(self, agent_index: int) -> np.ndarray: # 组合智能体之间的观测
-        if self.num_agents <= 1:
+        nearest_count = self.nearest_agent_observation_count
+        if nearest_count <= 0:
             return np.zeros(0, dtype=np.float32)
 
         position = self.dynamics[agent_index].p
@@ -421,10 +452,17 @@ class MultiAgentDMPEnv(gym.Env):
         influence_distance = max(float(self.env_config.inter_agent_influence_distance), 1e-5)
         velocity_scale = max(float(np.max(np.abs(np.asarray(self.dynamics[agent_index].velocity_max, dtype=float)))), 1e-5)
 
-        features = []
+        neighbor_entries = []
         for other_index in range(self.num_agents):
             if other_index == agent_index:
                 continue
+            other_position = self.dynamics[other_index].p
+            distance = float(np.linalg.norm(other_position - position))
+            neighbor_entries.append((distance, other_index))
+        neighbor_entries.sort(key=lambda item: item[0])
+
+        features = []
+        for _, other_index in neighbor_entries[:nearest_count]:
             other_position = self.dynamics[other_index].p
             other_velocity = self.dynamics[other_index].v
             relative_position = (other_position - position) / influence_distance
@@ -452,6 +490,7 @@ class MultiAgentDMPEnv(gym.Env):
                 np.concatenate(
                     [
                         self._compose_sensor_observation(self.latest_sensor_packets[agent_index]),
+                        self._compose_inter_agent_observation(agent_index),
                         self._compose_extra_observation(agent_index),
                     ],
                     axis=0,

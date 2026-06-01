@@ -780,13 +780,14 @@ class MAPPOExperimentConfig:
     step_reward_weight: float = 4.0
     step_penalty: float = 0.01
     collision_penalty: float = 80.0
-    timeout_penalty: float = 50.0
-    success_bonus: float = 300.0
+    timeout_penalty: float = 20
+    success_bonus: float = 600.0
     collision_margin: float = 0.0
     inter_agent_safe_distance: float = 0.6
     inter_agent_collision_penalty: float = 20.0
     inter_agent_potential_weight: float = 1.0
     inter_agent_influence_distance: float = 1.2
+    nearest_agent_observation_count: int = 2
     acceleration_penalty_weight: float = 0.01
     acceleration_clip_penalty_weight: float = 0.05
 
@@ -808,7 +809,7 @@ class MAPPOExperimentConfig:
     num_sgd_iter: int = 1
     vf_loss_coeff: float = 1.0
     learning_rate: float = 1e-4
-    entropy_coeff: float = 0.01
+    entropy_coeff: float = 0.01     # 探索策略的随机性 
     clip_param: float = 0.2
     vf_clip_param: float = 10.0
     batch_mode: str = "truncate_episodes"
@@ -888,6 +889,7 @@ class MAPPOExperimentConfig:
             inter_agent_collision_penalty=self.inter_agent_collision_penalty,
             inter_agent_potential_weight=self.inter_agent_potential_weight,
             inter_agent_influence_distance=self.inter_agent_influence_distance,
+            nearest_agent_observation_count=self.nearest_agent_observation_count,
             acceleration_penalty_weight=self.acceleration_penalty_weight,
             acceleration_clip_penalty_weight=self.acceleration_clip_penalty_weight,
         )

@@ -176,6 +176,8 @@ def run_cc(exp_info, env, model, stop=None):
         "evaluation_interval": exp_info["evaluation_interval"],
         "simple_optimizer": False  # force using better optimizer
     }
+    if exp_info.get("callbacks") is not None:
+        run_config["callbacks"] = exp_info["callbacks"]
 
     stop_config = {
         "episode_reward_mean": exp_info["stop_reward"],

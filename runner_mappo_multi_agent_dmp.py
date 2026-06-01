@@ -17,6 +17,7 @@ if "object" not in np.__dict__:
 
 import MARL as marl
 
+from Environment.multi_agent_dmp_callbacks import MultiAgentDMPMetricsCallback
 from experiment_config import MAPPO_EXPERIMENT_CONFIG, MAPPOExperimentConfig
 from net.net_mappo import DMPMAPPOModel
 
@@ -107,6 +108,7 @@ def train(
     model = build_model(env, algo, config)
     stop_config = config.build_stop_config(training_iteration=training_iteration)
     running_params = config.build_running_params(local_dir=str(run_dir))
+    running_params["callbacks"] = MultiAgentDMPMetricsCallback
     config_path = _write_run_config(
         run_dir=run_dir,
         config=config,
