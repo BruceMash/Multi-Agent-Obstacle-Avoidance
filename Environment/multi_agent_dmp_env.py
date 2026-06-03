@@ -264,11 +264,11 @@ class MultiAgentDMPEnv(gym.Env):
 
     @property
     def inter_agent_observation_dim(self) -> int:
-        return self.nearest_agent_observation_count * self.single_pair_observation_dim
+        return (self.num_agents - 1) * self.single_pair_observation_dim
 
     @property
     def single_agent_observation_dim(self) -> int:
-        return self.sensor_observation_dim + self.inter_agent_observation_dim + self.extra_observation_dim
+        return self.sensor_observation_dim + self.extra_observation_dim + self.inter_agent_observation_dim
 
     @property
     def observation_shape(self) -> tuple[int, int]:
@@ -346,8 +346,8 @@ class MultiAgentDMPEnv(gym.Env):
         extra_high = np.array([1.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
 
         # 封装单个智能体的观测空间边界
-        single_low = np.concatenate([sensor_low, inter_agent_low, extra_low], axis=0)
-        single_high = np.concatenate([sensor_high, inter_agent_high, extra_high], axis=0)
+        single_low = np.concatenate([sensor_low, extra_low, inter_low], axis=0)
+        single_high = np.concatenate([sensor_high, extra_high, inter_high], axis=0)
         
         # 封装多个智能体的观测空间边界
         return spaces.Box(
@@ -490,8 +490,8 @@ class MultiAgentDMPEnv(gym.Env):
                 np.concatenate(
                     [
                         self._compose_sensor_observation(self.latest_sensor_packets[agent_index]),
-                        self._compose_inter_agent_observation(agent_index),
                         self._compose_extra_observation(agent_index),
+                        self._compose_inter_agent_observation(agent_index),
                     ],
                     axis=0,
                 ).astype(np.float32)

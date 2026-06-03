@@ -809,8 +809,8 @@ class MAPPOExperimentConfig:
     num_sgd_iter: int = 1
     vf_loss_coeff: float = 1.0
     learning_rate: float = 1e-4
-    entropy_coeff: float = 0.01     # 探索策略的随机性 
-    clip_param: float = 0.2
+    entropy_coeff: float = 0.01
+    clip_param: float = 0.3
     vf_clip_param: float = 10.0
     batch_mode: str = "truncate_episodes"
     fixed_batch_timesteps: int | None = 1024   
