@@ -754,7 +754,7 @@ class MAPPOExperimentConfig:
 
     # Environment and dynamics
     num_agents: int = 5
-    velocity_clip: tuple[float, float] = (-2.0, 2.0)
+    velocity_clip: tuple[float, float] = (-4.0, 4.0)
     accelerate_clip: tuple[float, float] = (-4.0, 4.0)
     time_step: float = 0.1
     sensing_radius: float = 5.0
@@ -793,13 +793,13 @@ class MAPPOExperimentConfig:
 
     # DMP
     dmp_dims: int = 3
-    k_alpha: float = 20.0
-    k_beta: float = 5.0
+    k_alpha: float = 3.0
+    k_beta: float = 0.8
     alpha_s: float = 4.0
-    tau: float = 1.2
+    tau: float = 2.5
     forcing_term_max: float = 10.0
     forcing_term_min: float = -10.0
-    goal_offset_max: float = 1.5
+    goal_offset_max: float = 1.0
 
     # MAPPO hyperparameters
     use_gae: bool = True
