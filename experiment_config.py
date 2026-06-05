@@ -768,6 +768,19 @@ class MAPPOExperimentConfig:
         (-0.5, -2.5, -1.2),
         (8.5, 2.0, 1.2),
     )
+    randomize_start_goal: bool = True
+    start_position_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (0.0, -2.0, -0.8),
+        (0.8, 1.5, 0.8),
+    )
+    goal_position_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
+        (7.2, -2.0, -0.8),
+        (8.0, 1.5, 0.8),
+    )
+    min_start_distance: float = 0.6
+    min_goal_distance: float = 0.0
+    min_start_goal_distance: float = 6.0
+    start_goal_max_attempts: int = 1000
 
     # Reward and safety
     obstacle_potential_weight: float = 2.0
@@ -783,6 +796,14 @@ class MAPPOExperimentConfig:
     timeout_penalty: float = 20
     success_bonus: float = 600.0
     collision_margin: float = 0.0
+    action_guidance_enabled: bool = True
+    action_guidance_radius: float = 1.0
+    action_guidance_initial_weight: float = 0.7
+    action_guidance_decay_steps: int = 500_000
+    near_goal_bonus_radius_1: float = 1.0
+    near_goal_bonus_1: float = 0.2
+    near_goal_bonus_radius_2: float = 0.6
+    near_goal_bonus_2: float = 0.6
     inter_agent_safe_distance: float = 0.6
     inter_agent_collision_penalty: float = 20.0
     inter_agent_potential_weight: float = 1.0
@@ -831,6 +852,10 @@ class MAPPOExperimentConfig:
     num_gpus_per_worker: int = 0
     checkpoint_freq: int = 50
     checkpoint_end: bool = True
+    fixed_eval_enabled: bool = True
+    fixed_eval_num_scenarios: int = 3
+    fixed_eval_deterministic: bool = True
+    fixed_eval_output_dirname: str = "fixed_eval"
     max_failures: int = 3
     restore_model_path: str = ""
     restore_params_path: str = ""
@@ -881,10 +906,25 @@ class MAPPOExperimentConfig:
             success_bonus=self.success_bonus,
             collision_margin=self.collision_margin,
             workspace_bounds=self.workspace_bounds,
+            randomize_start_goal=self.randomize_start_goal,
+            start_position_bounds=self.start_position_bounds,
+            goal_position_bounds=self.goal_position_bounds,
+            min_start_distance=self.min_start_distance,
+            min_goal_distance=self.min_goal_distance,
+            min_start_goal_distance=self.min_start_goal_distance,
+            start_goal_max_attempts=self.start_goal_max_attempts,
             boundary_influence_distance=self.boundary_influence_distance,
             boundary_potential_weight=self.boundary_potential_weight,
             boundary_potential_penalty_max=self.boundary_potential_penalty_max,
             boundary_distance_epsilon=self.boundary_distance_epsilon,
+            action_guidance_enabled=self.action_guidance_enabled,
+            action_guidance_radius=self.action_guidance_radius,
+            action_guidance_initial_weight=self.action_guidance_initial_weight,
+            action_guidance_decay_steps=self.action_guidance_decay_steps,
+            near_goal_bonus_radius_1=self.near_goal_bonus_radius_1,
+            near_goal_bonus_1=self.near_goal_bonus_1,
+            near_goal_bonus_radius_2=self.near_goal_bonus_radius_2,
+            near_goal_bonus_2=self.near_goal_bonus_2,
             inter_agent_safe_distance=self.inter_agent_safe_distance,
             inter_agent_collision_penalty=self.inter_agent_collision_penalty,
             inter_agent_potential_weight=self.inter_agent_potential_weight,
@@ -903,6 +943,70 @@ class MAPPOExperimentConfig:
             "sensor_config": self.build_sensor_config(),
             "dmp_config": self.build_dmp_config(),
             "env_config": self.build_env_config_dict(),
+        }
+
+    def _build_eval_lane_points(self) -> tuple[np.ndarray, np.ndarray]:
+        bounds = np.asarray(self.workspace_bounds, dtype=float)
+        if bounds.shape != (2, 3):
+            raise ValueError("workspace_bounds must have shape (2, 3)")
+
+        lower, upper = bounds
+        x_start = float(np.clip(0.0, lower[0] + 0.4, upper[0] - 0.4))
+        x_goal = float(np.clip(8.0, lower[0] + 0.4, upper[0] - 0.4))
+
+        y_margin = min(0.35, max(0.0, 0.2 * float(upper[1] - lower[1])))
+        y_lower = float(lower[1] + y_margin)
+        y_upper = float(upper[1] - y_margin)
+        if y_lower > y_upper:
+            y_lower, y_upper = float(lower[1]), float(upper[1])
+        y_values = np.linspace(y_lower, y_upper, int(self.num_agents), dtype=float)
+
+        z_margin = min(0.25, max(0.0, 0.2 * float(upper[2] - lower[2])))
+        z_abs = max(0.0, min(0.55, 0.5 * float(upper[2] - lower[2]) - z_margin))
+        z_values = np.array(
+            [(-1.0 if index % 2 == 0 else 1.0) * z_abs for index in range(int(self.num_agents))],
+            dtype=float,
+        )
+
+        starts = np.stack(
+            [np.full(int(self.num_agents), x_start), y_values, z_values],
+            axis=1,
+        )
+        goals = np.stack(
+            [np.full(int(self.num_agents), x_goal), y_values, z_values],
+            axis=1,
+        )
+        return starts, goals
+
+    def build_fixed_eval_scenarios(self) -> list[dict[str, Any]]:
+        starts, goals = self._build_eval_lane_points()
+        scenarios = [
+            {
+                "name": "parallel_layered",
+                "starts": starts.tolist(),
+                "goals": goals.tolist(),
+            },
+            {
+                "name": "height_swap",
+                "starts": starts.tolist(),
+                "goals": np.column_stack([goals[:, 0], goals[:, 1], -goals[:, 2]]).tolist(),
+            },
+            {
+                "name": "lane_swap",
+                "starts": starts.tolist(),
+                "goals": goals[::-1].tolist(),
+            },
+        ]
+        return scenarios[: max(0, int(self.fixed_eval_num_scenarios))]
+
+    def build_fixed_eval_config(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.fixed_eval_enabled),
+            "num_scenarios": int(self.fixed_eval_num_scenarios),
+            "deterministic": bool(self.fixed_eval_deterministic),
+            "output_dirname": str(self.fixed_eval_output_dirname),
+            "checkpoint_freq": int(self.checkpoint_freq),
+            "scenarios": self.build_fixed_eval_scenarios(),
         }
 
     def build_algo_args(self) -> dict[str, Any]:
@@ -953,6 +1057,7 @@ class MAPPOExperimentConfig:
             "stop_reward": self.stop_reward,
             "seed": self.seed,
             "local_dir": "" if local_dir is None else local_dir,
+            "fixed_eval_config": self.build_fixed_eval_config(),
         }
         if self.fixed_batch_timesteps is not None:
             running_params["fixed_batch_timesteps"] = int(self.fixed_batch_timesteps)

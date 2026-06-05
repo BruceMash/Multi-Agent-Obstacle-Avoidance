@@ -11,6 +11,110 @@ def _to_vector3(value):
 
 
 @dataclass
+class WorkspaceBoundaryPlaneObstacle:
+    """
+    工作空间边界面障碍物。
+
+    该类将轴对齐 workspace 的单个矩形边界面封装为静态障碍物，
+    用于让局部激光雷达能够观测到边界约束。
+    """
+
+    axis: int
+    bound: float
+    lower_bounds: np.ndarray
+    upper_bounds: np.ndarray
+    is_lower: bool
+
+    def __post_init__(self):
+        self.axis = int(self.axis)
+        self.bound = float(self.bound)
+        self.lower_bounds = _to_vector3(self.lower_bounds)
+        self.upper_bounds = _to_vector3(self.upper_bounds)
+        self.is_lower = bool(self.is_lower)
+        if self.axis < 0 or self.axis >= 3:
+            raise ValueError("axis must be in [0, 2]")
+        if np.any(self.lower_bounds >= self.upper_bounds):
+            raise ValueError("lower_bounds must be smaller than upper_bounds")
+
+    @property
+    def velocity(self):
+        return np.zeros(3, dtype=float)
+
+    @property
+    def center(self):
+        center = 0.5 * (self.lower_bounds + self.upper_bounds)
+        center[self.axis] = self.bound
+        return center
+
+    @property
+    def effective_radius(self):
+        face_extents = self.upper_bounds - self.lower_bounds
+        face_extents[self.axis] = 0.0
+        return float(0.5 * np.linalg.norm(face_extents))
+
+    def signed_distance(self, point):
+        point = _to_vector3(point)
+        if self.is_lower:
+            return float(point[self.axis] - self.bound)
+        return float(self.bound - point[self.axis])
+
+    def contains(self, point, margin=0.0):
+        return self.signed_distance(point) <= float(margin)
+
+    def closest_point(self, point):
+        point = _to_vector3(point)
+        closest = np.clip(point, self.lower_bounds, self.upper_bounds)
+        closest[self.axis] = self.bound
+        return closest
+
+    def ray_intersection(self, origin, direction, max_distance):
+        """
+        计算射线与有限矩形边界面的最近正向交点距离。
+        若射线不朝向该边界面，或交点落在边界面矩形范围外，则返回 None。
+        """
+        origin = _to_vector3(origin)
+        direction = _to_vector3(direction)
+        max_distance = float(max_distance)
+
+        direction_norm = np.linalg.norm(direction)
+        if direction_norm < 1e-8:
+            raise ValueError("direction must be non-zero")
+        direction = direction / direction_norm
+
+        if self.contains(origin):
+            return 0.0
+
+        axis_direction = float(direction[self.axis])
+        if abs(axis_direction) < 1e-8:
+            return None
+
+        hit_distance = (self.bound - origin[self.axis]) / axis_direction
+        if hit_distance < 0.0 or hit_distance > max_distance:
+            return None
+
+        hit_point = origin + hit_distance * direction
+        tolerance = 1e-8
+        for dim in range(3):
+            if dim == self.axis:
+                continue
+            if hit_point[dim] < self.lower_bounds[dim] - tolerance:
+                return None
+            if hit_point[dim] > self.upper_bounds[dim] + tolerance:
+                return None
+        return float(hit_distance)
+
+    def to_feature(self, point):
+        closest = self.closest_point(point)
+        return {
+            "closest_point": closest,
+            "center": self.center.copy(),
+            "velocity": self.velocity.copy(),
+            "clearance": self.signed_distance(point),
+            "size": self.effective_radius,
+        }
+
+
+@dataclass
 class StaticSphereObstacle:
     """
     静态球形障碍物。
