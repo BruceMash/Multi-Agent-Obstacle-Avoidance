@@ -750,7 +750,7 @@ class MAPPOExperimentConfig:
     num_sensor_layers: int = 2
     num_observation_layers: int = 2
     actor_log_std_min: float = -5.0
-    actor_log_std_max: float = 1.0
+    actor_log_std_max: float = 0.0
 
     # Environment and dynamics
     num_agents: int = 5
@@ -814,7 +814,7 @@ class MAPPOExperimentConfig:
 
     # DMP
     dmp_dims: int = 3
-    k_alpha: float = 3.0
+    k_alpha: float = 3.2
     k_beta: float = 0.8
     alpha_s: float = 4.0
     tau: float = 2.5
@@ -824,17 +824,17 @@ class MAPPOExperimentConfig:
 
     # MAPPO hyperparameters
     use_gae: bool = True
-    gae_lambda: float = 1.0
+    gae_lambda: float = 0.95
     kl_coeff: float = 0.2
     batch_episode: int = 16
-    num_sgd_iter: int = 1
+    num_sgd_iter: int = 5
     vf_loss_coeff: float = 1.0
     learning_rate: float = 1e-4
-    entropy_coeff: float = 0.01
+    entropy_coeff: float = 0.003
     clip_param: float = 0.3
     vf_clip_param: float = 10.0
     batch_mode: str = "truncate_episodes"
-    fixed_batch_timesteps: int | None = 1024   
+    fixed_batch_timesteps: int | None = 4096
 
     # Training and Ray
     training_iteration: int = 500000
