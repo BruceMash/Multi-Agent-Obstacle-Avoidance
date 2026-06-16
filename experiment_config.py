@@ -848,7 +848,7 @@ class MAPPOExperimentConfig:
     framework: str = "torch"
     num_workers: int = 2
     num_gpus: int = 1
-    num_cpus_per_worker: int = 1
+    num_cpus_per_worker: int = 2
     num_gpus_per_worker: int = 0
     checkpoint_freq: int = 50
     checkpoint_end: bool = True
