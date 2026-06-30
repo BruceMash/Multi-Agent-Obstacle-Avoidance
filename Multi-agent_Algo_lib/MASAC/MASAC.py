@@ -2,21 +2,26 @@ import os
 # 设置OMP_WAIT_POLICY为PASSIVE，让等待的线程不消耗CPU资源 #确保在pytorch前设置
 os.environ['OMP_WAIT_POLICY'] = 'PASSIVE' #确保在pytorch前设置
 
+import sys
+from pathlib import Path
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal
 
 import numpy as np
-from Buffer import Buffer # 与DQN.py中的Buffer一样
 
-from copy import deepcopy
-import pettingzoo #动态导入
-import gymnasium as gym
-import importlib
-import argparse
-from torch.utils.tensorboard import SummaryWriter
-import time
+_ALGO_LIB_ROOT = Path(__file__).resolve().parents[1]
+if str(_ALGO_LIB_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ALGO_LIB_ROOT))
+
+from net.masac import MASACAgentNetworks
+
+try:
+    from .Buffer import Buffer
+    from .config import MASACNetworkConfig
+except ImportError:
+    from Buffer import Buffer
+    from config import MASACNetworkConfig
 
 '''
 这里实现了8种MASAC的写法，
@@ -29,88 +34,34 @@ log_std 法1 > log_std 法2 见note中结果
 '''
 
 ## 第一部分：定义Agent类
-class Actor(nn.Module): 
-    """
-    Actor network for MASAC.
-    这部分包含网络结构，我只想复用算法
-    """
-    def __init__(self, obs_dim, action_dim, hidden_1=128, hidden_2=128):
-        super(Actor, self).__init__()
-        self.l1 = nn.Linear(obs_dim, hidden_1)
-        self.l2 = nn.Linear(hidden_1, hidden_2)
-        self.mean_layer = nn.Linear(hidden_2, action_dim) 
-        self.log_std_layer = nn.Linear(hidden_2, action_dim) # 此方法可改为MAPPO中只训练一个std的方法  ## log_std 法1
-        ##self.log_std = nn.Parameter(torch.zeros(1, action_dim)) # 与PPO.py的方法一致：对角高斯函数  ## log_std 法2
-
-    def forward(self, obs, deterministic=False, with_logprob=True):
-        x = F.relu(self.l1(obs))
-        x = F.relu(self.l2(x))
-        mean = self.mean_layer(x)
-        log_std = self.log_std_layer(x)  # 我们输出log_std以确保std=exp(log_std)>0 ## log_std 法1
-        ##log_std = self.log_std.expand_as(mean)  ## log_std 法2
-        log_std = torch.clamp(log_std, -20, 2)
-        std = torch.exp(log_std)
-
-        dist = Normal(mean, std)  # 生成一个高斯分布
-        if deterministic:  # 评估时用
-            a = mean
-        else:
-            a = dist.rsample()  # reparameterization trick: mean+std*N(0,1)
-
-        if with_logprob:  # 方法参考Open AI Spinning up，更稳定。见https://github.com/openai/spinningup/blob/master/spinup/algos/pytorch/sac/core.py#L53C12-L53C24
-            log_pi = dist.log_prob(a).sum(dim=1, keepdim=True) # batch_size x 1
-            log_pi -= (2 * (np.log(2) - a - F.softplus(-2 * a))).sum(dim=1, keepdim=True) #这里是计算tanh的对数概率，
-        else: #常见的其他写法
-            '''
-            log_pi =  dist.log_prob(a).sum(dim=1, keepdim=True)
-            log_pi -= torch.log(1 - torch.tanh(a).pow(2) + 1e-6).sum(dim=1, keepdim=True) # 1e-6是为了数值稳定性 
-            '''
-            log_pi = None
-        
-        a =  torch.tanh(a)  # 使用tanh将无界的高斯分布压缩到有界的动作区间内。
-
-        return a, log_pi
-'''
-集中式训练Critic
-'''    
-class Critic(nn.Module):
-    def __init__(self, dim_info:dict, hidden_1=128 , hidden_2=128):
-        super(Critic, self).__init__()
-        global_obs_act_dim = sum(sum(val) for val in dim_info.values())  
-        # Q1
-        self.l1 = nn.Linear(global_obs_act_dim, hidden_1)
-        self.l2 = nn.Linear(hidden_1, hidden_2)
-        self.l3 = nn.Linear(hidden_2, 1)
-        # Q2
-        self.l1_2 = nn.Linear(global_obs_act_dim, hidden_1)
-        self.l2_2 = nn.Linear(hidden_1, hidden_2)
-        self.l3_2 = nn.Linear(hidden_2, 1)
-
-
-    def forward(self, s, a): # 传入全局观测和动作
-        sa = torch.cat(list(s)+list(a), dim = 1)
-        #sa = torch.cat([s,a], dim = 1)
-        
-        q1 = F.relu(self.l1(sa))
-        q1 = F.relu(self.l2(q1))
-        q1 = self.l3(q1)
-
-        q2 = F.relu(self.l1_2(sa))
-        q2 = F.relu(self.l2_2(q2))
-        q2 = self.l3_2(q2)
-        return q1, q2
-    
 class Agent:
-    def __init__(self, obs_dim, action_dim, dim_info,actor_lr, critic_lr, device):
-        
-        self.actor = Actor(obs_dim, action_dim, )
-        self.critic = Critic( dim_info )
+    def __init__(
+        self,
+        agent_id,
+        obs_dim,
+        action_dim,
+        dim_info,
+        actor_lr,
+        critic_lr,
+        device,
+        network_config,
+    ):
+        networks = MASACAgentNetworks(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            dim_info=dim_info,
+            focal_agent_id=agent_id,
+            device=device,
+            actor_kwargs=network_config.actor_kwargs(),
+            critic_kwargs=network_config.critic_kwargs(),
+        )
+        self.actor = networks.actor
+        self.critic = networks.critic
+        self.actor_target = networks.actor_target
+        self.critic_target = networks.critic_target
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=actor_lr)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=critic_lr)
-
-        self.actor_target = deepcopy(self.actor)
-        self.critic_target = deepcopy(self.critic)
 
     def update_actor(self, loss):
         self.actor_optimizer.zero_grad()
@@ -126,14 +77,22 @@ class Agent:
 
 ## 第二部分：定义DQN算法类
 class Alpha:    # 自适应调节熵系数
-    def __init__(self, action_dim, alpha_lr= 0.0001, alpha = 0.01,requires_grad = False,is_continue = True):
+    def __init__(self, action_dim, alpha_lr=0.0001, alpha=0.01,
+                 requires_grad=False, is_continue=True, device="cpu"):
 
-        self.log_alpha = torch.tensor(np.log(alpha),dtype = torch.float32, requires_grad=requires_grad) # We learn log_alpha instead of alpha to ensure that alpha=exp(log_alpha)>0
+        self.log_alpha = torch.tensor(
+            np.log(alpha),
+            dtype=torch.float32,
+            device=device,
+            requires_grad=requires_grad,
+        ) # We learn log_alpha instead of alpha to ensure that alpha=exp(log_alpha)>0
         self.log_alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=alpha_lr)
         if is_continue:
             self.target_entropy = -action_dim # Target Entropy = −dim(A) (e.g. , -6 for HalfCheetah-v2) as given in the paper(SAC) 参考原sac论文
         else:
-            self.target_entropy =  0.6 * (-torch.log(torch.tensor(1.0 / action_dim))) # 参考:https://zhuanlan.zhihu.com/p/566722896
+            self.target_entropy = 0.6 * (
+                -torch.log(torch.tensor(1.0 / action_dim, device=device))
+            ) # 参考:https://zhuanlan.zhihu.com/p/566722896
         self.alpha = self.log_alpha.exp() # 更新actor时无detach会报错,是因为这里只有一个计算图 
 
     def update_alpha(self, loss):
@@ -147,7 +106,19 @@ class MASAC: #先无attention 再加入
     MASAC 主体
 
     """
-    def __init__(self, dim_info, is_continue, actor_lr, critic_lr, buffer_size, device, trick = None):
+    def __init__(self, dim_info, is_continue, actor_lr, critic_lr, buffer_size,
+                 device, trick=None, network_config=None):
+
+        self.device = torch.device(device)
+        if network_config is None:
+            self.network_config = MASACNetworkConfig()
+        elif isinstance(network_config, MASACNetworkConfig):
+            self.network_config = network_config
+        elif isinstance(network_config, dict):
+            self.network_config = MASACNetworkConfig(**network_config)
+        else:
+            raise TypeError("network_config must be MASACNetworkConfig, dict, or None")
+        self.temporal_steps = self.network_config.temporal_steps
 
         ## dim_info的组织形式: {agent_id: [obs_dim, action_dim]}
         # 根据每个智能体的观测维度与动作维度构建策略网络等
@@ -161,10 +132,24 @@ class MASAC: #先无attention 再加入
 
         # 初始化每个智能体的actor、critic与target网络，用于构建TD Error
         for agent_id, (obs_dim, action_dim) in dim_info.items():
-            self.agents[agent_id] = Agent(obs_dim, action_dim, dim_info, actor_lr, critic_lr, device=device)
+            self.agents[agent_id] = Agent(
+                agent_id,
+                obs_dim,
+                action_dim,
+                dim_info,
+                actor_lr,
+                critic_lr,
+                device=self.device,
+                network_config=self.network_config,
+            )
 
             # 连续动作时，buffer中保存完整的动作向量，离散动作仅保存动作索引，因此act_dim = action_dim if is_continue else 1作标志位记录
-            self.buffers[agent_id] = Buffer(buffer_size, obs_dim, act_dim = action_dim if is_continue else 1, device = 'cpu')
+            self.buffers[agent_id] = Buffer(
+                buffer_size,
+                obs_dim,
+                act_dim=action_dim if is_continue else 1,
+                device=self.device,
+            )
         
         # 是否使用自适应alpha 为true时表示通过梯度反向传播更新alpha
         self.adaptive_alpha = True
@@ -173,9 +158,21 @@ class MASAC: #先无attention 再加入
         for agent_id, (obs_dim, action_dim) in dim_info.items():
             if self.adaptive_alpha:
                 # 每个agent维护一个alpha
-                self.alphas[agent_id] = Alpha(action_dim,alpha = 0.01, requires_grad=True, is_continue= is_continue) # Alpha(action_dim).alpha 才是值
+                self.alphas[agent_id] = Alpha(
+                    action_dim,
+                    alpha=0.01,
+                    requires_grad=True,
+                    is_continue=is_continue,
+                    device=self.device,
+                ) # Alpha(action_dim).alpha 才是值
             else:   # 固定alpha
-                self.alphas[agent_id] = Alpha(action_dim,alpha = 0.1,requires_grad=False, is_continue= is_continue) 
+                self.alphas[agent_id] = Alpha(
+                    action_dim,
+                    alpha=0.1,
+                    requires_grad=False,
+                    is_continue=is_continue,
+                    device=self.device,
+                )
         '''
         更新critic时 熵的采用方式
         '0' (参考github)中的方式, https://github.com/ffelten/MASAC/blob/main/masac/masac.py#L285  
@@ -192,32 +189,60 @@ class MASAC: #先无attention 再加入
         '''
         # 即只替换当前agent的动作，还是替换所有agent的动作，使用0，1索引
         self.action_way = '1' 
-        self.device = device
         self.is_continue = is_continue
         self.agent_x = list(self.agents.keys())[0] #sample 用
     
-    def select_action(self, obs):   # 选择动作
+    def select_action(self, obs):
         actions = {}
-        for agent_id, obs in obs.items():   # 解包每个智能体对应的观测
-            obs = torch.as_tensor(obs,dtype=torch.float32).reshape(1, -1).to(self.device)
-            if self.is_continue: # dqn 无此项 如果动作时连续的
-                action , _ = self.agents[agent_id].actor(obs)   # 根据观测选择对应的动作
-                actions[agent_id] = action.detach().cpu().numpy().squeeze(0) # 1xaction_dim -> action_dim 压缩一个维度
-            else:   # 离散动作，输出标量索引
-                action = self.agents[agent_id].argmax(dim = 1).detach().cpu().numpy()[0] # []标量
-                actions[agent_id] = action
+        with torch.no_grad():
+            for agent_id, agent_obs in obs.items():
+                agent_obs = torch.as_tensor(
+                    agent_obs,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                if agent_obs.dim() == 1:
+                    agent_obs = agent_obs.reshape(1, -1)
+                elif agent_obs.dim() == 2:
+                    agent_obs = agent_obs.unsqueeze(0)
+                else:
+                    raise ValueError(
+                        "agent observation must have shape [obs_dim] or "
+                        f"[temporal_steps, obs_dim], got {tuple(agent_obs.shape)}"
+                    )
+                if self.is_continue:
+                    action, _ = self.agents[agent_id].actor(agent_obs)
+                    actions[agent_id] = action.cpu().numpy().squeeze(0)
+                else:
+                    raise NotImplementedError("discrete MASAC action selection is not implemented")
         return actions
     
     def evaluate_action(self, obs):
         actions = {}
-        for agent_id, obs in obs.items():
-            obs = torch.as_tensor(obs,dtype=torch.float32).reshape(1, -1).to(self.device)
-            if self.is_continue: # dqn 无此项 表示连续动作
-                action , _ = self.agents[agent_id].actor(obs,deterministic=True)
-                actions[agent_id] = action.detach().cpu().numpy().squeeze(0) # 1xaction_dim -> action_dim
-            else:
-                action = self.agents[agent_id].argmax(dim = 1).detach().cpu().numpy()[0] # []标量
-                actions[agent_id] = action
+        with torch.no_grad():
+            for agent_id, agent_obs in obs.items():
+                agent_obs = torch.as_tensor(
+                    agent_obs,
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                if agent_obs.dim() == 1:
+                    agent_obs = agent_obs.reshape(1, -1)
+                elif agent_obs.dim() == 2:
+                    agent_obs = agent_obs.unsqueeze(0)
+                else:
+                    raise ValueError(
+                        "agent observation must have shape [obs_dim] or "
+                        f"[temporal_steps, obs_dim], got {tuple(agent_obs.shape)}"
+                    )
+                if self.is_continue:
+                    action, _ = self.agents[agent_id].actor(
+                        agent_obs,
+                        deterministic=True,
+                    )
+                    actions[agent_id] = action.cpu().numpy().squeeze(0)
+                else:
+                    raise NotImplementedError("discrete MASAC action evaluation is not implemented")
         return actions
     
     def add(self, obs, action, reward, next_obs, done):
@@ -229,13 +254,42 @@ class MASAC: #先无attention 再加入
         indices = np.random.choice(total_size, batch_size, replace=False)
 
         obs, action, reward, next_obs, done = {}, {}, {}, {}, {}
+        obs_mask, next_obs_mask = {}, {}
         next_action = {}
         next_log_pi = {}
         for agent_id, buffer in self.buffers.items():
-            obs[agent_id], action[agent_id], reward[agent_id], next_obs[agent_id], done[agent_id] = buffer.sample(indices)
-            next_action[agent_id], next_log_pi[agent_id] = self.agents[agent_id].actor_target(next_obs[agent_id])   # 采样一个动作和对应的log_pi 用于更新critic  注意这里是用的target网络
+            sampled = buffer.sample(indices, sequence_length=self.temporal_steps)
+            if self.temporal_steps > 1:
+                (
+                    obs[agent_id],
+                    action[agent_id],
+                    reward[agent_id],
+                    next_obs[agent_id],
+                    done[agent_id],
+                    obs_mask[agent_id],
+                    next_obs_mask[agent_id],
+                ) = sampled
+            else:
+                obs[agent_id], action[agent_id], reward[agent_id], next_obs[agent_id], done[agent_id] = sampled
+                obs_mask[agent_id] = None
+                next_obs_mask[agent_id] = None
+            with torch.no_grad():
+                next_action[agent_id], next_log_pi[agent_id] = self.agents[agent_id].actor_target(
+                    next_obs[agent_id],
+                    temporal_mask=next_obs_mask[agent_id],
+                )
 
-        return obs, action, reward, next_obs, done , next_action , next_log_pi #包含所有智能体的数据
+        return (
+            obs,
+            action,
+            reward,
+            next_obs,
+            done,
+            obs_mask,
+            next_obs_mask,
+            next_action,
+            next_log_pi,
+        ) #包含所有智能体的数据
 
     ## SAC算法相关
     def learn(self, batch_size ,gamma , tau):
@@ -243,24 +297,46 @@ class MASAC: #先无attention 再加入
         for agent_id, agent in self.agents.items():
             ## 更新前准备
             ''' 这一部分原理和MADDPG 一样'''
-            obs, action, reward, next_obs, done , next_action , next_log_pi = self.sample(batch_size)
+            (
+                obs,
+                action,
+                reward,
+                next_obs,
+                done,
+                obs_mask,
+                next_obs_mask,
+                next_action,
+                next_log_pi,
+            ) = self.sample(batch_size)
             # 必须放for里，否则报二次传播错，原因是原来的数据在计算图中已经被释放了
 
-            q1_next_target,q2_next_target = agent.critic_target(next_obs.values(), next_action.values()) # batch_size x 1
-            q_next_target = torch.min(q1_next_target, q2_next_target)
+            with torch.no_grad():
+                q1_next_target, q2_next_target = agent.critic_target(
+                    next_obs,
+                    next_action,
+                    temporal_masks=next_obs_mask,
+                )
+                q_next_target = torch.min(q1_next_target, q2_next_target)
 
-            ''' SAC 特有 '0' 参考github 将next_log_pi 求和 来更新critic , '1' MAAC论文 将当前的next_log_pi 用于更新critic '''
-            if self.entropy_way_c == '0':
-                next_log_pi = torch.stack([next_log_pi[agent_id] for agent_id in self.agents.keys()], dim = 1).sum(dim = 1) # batch_size x 3 x 1 -> batch_size x 1
-                entropy_next = - next_log_pi
-            elif self.entropy_way_c == '1':
-                entropy_next = - next_log_pi[agent_id]
+                ''' SAC 特有 '0' 参考github 将next_log_pi 求和 来更新critic , '1' MAAC论文 将当前的next_log_pi 用于更新critic '''
+                if self.entropy_way_c == '0':
+                    stacked_next_log_pi = torch.stack(
+                        [next_log_pi[other_id] for other_id in self.agents.keys()],
+                        dim=1,
+                    ).sum(dim=1)
+                    entropy_next = -stacked_next_log_pi
+                elif self.entropy_way_c == '1':
+                    entropy_next = -next_log_pi[agent_id]
+                else:
+                    raise ValueError(f"unsupported entropy_way_c: {self.entropy_way_c}")
 
-            # 先更新critic
-            ''' 公式: LQ_w = E_{s,a,r,s',d}[(Q_w(s,a) - (r + gamma * (1 - d) * (Q_w'(s',a') - alpha * log_pi_a(s',a')))^2] '''
-            q_target = reward[agent_id] + gamma * (1 - done[agent_id]) * (q_next_target + self.alphas[agent_id].alpha.detach() * entropy_next)  
+                # 先更新critic
+                ''' 公式: LQ_w = E_{s,a,r,s',d}[(Q_w(s,a) - (r + gamma * (1 - d) * (Q_w'(s',a') - alpha * log_pi_a(s',a')))^2] '''
+                q_target = reward[agent_id] + gamma * (1 - done[agent_id]) * (
+                    q_next_target + self.alphas[agent_id].alpha.detach() * entropy_next
+                )
 
-            q1, q2 = agent.critic(obs.values(), action.values())    # 双重Q网络，输入是全局状态和动作
+            q1, q2 = agent.critic(obs, action, temporal_masks=obs_mask)
             critic_loss = F.mse_loss(q1, q_target.detach()) + F.mse_loss(q2, q_target.detach())
             agent.update_critic(critic_loss)
 
@@ -268,20 +344,50 @@ class MASAC: #先无attention 再加入
             '''公式: Lpi_θ = E_{s,a ~ D}[-Q_w(s,a) + alpha * log_pi_a(s,a)]  
             理解为 最大化函数V,V = Q + alpha * H
             '''
+            new_action = {}
+            new_log_pi = {}
+            for other_id, other_agent in self.agents.items():
+                if other_id == agent_id:
+                    sampled_action, sampled_log_pi = other_agent.actor(
+                        obs[other_id],
+                        temporal_mask=obs_mask[other_id],
+                    )
+                else:
+                    with torch.no_grad():
+                        sampled_action, sampled_log_pi = other_agent.actor(
+                            obs[other_id],
+                            temporal_mask=obs_mask[other_id],
+                        )
+                new_action[other_id] = sampled_action
+                new_log_pi[other_id] = sampled_log_pi
+
             if self.action_way == '0':
-                new_action, log_pi = agent.actor(obs[agent_id])
-                #entropy = - log_pi  # 相当于 self.entropy_way_a == '1'
-                action[agent_id] = new_action
-                q1_pi, q2_pi = agent.critic(obs.values(), action.values())        
+                mixed_action = dict(action)
+                mixed_action[agent_id] = new_action[agent_id]
+                q1_pi, q2_pi = agent.critic(
+                    obs,
+                    mixed_action,
+                    temporal_masks=obs_mask,
+                )
             elif self.action_way == '1':
-                new_action = {agent_id: agent.actor(obs[agent_id])[0] for agent_id, agent in self.agents.items()}
-                q1_pi, q2_pi = agent.critic(obs.values(), new_action.values())
+                q1_pi, q2_pi = agent.critic(
+                    obs,
+                    new_action,
+                    temporal_masks=obs_mask,
+                )
+            else:
+                raise ValueError(f"unsupported action_way: {self.action_way}")
             
             if self.entropy_way_a == '0':
-                new_log_pi = torch.stack([agent.actor(obs[agent_id])[1] for agent_id, agent in self.agents.items()], dim = 1).sum(dim = 1) # batch_size x 3 x 1 -> batch_size x 1
-                entropy = - new_log_pi
+                stacked_log_pi = torch.stack(
+                    [new_log_pi[other_id] for other_id in self.agents.keys()],
+                    dim=1,
+                ).sum(dim=1)
+                entropy = -stacked_log_pi
             elif self.entropy_way_a == '1':
-                entropy = - agent.actor(obs[agent_id])[1]
+                entropy = -new_log_pi[agent_id]
+            else:
+                raise ValueError(f"unsupported entropy_way_a: {self.entropy_way_a}")
 
 
             q_pi = torch.min(q1_pi, q2_pi)
@@ -316,9 +422,17 @@ class MASAC: #先无attention 再加入
 
     ## 加载模型
     @staticmethod 
-    def load(dim_info, is_continue, model_dir):
-        policy = MASAC(dim_info, is_continue = is_continue, actor_lr = 0, critic_lr = 0, buffer_size = 0, device = 'cpu')
-        data = torch.load(os.path.join(model_dir, f'MASAC.pth'))
+    def load(dim_info, is_continue, model_dir, network_config=None, device='cpu'):
+        policy = MASAC(
+            dim_info,
+            is_continue=is_continue,
+            actor_lr=0,
+            critic_lr=0,
+            buffer_size=0,
+            device=device,
+            network_config=network_config,
+        )
+        data = torch.load(os.path.join(model_dir, f'MASAC.pth'), map_location=device)
         for agent_id, agent in policy.agents.items():
             agent.actor.load_state_dict(data[agent_id])
 
@@ -328,6 +442,13 @@ class MASAC: #先无attention 再加入
 ## 第三部分 main函数
 ## 环境配置
 def get_env(env_name,env_agent_n = None):
+    import importlib
+
+    try:
+        import gymnasium as gym
+    except ImportError:
+        import gym
+
     # 动态导入环境
     module = importlib.import_module(f'pettingzoo.mpe.{env_name}')
     print('env_agent_n or num_good:',env_agent_n) 
@@ -381,6 +502,11 @@ def make_dir(env_name,policy_name = 'DQN',trick = None):
 注意：环境中N个智能体的设置
 '''
 if __name__ == '__main__':
+    import argparse
+    import time
+
+    from torch.utils.tensorboard import SummaryWriter
+
     parser = argparse.ArgumentParser()
     # 环境参数
     parser.add_argument("--env_name", type = str,default="simple_spread_v3") 
@@ -496,6 +622,3 @@ if __name__ == '__main__':
     else:
         np.save(os.path.join(model_dir,f"{args.policy_name}_seed_{args.seed}_N_{len(env_agents)}.npy"),train_return_)
         
-
-
-

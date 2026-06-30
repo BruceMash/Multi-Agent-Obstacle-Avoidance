@@ -19,9 +19,11 @@ class Buffer:
         self.rewards = np.zeros(capacity)            # just a tensor with length: batch
         self.next_obs = np.zeros((capacity, obs_dim))  # batch_size x state_dim
         self.dones = np.zeros(capacity, dtype=bool)    # just a tensor with length: batch_size
+        self.transition_ids = np.full(capacity, -1, dtype=np.int64)
 
         self._index = 0
         self._size = 0
+        self._total_added = 0
 
         self.device = device
 
@@ -32,12 +34,81 @@ class Buffer:
         self.rewards[self._index] = reward
         self.next_obs[self._index] = next_obs
         self.dones[self._index] = done
+        self.transition_ids[self._index] = self._total_added
 
         self._index = (self._index + 1) % self.capacity
+        self._total_added += 1
         if self._size < self.capacity:
             self._size += 1
 
-    def sample(self, indices):
+    def _build_temporal_array(self, data, indices, sequence_length):
+        indices = np.asarray(indices, dtype=np.int64)
+        sequence_length = int(sequence_length)
+        batch_size = len(indices)
+        sequence = np.zeros(
+            (batch_size, sequence_length, *data.shape[1:]),
+            dtype=data.dtype,
+        )
+        mask = np.zeros((batch_size, sequence_length), dtype=bool)
+
+        for batch_index, end_index in enumerate(indices):
+            end_transition_id = self.transition_ids[end_index]
+            if end_transition_id < 0:
+                continue
+
+            history = []
+            for back_step in range(sequence_length):
+                buffer_index = (end_index - back_step) % self.capacity
+                expected_transition_id = end_transition_id - back_step
+                if self.transition_ids[buffer_index] != expected_transition_id:
+                    break
+                if back_step > 0 and self.dones[buffer_index]:
+                    break
+
+                history.append(data[buffer_index])
+
+            history.reverse()
+            valid_count = len(history)
+            if valid_count:
+                sequence[batch_index, :valid_count] = np.asarray(history, dtype=data.dtype)
+                mask[batch_index, :valid_count] = True
+
+        return sequence, mask
+
+    def sample(self, indices, sequence_length=1):
+        # retrieve data, Note that the data stored is ndarray
+        sequence_length = int(sequence_length)
+        if sequence_length <= 1:
+            return self._sample_single_frame(indices)
+
+        obs, obs_mask = self._build_temporal_array(
+            self.obs,
+            indices,
+            sequence_length,
+        )
+        next_obs, next_obs_mask = self._build_temporal_array(
+            self.next_obs,
+            indices,
+            sequence_length,
+        )
+        actions = self.actions[indices]
+        rewards = self.rewards[indices]
+        dones = self.dones[indices]
+
+        # NOTE that `obs`, `action`, `next_obs` will be passed to network(nn.Module),
+        # so the first dimension should be `batch_size`
+        obs = torch.as_tensor(obs,dtype=torch.float32).to(self.device)  # torch.Size([batch_size, state_dim])
+        actions = torch.as_tensor(actions,dtype=torch.float32).to(self.device) # torch.Size([batch_size, action_dim])
+        rewards = torch.as_tensor(rewards,dtype=torch.float32).reshape(-1,1).to(self.device)  # torch.Size([batch_size]) -> torch.Size([batch_size, 1])
+        # reward = (reward - reward.mean()) / (reward.std() + 1e-7)
+        next_obs = torch.as_tensor(next_obs,dtype=torch.float32).to(self.device)  # torch.Size([batch_size, state_dim])
+        dones = torch.as_tensor(dones,dtype=torch.float32).reshape(-1,1).to(self.device)
+        obs_mask = torch.as_tensor(obs_mask, dtype=torch.bool).to(self.device)
+        next_obs_mask = torch.as_tensor(next_obs_mask, dtype=torch.bool).to(self.device)
+
+        return obs, actions, rewards, next_obs, dones, obs_mask, next_obs_mask
+
+    def _sample_single_frame(self, indices):
         # retrieve data, Note that the data stored is ndarray
         obs = self.obs[indices]
         actions = self.actions[indices]
@@ -191,4 +262,3 @@ class SumTree:
     def max(self): # 最大优先级
         return np.max(self.tree[-self.capacity:])
     
-
