@@ -461,9 +461,21 @@ class MASAC: #先无attention 再加入
                     q_next_target + self.alphas[agent_id].alpha.detach() * entropy_next
                 )
 
-            q1, q2 = agent.critic(obs, action, temporal_masks=obs_mask)
-            critic_loss = F.mse_loss(q1, q_target.detach()) + F.mse_loss(q2, q_target.detach())
-            agent.update_critic(critic_loss)
+            q_target = q_target.detach()
+            agent.critic_optimizer.zero_grad()
+
+            q1 = agent.critic.forward_q1(obs, action, temporal_masks=obs_mask)
+            q1_loss = F.mse_loss(q1, q_target)
+            q1_loss.backward()
+            del q1, q1_loss
+
+            q2 = agent.critic.forward_q2(obs, action, temporal_masks=obs_mask)
+            q2_loss = F.mse_loss(q2, q_target)
+            q2_loss.backward()
+            del q2, q2_loss
+
+            torch.nn.utils.clip_grad_norm_(agent.critic.parameters(), 0.5)
+            agent.critic_optimizer.step()
 
             ## 再更新actor
             '''公式: Lpi_θ = E_{s,a ~ D}[-Q_w(s,a) + alpha * log_pi_a(s,a)]  

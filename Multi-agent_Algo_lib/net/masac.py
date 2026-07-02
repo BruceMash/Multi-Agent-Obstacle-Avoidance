@@ -986,13 +986,16 @@ class MASACCritic(nn.Module):
         self.q1 = _CentralizedQBranch(**branch_kwargs)
         self.q2 = _CentralizedQBranch(**branch_kwargs)
 
-    def forward(
+    def _ordered_inputs(
         self,
         obs: TensorGroup,
         action: TensorGroup,
-        agent_mask: torch.Tensor | None = None,
         temporal_masks: TensorGroup | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor | None] | None,
+    ]:
         observations = _ordered_tensor_list(obs, self.agent_ids)
         actions = _ordered_tensor_list(action, self.agent_ids)
         ordered_temporal_masks = None
@@ -1001,6 +1004,48 @@ class MASACCritic(nn.Module):
                 temporal_masks,
                 self.agent_ids,
             )
+        return observations, actions, ordered_temporal_masks
+
+    def forward_q1(
+        self,
+        obs: TensorGroup,
+        action: TensorGroup,
+        agent_mask: torch.Tensor | None = None,
+        temporal_masks: TensorGroup | None = None,
+    ) -> torch.Tensor:
+        observations, actions, ordered_temporal_masks = self._ordered_inputs(
+            obs,
+            action,
+            temporal_masks,
+        )
+        return self.q1(observations, actions, agent_mask, ordered_temporal_masks)
+
+    def forward_q2(
+        self,
+        obs: TensorGroup,
+        action: TensorGroup,
+        agent_mask: torch.Tensor | None = None,
+        temporal_masks: TensorGroup | None = None,
+    ) -> torch.Tensor:
+        observations, actions, ordered_temporal_masks = self._ordered_inputs(
+            obs,
+            action,
+            temporal_masks,
+        )
+        return self.q2(observations, actions, agent_mask, ordered_temporal_masks)
+
+    def forward(
+        self,
+        obs: TensorGroup,
+        action: TensorGroup,
+        agent_mask: torch.Tensor | None = None,
+        temporal_masks: TensorGroup | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        observations, actions, ordered_temporal_masks = self._ordered_inputs(
+            obs,
+            action,
+            temporal_masks,
+        )
         return (
             self.q1(observations, actions, agent_mask, ordered_temporal_masks),
             self.q2(observations, actions, agent_mask, ordered_temporal_masks),
