@@ -489,6 +489,8 @@ class MASACObservationEncoder(nn.Module):
         ally_feature_dim: int = 0,
         sensor_output_dim: int = 128,
         ally_output_dim: int = 64,
+        sensor_hidden_dim: int = 128,
+        ally_hidden_dim: int = 128,
         hidden_dim: int = 256,
         num_sensor_layers: int = 2,
         num_ally_layers: int = 2,
@@ -539,7 +541,7 @@ class MASACObservationEncoder(nn.Module):
         self.sensor_encoder = ObservationEncoder(
             self.sensor_observation_dim,
             sensor_output_dim,
-            hidden_dim,
+            sensor_hidden_dim,
             num_sensor_layers,
             sensor_azimuth_bins=sensor_azimuth_bins,
             sensor_elevation_bins=sensor_elevation_bins,
@@ -550,7 +552,7 @@ class MASACObservationEncoder(nn.Module):
             self.ally_encoder = AllyObservationEncoder(
                 self.ally_feature_dim,
                 ally_output_dim,
-                hidden_dim=hidden_dim,
+                hidden_dim=ally_hidden_dim,
                 num_layers=num_ally_layers,
                 pooling_method=ally_pooling,
             )
@@ -666,6 +668,8 @@ class MASACActor(nn.Module):
         ally_feature_dim: int = 0,
         sensor_output_dim: int = 128,
         ally_output_dim: int = 64,
+        sensor_hidden_dim: int = 128,
+        ally_hidden_dim: int = 128,
         hidden_dim: int = 256,
         num_sensor_layers: int = 2,
         num_ally_layers: int = 2,
@@ -720,6 +724,8 @@ class MASACActor(nn.Module):
             ally_feature_dim=ally_feature_dim,
             sensor_output_dim=sensor_output_dim,
             ally_output_dim=ally_output_dim,
+            sensor_hidden_dim=sensor_hidden_dim,
+            ally_hidden_dim=ally_hidden_dim,
             hidden_dim=hidden_dim,
             num_sensor_layers=num_sensor_layers,
             num_ally_layers=num_ally_layers,
@@ -735,9 +741,13 @@ class MASACActor(nn.Module):
         )
 
         self.forcing_action_dim = self.action_dim // 2
+
+        # 定义forcing过程 两个MLP
         self.goal_offset_action_dim = self.action_dim - self.forcing_action_dim
         self.forcing_mu = nn.Linear(hidden_dim, self.forcing_action_dim)
         self.forcing_log_std = nn.Linear(hidden_dim, self.forcing_action_dim)
+
+        # 定义偏移过程 两个MLP
         self.goal_offset_mu = nn.Linear(hidden_dim, self.goal_offset_action_dim)
         self.goal_offset_log_std = nn.Linear(hidden_dim, self.goal_offset_action_dim)
 
@@ -806,6 +816,8 @@ class _CentralizedQBranch(nn.Module):
         ally_feature_dim: int,
         sensor_output_dim: int,
         ally_output_dim: int,
+        sensor_hidden_dim: int,
+        ally_hidden_dim: int,
         hidden_dim: int,
         num_sensor_layers: int,
         num_ally_layers: int,
@@ -829,6 +841,8 @@ class _CentralizedQBranch(nn.Module):
             ally_feature_dim=ally_feature_dim,
             sensor_output_dim=sensor_output_dim,
             ally_output_dim=ally_output_dim,
+            sensor_hidden_dim=sensor_hidden_dim,
+            ally_hidden_dim=ally_hidden_dim,
             hidden_dim=hidden_dim,
             num_sensor_layers=num_sensor_layers,
             num_ally_layers=num_ally_layers,
@@ -913,6 +927,8 @@ class MASACCritic(nn.Module):
         ally_feature_dim: int = 0,
         sensor_output_dim: int = 128,
         ally_output_dim: int = 64,
+        sensor_hidden_dim: int = 128,
+        ally_hidden_dim: int = 128,
         hidden_dim: int = 256,
         num_sensor_layers: int = 2,
         num_ally_layers: int = 2,
@@ -955,6 +971,8 @@ class MASACCritic(nn.Module):
             ally_feature_dim=ally_feature_dim,
             sensor_output_dim=sensor_output_dim,
             ally_output_dim=ally_output_dim,
+            sensor_hidden_dim=sensor_hidden_dim,
+            ally_hidden_dim=ally_hidden_dim,
             hidden_dim=hidden_dim,
             num_sensor_layers=num_sensor_layers,
             num_ally_layers=num_ally_layers,

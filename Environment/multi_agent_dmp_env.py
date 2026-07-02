@@ -35,7 +35,9 @@ class MultiAgentEnvConfig(EnvConfig):
     inter_agent_collision_penalty: float = 20.0
     inter_agent_potential_weight: float = 1.0
     inter_agent_influence_distance: float = 1.2
-    nearest_agent_observation_count: int = 2
+    # None means observing all other agents; a non-negative integer limits the
+    # number of nearest allies kept in the explicit ally observation block.
+    nearest_agent_observation_count: int | None = None
     acceleration_penalty_weight: float = 0.01
     acceleration_clip_penalty_weight: float = 0.05
     randomize_start_goal: bool = True
@@ -66,7 +68,8 @@ class MultiAgentEnvConfig(EnvConfig):
         self.inter_agent_collision_penalty = float(self.inter_agent_collision_penalty)
         self.inter_agent_potential_weight = float(self.inter_agent_potential_weight)
         self.inter_agent_influence_distance = float(self.inter_agent_influence_distance)
-        self.nearest_agent_observation_count = int(self.nearest_agent_observation_count)
+        if self.nearest_agent_observation_count is not None:
+            self.nearest_agent_observation_count = int(self.nearest_agent_observation_count)
         self.acceleration_penalty_weight = float(self.acceleration_penalty_weight)
         self.acceleration_clip_penalty_weight = float(self.acceleration_clip_penalty_weight)
         self.randomize_start_goal = bool(self.randomize_start_goal)
@@ -84,7 +87,10 @@ class MultiAgentEnvConfig(EnvConfig):
             raise ValueError("inter_agent_safe_distance must be positive")
         if self.inter_agent_influence_distance <= 0.0:
             raise ValueError("inter_agent_influence_distance must be positive")
-        if self.nearest_agent_observation_count < 0:
+        if (
+            self.nearest_agent_observation_count is not None
+            and self.nearest_agent_observation_count < 0
+        ):
             raise ValueError("nearest_agent_observation_count must be non-negative")
         if self.acceleration_penalty_weight < 0.0:
             raise ValueError("acceleration_penalty_weight must be non-negative")
@@ -301,11 +307,15 @@ class MultiAgentDMPEnv(gym.Env):
 
     @property
     def nearest_agent_observation_count(self) -> int:
-        return min(int(self.env_config.nearest_agent_observation_count), max(self.num_agents - 1, 0))
+        max_count = max(self.num_agents - 1, 0)
+        configured_count = self.env_config.nearest_agent_observation_count
+        if configured_count is None:
+            return max_count
+        return min(int(configured_count), max_count)
 
     @property
     def inter_agent_observation_dim(self) -> int:
-        return (self.num_agents - 1) * self.single_pair_observation_dim
+        return self.nearest_agent_observation_count * self.single_pair_observation_dim
 
     @property
     def single_agent_observation_dim(self) -> int:
@@ -639,19 +649,7 @@ class MultiAgentDMPEnv(gym.Env):
         return sensor_packet.observation.astype(np.float32, copy=True)
 
     def _sensor_dynamic_obstacles(self, agent_index: int) -> list:
-        obstacles = list(self.dynamic_obstacles)
-        agent_radius = float(self.env_config.inter_agent_safe_distance)
-        for other_index in range(self.num_agents):
-            if other_index == agent_index:
-                continue
-            obstacles.append(
-                _AgentAsDynamicObstacle(
-                    center=self.dynamics[other_index].p.copy(),
-                    velocity=self.dynamics[other_index].v.copy(),
-                    radius=agent_radius,
-                )
-            )
-        return obstacles
+        return list(self.dynamic_obstacles)
 
     def _compose_extra_observation(self, agent_index: int) -> np.ndarray:   # 组合额外观测
         dmp = self.dmps[agent_index]

@@ -100,7 +100,7 @@ class Critic(nn.Module):
         q2 = self.l3_2(q2)
         return q1, q2
     
-class Agent:
+class Agent:    # 创建Agent类，负责创建网络和训练
     def __init__(self, obs_dim, action_dim, dim_info,actor_lr, critic_lr, device):
         
         self.actor = Actor(obs_dim, action_dim, )

@@ -293,21 +293,24 @@ class MASAC: #先无attention 再加入
 
     ## SAC算法相关
     def learn(self, batch_size ,gamma , tau):
+        (
+            obs,
+            action,
+            reward,
+            next_obs,
+            done,
+            obs_mask,
+            next_obs_mask,
+            next_action,
+            next_log_pi,
+        ) = self.sample(batch_size)
+        # Reuse one joint replay batch for all focal-agent updates. The replay
+        # tensors and target actions are detached, while policy actions are
+        # rebuilt inside the loop so each actor update keeps its own graph.
         # 多智能体特有-- 集中式训练critic:计算next_q值时,要用到所有智能体next状态和动作
         for agent_id, agent in self.agents.items():
             ## 更新前准备
             ''' 这一部分原理和MADDPG 一样'''
-            (
-                obs,
-                action,
-                reward,
-                next_obs,
-                done,
-                obs_mask,
-                next_obs_mask,
-                next_action,
-                next_log_pi,
-            ) = self.sample(batch_size)
             # 必须放for里，否则报二次传播错，原因是原来的数据在计算图中已经被释放了
 
             with torch.no_grad():

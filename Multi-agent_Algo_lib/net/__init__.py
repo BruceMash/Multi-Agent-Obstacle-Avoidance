@@ -1,7 +1,5 @@
 from .masac import (
-    Actor,
     AllyObservationEncoder,
-    Critic,
     MASACActor,
     MASACCritic,
     MASACAgentNetworks,
@@ -10,9 +8,7 @@ from .masac import (
 )
 
 __all__ = [
-    "Actor",
     "AllyObservationEncoder",
-    "Critic",
     "MASACActor",
     "MASACCritic",
     "MASACAgentNetworks",

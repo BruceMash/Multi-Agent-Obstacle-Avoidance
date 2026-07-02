@@ -808,7 +808,7 @@ class MAPPOExperimentConfig:
     inter_agent_collision_penalty: float = 20.0
     inter_agent_potential_weight: float = 1.0
     inter_agent_influence_distance: float = 1.2
-    nearest_agent_observation_count: int = 2
+    nearest_agent_observation_count: int | None = None
     acceleration_penalty_weight: float = 0.01
     acceleration_clip_penalty_weight: float = 0.05
 
