@@ -31,6 +31,14 @@ class MASACNetworkConfig:
     action_low: tuple[float, ...] | None = None
     action_high: tuple[float, ...] | None = None
     temporal_steps: int = 4
+    goal_distance_clip: float = 1.0
+    dmp_k_alpha: float = 1.0
+    dmp_k_beta: float = 1.0
+    dmp_tau: float = 1.0
+    forcing_term_min: float = -10.0
+    forcing_term_max: float = 10.0
+    acceleration_low: tuple[float, ...] | None = None
+    acceleration_high: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.sensor_observation_dim is not None:
@@ -95,6 +103,19 @@ class MASACNetworkConfig:
         if self.actor_log_std_min >= self.actor_log_std_max:
             raise ValueError("actor_log_std_min must be smaller than actor_log_std_max")
 
+        self.goal_distance_clip = float(self.goal_distance_clip)
+        self.dmp_k_alpha = float(self.dmp_k_alpha)
+        self.dmp_k_beta = float(self.dmp_k_beta)
+        self.dmp_tau = float(self.dmp_tau)
+        self.forcing_term_min = float(self.forcing_term_min)
+        self.forcing_term_max = float(self.forcing_term_max)
+        if self.goal_distance_clip <= 0.0:
+            raise ValueError("goal_distance_clip must be positive")
+        if self.dmp_tau <= 0.0:
+            raise ValueError("dmp_tau must be positive")
+        if self.forcing_term_min >= self.forcing_term_max:
+            raise ValueError("forcing_term_min must be smaller than forcing_term_max")
+
         if (self.action_low is None) != (self.action_high is None):
             raise ValueError("action_low and action_high must be both set or both None")
         if self.action_low is not None:
@@ -104,6 +125,16 @@ class MASACNetworkConfig:
                 raise ValueError("action_low and action_high must have the same length")
             if any(low >= high for low, high in zip(self.action_low, self.action_high)):
                 raise ValueError("each action_low value must be smaller than action_high")
+
+        if (self.acceleration_low is None) != (self.acceleration_high is None):
+            raise ValueError("acceleration_low and acceleration_high must be both set or both None")
+        if self.acceleration_low is not None:
+            self.acceleration_low = tuple(float(value) for value in self.acceleration_low)
+            self.acceleration_high = tuple(float(value) for value in self.acceleration_high)
+            if len(self.acceleration_low) != len(self.acceleration_high):
+                raise ValueError("acceleration_low and acceleration_high must have the same length")
+            if any(low >= high for low, high in zip(self.acceleration_low, self.acceleration_high)):
+                raise ValueError("each acceleration_low value must be smaller than acceleration_high")
 
     def encoder_kwargs(self) -> dict:
         return {
@@ -208,7 +239,7 @@ class MASACExperimentConfig:
     timeout_penalty: float = 20.0
     success_bonus: float = 600.0
     collision_margin: float = 0.0
-    action_guidance_enabled: bool = True
+    action_guidance_enabled: bool = False
     action_guidance_radius: float = 1.0
     action_guidance_initial_weight: float = 0.7
     action_guidance_decay_steps: int = 500_000

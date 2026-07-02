@@ -64,6 +64,34 @@ def agent_dict_to_matrix(values: dict[str, np.ndarray], agent_ids: list[str]) ->
     )
 
 
+def state_bound_tuple(value, state_dim: int) -> tuple[float, ...]:
+    values = np.asarray(value, dtype=np.float32)
+    if values.ndim == 0:
+        values = np.full(state_dim, float(values), dtype=np.float32)
+    values = values.reshape(-1)
+    if values.shape != (state_dim,):
+        raise ValueError(f"bound must have shape ({state_dim},), got {tuple(values.shape)}")
+    return tuple(float(item) for item in values)
+
+
+def build_critic_action_matrix(info: dict, env: MultiAgentDMPEnv) -> np.ndarray:
+    applied_accelerations = np.asarray(
+        info["applied_accelerations"],
+        dtype=np.float32,
+    )
+    guided_action = np.asarray(info["guided_action"], dtype=np.float32)
+    dmp_dims = int(env.dmp_config.dims)
+    goal_offset = guided_action[:, dmp_dims : 2 * dmp_dims]
+    critic_action = np.concatenate([applied_accelerations, goal_offset], axis=1)
+    expected_shape = env.action_shape
+    if critic_action.shape != expected_shape:
+        raise ValueError(
+            f"critic action must have shape {expected_shape}, "
+            f"got {critic_action.shape}"
+        )
+    return critic_action.astype(np.float32, copy=False)
+
+
 def build_env(config: MASACExperimentConfig) -> MultiAgentDMPEnv:
     return MultiAgentDMPEnv(**config.build_core_env_kwargs())
 
@@ -83,8 +111,11 @@ def build_network_config(
     args: argparse.Namespace,
 ) -> MASACNetworkConfig:
     sensor = env.sensors[0]
+    state_dim = int(env.state_dim)
     action_low = tuple(float(value) for value in env.action_space.low[0])
     action_high = tuple(float(value) for value in env.action_space.high[0])
+    acceleration_low = state_bound_tuple(env.dynamics[0].accelerate_min, state_dim)
+    acceleration_high = state_bound_tuple(env.dynamics[0].accelerate_max, state_dim)
     ally_feature_dim = (
         int(env.single_pair_observation_dim)
         if int(env.nearest_agent_observation_count) > 0
@@ -112,6 +143,14 @@ def build_network_config(
         actor_log_std_max=float(args.actor_log_std_max),
         ally_pooling=str(experiment_config.ally_pooling),
         agent_pooling=str(experiment_config.agent_pooling),
+        goal_distance_clip=float(sensor.goal_distance_clip),
+        dmp_k_alpha=float(env.dmp_config.K_alpha),
+        dmp_k_beta=float(env.dmp_config.K_beta),
+        dmp_tau=float(env.dmp_config.tau),
+        forcing_term_min=float(env.dmp_config.forcing_term_min),
+        forcing_term_max=float(env.dmp_config.forcing_term_max),
+        acceleration_low=acceleration_low,
+        acceleration_high=acceleration_high,
     )
 
 
@@ -423,11 +462,13 @@ def train() -> dict[str, str]:
 
         next_obs = matrix_to_agent_dict(next_obs_matrix, agent_ids)
         reward = vector_to_agent_dict(rewards, agent_ids)
+        critic_action_matrix = build_critic_action_matrix(info, env)
+        critic_action = matrix_to_agent_dict(critic_action_matrix, agent_ids)
         done_for_buffer = {
             agent_id: bool(terminated)
             for agent_id in agent_ids
         }
-        policy.add(obs, action, reward, next_obs, done_for_buffer)
+        policy.add(obs, critic_action, reward, next_obs, done_for_buffer)
 
         episode_reward += np.asarray(rewards, dtype=np.float64)
         episode_step += 1

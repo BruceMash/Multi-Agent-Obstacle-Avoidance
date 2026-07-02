@@ -41,7 +41,7 @@ class Buffer:
         if self._size < self.capacity:
             self._size += 1
 
-    def _build_temporal_array(self, data, indices, sequence_length):
+    def _build_temporal_array(self, data, indices, sequence_length):    # 构建时序向量
         indices = np.asarray(indices, dtype=np.int64)
         sequence_length = int(sequence_length)
         batch_size = len(indices)
@@ -51,7 +51,7 @@ class Buffer:
         )
         mask = np.zeros((batch_size, sequence_length), dtype=bool)
 
-        for batch_index, end_index in enumerate(indices):
+        for batch_index, end_index in enumerate(indices):   # batch_index和end_index对应batch起始位置和结束位置
             end_transition_id = self.transition_ids[end_index]
             if end_transition_id < 0:
                 continue

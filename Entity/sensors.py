@@ -6,7 +6,7 @@ import numpy as np
 @dataclass
 class SensorPacket:
     """
-    本地传感器打包结果。
+    本地传感器打包结果。目前这里封装的observation是用于单机训练的
     """
 
     observation: np.ndarray
@@ -48,9 +48,10 @@ class LocalObstacleSensor:
         if len(self.elevation_range_deg) != 2 or self.elevation_range_deg[0] >= self.elevation_range_deg[1]:
             raise ValueError("elevation_range_deg must contain increasing lower and upper bounds")
 
-        if goal_distance_clip is None:
+        if goal_distance_clip is None:  # 不进行归一化，则默认为感知半径的两倍
             goal_distance_clip = 2.0 * self.sensing_radius
         self.goal_distance_clip = float(goal_distance_clip)
+
         if self.goal_distance_clip <= 0.0:
             raise ValueError("goal_distance_clip must be positive")
 
@@ -110,7 +111,7 @@ class LocalObstacleSensor:
                 distances[azimuth_index, elevation_index] = nearest_distance
         return distances
 
-    def _build_goal_features(self, position, goal):
+    def _build_goal_features(self, position, goal): 
         goal_vector = goal - position
         goal_distance = float(np.linalg.norm(goal_vector))
         if goal_distance < 1e-8:
@@ -118,7 +119,7 @@ class LocalObstacleSensor:
         else:
             goal_direction = goal_vector / goal_distance
         goal_distance_norm = np.array(
-            [np.clip(goal_distance / self.goal_distance_clip, 0.0, 1.0)],
+            [np.clip(goal_distance / self.goal_distance_clip, 0.0, 1.0)],   # 归一化并裁剪到[0, 1]
             dtype=float,
         )
         return goal_direction, goal_distance_norm

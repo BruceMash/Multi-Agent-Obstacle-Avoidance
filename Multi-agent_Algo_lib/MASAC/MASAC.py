@@ -119,6 +119,27 @@ class MASAC: #先无attention 再加入
         else:
             raise TypeError("network_config must be MASACNetworkConfig, dict, or None")
         self.temporal_steps = self.network_config.temporal_steps
+        action_dims = {int(dims[1]) for dims in dim_info.values()}
+        if len(action_dims) != 1:
+            raise ValueError("MASAC currently requires homogeneous action dimensions")
+        self.action_dim = next(iter(action_dims))
+        if self.action_dim % 2 != 0:
+            raise ValueError("DMP action dimension must be even: [forcing, goal_offset]")
+        self.control_dim = self.action_dim // 2
+        self.goal_distance_clip = float(self.network_config.goal_distance_clip)
+        self.dmp_k_alpha = float(self.network_config.dmp_k_alpha)
+        self.dmp_k_beta = float(self.network_config.dmp_k_beta)
+        self.dmp_tau = float(self.network_config.dmp_tau)
+        self.forcing_term_min = float(self.network_config.forcing_term_min)
+        self.forcing_term_max = float(self.network_config.forcing_term_max)
+        self.acceleration_low = self._state_bound_tensor(
+            self.network_config.acceleration_low,
+            "acceleration_low",
+        )
+        self.acceleration_high = self._state_bound_tensor(
+            self.network_config.acceleration_high,
+            "acceleration_high",
+        )
 
         ## dim_info的组织形式: {agent_id: [obs_dim, action_dim]}
         # 根据每个智能体的观测维度与动作维度构建策略网络等
@@ -249,6 +270,102 @@ class MASAC: #先无attention 再加入
         for agent_id, buffer in self.buffers.items():
             buffer.add(obs[agent_id], action[agent_id], reward[agent_id], next_obs[agent_id], done[agent_id])
 
+    def _state_bound_tensor(self, values, name):
+        if values is None:
+            return None
+        tensor = torch.as_tensor(values, dtype=torch.float32, device=self.device)
+        if tensor.dim() == 0:
+            tensor = tensor.repeat(self.control_dim)
+        tensor = tensor.reshape(-1)
+        if tensor.shape != (self.control_dim,):
+            raise ValueError(
+                f"{name} must have shape ({self.control_dim},), "
+                f"got {tuple(tensor.shape)}"
+            )
+        return tensor
+
+    def _current_observation_frame(self, obs, temporal_mask=None):
+        if obs.dim() == 2:
+            return obs
+        if obs.dim() != 3:
+            raise ValueError(
+                "observation must have shape [batch, obs_dim] or "
+                f"[batch, temporal_steps, obs_dim], got {tuple(obs.shape)}"
+            )
+
+        batch_size, temporal_steps, _ = obs.shape
+        if temporal_mask is None:
+            return obs[:, temporal_steps - 1]
+
+        valid_steps = temporal_mask.to(device=obs.device, dtype=torch.bool)
+        if valid_steps.shape != (batch_size, temporal_steps):
+            raise ValueError(
+                "temporal_mask must have shape [batch, temporal_steps], "
+                f"got {tuple(valid_steps.shape)}"
+            )
+        lengths = valid_steps.sum(dim=1).clamp_min(1)
+        indices = lengths - 1
+        batch_indices = torch.arange(batch_size, device=obs.device)
+        return obs[batch_indices, indices]
+
+    def actor_action_to_critic_action(self, obs, actor_action, temporal_mask=None):
+        current_obs = self._current_observation_frame(obs, temporal_mask)
+        velocity = current_obs[..., : self.control_dim]
+        goal_direction = current_obs[..., self.control_dim : 2 * self.control_dim]
+        goal_distance = current_obs[
+            ...,
+            2 * self.control_dim : 2 * self.control_dim + 1,
+        ] * self.goal_distance_clip
+
+        forcing = actor_action[..., : self.control_dim].clamp(
+            self.forcing_term_min,
+            self.forcing_term_max,
+        )
+        goal_offset = actor_action[..., self.control_dim : 2 * self.control_dim]
+        goal_delta = goal_direction * goal_distance
+        effective_goal_delta = goal_delta + goal_offset
+
+        sensor_dim = int(self.network_config.sensor_observation_dim or 0)
+        extra_dim = int(self.network_config.extra_observation_dim)
+        if extra_dim >= 3 and sensor_dim + 3 <= current_obs.shape[-1]:
+            k_alpha = current_obs[..., sensor_dim + 1 : sensor_dim + 2]
+            k_beta = current_obs[..., sensor_dim + 2 : sensor_dim + 3]
+        else:
+            k_alpha = torch.as_tensor(
+                self.dmp_k_alpha,
+                dtype=current_obs.dtype,
+                device=current_obs.device,
+            )
+            k_beta = torch.as_tensor(
+                self.dmp_k_beta,
+                dtype=current_obs.dtype,
+                device=current_obs.device,
+            )
+
+        tau = torch.as_tensor(
+            self.dmp_tau,
+            dtype=current_obs.dtype,
+            device=current_obs.device,
+        )
+        gate = torch.tanh(torch.abs(effective_goal_delta))
+        acceleration = (
+            k_alpha * (k_beta * effective_goal_delta - tau * velocity)
+            + forcing * gate
+        ) / (tau ** 2)
+
+        if self.acceleration_low is not None and self.acceleration_high is not None:
+            low = self.acceleration_low.to(
+                device=acceleration.device,
+                dtype=acceleration.dtype,
+            )
+            high = self.acceleration_high.to(
+                device=acceleration.device,
+                dtype=acceleration.dtype,
+            )
+            acceleration = torch.max(torch.min(acceleration, high), low)
+
+        return torch.cat([acceleration, goal_offset], dim=-1)
+
     def sample(self, batch_size):
         total_size = len(self.buffers[self.agent_x])
         indices = np.random.choice(total_size, batch_size, replace=False)
@@ -274,8 +391,13 @@ class MASAC: #先无attention 再加入
                 obs_mask[agent_id] = None
                 next_obs_mask[agent_id] = None
             with torch.no_grad():
-                next_action[agent_id], next_log_pi[agent_id] = self.agents[agent_id].actor_target(
+                next_actor_action, next_log_pi[agent_id] = self.agents[agent_id].actor_target(
                     next_obs[agent_id],
+                    temporal_mask=next_obs_mask[agent_id],
+                )
+                next_action[agent_id] = self.actor_action_to_critic_action(
+                    next_obs[agent_id],
+                    next_actor_action,
                     temporal_mask=next_obs_mask[agent_id],
                 )
 
@@ -361,42 +483,60 @@ class MASAC: #先无attention 再加入
                             obs[other_id],
                             temporal_mask=obs_mask[other_id],
                         )
-                new_action[other_id] = sampled_action
+                new_action[other_id] = self.actor_action_to_critic_action(
+                    obs[other_id],
+                    sampled_action,
+                    temporal_mask=obs_mask[other_id],
+                )
                 new_log_pi[other_id] = sampled_log_pi
 
-            if self.action_way == '0':
-                mixed_action = dict(action)
-                mixed_action[agent_id] = new_action[agent_id]
-                q1_pi, q2_pi = agent.critic(
-                    obs,
-                    mixed_action,
-                    temporal_masks=obs_mask,
-                )
-            elif self.action_way == '1':
-                q1_pi, q2_pi = agent.critic(
-                    obs,
-                    new_action,
-                    temporal_masks=obs_mask,
-                )
-            else:
-                raise ValueError(f"unsupported action_way: {self.action_way}")
-            
-            if self.entropy_way_a == '0':
-                stacked_log_pi = torch.stack(
-                    [new_log_pi[other_id] for other_id in self.agents.keys()],
-                    dim=1,
-                ).sum(dim=1)
-                entropy = -stacked_log_pi
-            elif self.entropy_way_a == '1':
-                entropy = -new_log_pi[agent_id]
-            else:
-                raise ValueError(f"unsupported entropy_way_a: {self.entropy_way_a}")
+            critic_requires_grad = [
+                critic_param.requires_grad
+                for critic_param in agent.critic.parameters()
+            ] # 获取critic参数的 requires_grad字段
 
+            for critic_param in agent.critic.parameters(): # 冻结critic参数
+                critic_param.requires_grad_(False)
+            try:
+                if self.action_way == '0':
+                    mixed_action = dict(action)
+                    mixed_action[agent_id] = new_action[agent_id]
+                    q1_pi, q2_pi = agent.critic(
+                        obs,
+                        mixed_action,
+                        temporal_masks=obs_mask,
+                    )
+                elif self.action_way == '1':
+                    q1_pi, q2_pi = agent.critic(
+                        obs,
+                        new_action,
+                        temporal_masks=obs_mask,
+                    )
+                else:
+                    raise ValueError(f"unsupported action_way: {self.action_way}")
+                
+                if self.entropy_way_a == '0':
+                    stacked_log_pi = torch.stack(
+                        [new_log_pi[other_id] for other_id in self.agents.keys()],
+                        dim=1,
+                    ).sum(dim=1)
+                    entropy = -stacked_log_pi
+                elif self.entropy_way_a == '1':
+                    entropy = -new_log_pi[agent_id]
+                else:
+                    raise ValueError(f"unsupported entropy_way_a: {self.entropy_way_a}")
 
-            q_pi = torch.min(q1_pi, q2_pi)
+                q_pi = torch.min(q1_pi, q2_pi)
 
-            actor_loss = (- q_pi - self.alphas[agent_id].alpha.detach() * entropy).mean()  #这里alpha一定要加detach(),因为在更新critic时,计算图被丢掉了
-            agent.update_actor(actor_loss)
+                # Actor update only needs dQ/da, not critic parameter gradients.
+                actor_loss = (- q_pi - self.alphas[agent_id].alpha.detach() * entropy).mean()
+                agent.update_actor(actor_loss)
+            finally:
+                for critic_param, requires_grad in zip(
+                    agent.critic.parameters(),
+                    critic_requires_grad,
+                ):
+                    critic_param.requires_grad_(requires_grad)
 
             ## 更新alpha
             '''公式: Lα = E_{s,a ~ D} [-α * log_pi_a(s,a) - α * H] = E_{s,a ~ D} [α * (-log_pi_a(s,a) - H)]'''
