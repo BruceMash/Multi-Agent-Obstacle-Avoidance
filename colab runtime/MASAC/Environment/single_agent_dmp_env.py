@@ -71,8 +71,8 @@ class EnvConfig:
     action_guidance_initial_weight: float = 0.7
     action_guidance_decay_steps: int = 500000
     workspace_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
-        (0.0, 0.0, 0.0),
-        (9.0, 4.5, 2.4),
+        (-0.5, -2.5, -1.2),
+        (8.5, 2.0, 1.2),
     )
     boundary_influence_distance: float = 0.6
     boundary_potential_weight: float = 0.3

@@ -26,7 +26,6 @@ class MASACNetworkConfig:
     sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0)
     ally_pooling: str = "mean_max"
     agent_pooling: str = "mean_max"
-    critic_encoder: str = "attention"
     actor_log_std_min: float = -20.0
     actor_log_std_max: float = 2.0
     action_low: tuple[float, ...] | None = None
@@ -98,9 +97,6 @@ class MASACNetworkConfig:
             raise ValueError(f"unsupported ally_pooling: {self.ally_pooling}")
         if self.agent_pooling not in valid_pooling:
             raise ValueError(f"unsupported agent_pooling: {self.agent_pooling}")
-        self.critic_encoder = str(self.critic_encoder)
-        if self.critic_encoder not in {"attention", "mlp"}:
-            raise ValueError("critic_encoder must be 'attention' or 'mlp'")
 
         self.actor_log_std_min = float(self.actor_log_std_min)
         self.actor_log_std_max = float(self.actor_log_std_max)
@@ -172,7 +168,6 @@ class MASACNetworkConfig:
     def critic_kwargs(self) -> dict:
         kwargs = self.encoder_kwargs()
         kwargs["agent_pooling"] = self.agent_pooling
-        kwargs["critic_encoder"] = self.critic_encoder
         return kwargs
 
 
@@ -198,7 +193,6 @@ class MASACExperimentConfig:
     actor_log_std_max: float = 2.0
     ally_pooling: str = "mean_max"
     agent_pooling: str = "mean_max"
-    critic_encoder: str = "attention"
     temporal_steps: int = 3
 
     # Environment and dynamics
@@ -214,17 +208,17 @@ class MASACExperimentConfig:
     max_steps: int = 200
     goal_tolerance: float = 0.3
     workspace_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
-        (0.0, 0.0, 0.0),
-        (9.0, 4.5, 2.4),
+        (-0.5, -2.5, -1.2),
+        (8.5, 2.0, 1.2),
     )
     randomize_start_goal: bool = True
     start_position_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
-        (0.5, 0.5, 0.4),
-        (1.3, 4.0, 2.0),
+        (0.0, -2.0, -0.8),
+        (0.8, 1.5, 0.8),
     )
     goal_position_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] = (
-        (7.7, 0.5, 0.4),
-        (8.5, 4.0, 2.0),
+        (7.2, -2.0, -0.8),
+        (8.0, 1.5, 0.8),
     )
     min_start_distance: float = 0.6
     min_goal_distance: float = 0.0
@@ -260,25 +254,6 @@ class MASACExperimentConfig:
     nearest_agent_observation_count: int | None = None
     acceleration_penalty_weight: float = 0.01
     acceleration_clip_penalty_weight: float = 0.05
-
-    # Success-rate curriculum
-    curriculum_enabled: bool = True
-    curriculum_success_threshold: float = 0.8
-    curriculum_phase2_box_counts: tuple[int, ...] = (1, 2, 3)
-    curriculum_phase2_sphere_counts: tuple[int, ...] = (1, 2, 3)
-    curriculum_phase3_dynamic_counts: tuple[int, ...] = (1, 2, 3)
-    curriculum_box_half_extent_range: tuple[float, float] = (0.20, 0.38)
-    curriculum_box_height_range: tuple[float, float] = (0.45, 1.10)
-    curriculum_aerial_sphere_radius_range: tuple[float, float] = (0.18, 0.30)
-    curriculum_dynamic_sphere_radius_range: tuple[float, float] = (0.20, 0.30)
-    curriculum_dynamic_speed_range: tuple[float, float] = (0.25, 0.60)
-    curriculum_aerial_min_center_height: float = 0.65
-    curriculum_obstacle_safety_margin: float = 0.05
-    curriculum_start_goal_clearance: float = 0.55
-    curriculum_obstacle_separation: float = 0.12
-    curriculum_placement_attempts: int = 1000
-    curriculum_curved_turn_rate: float = 0.45
-    curriculum_wandering_strength: float = 0.8
 
     # DMP
     dmp_dims: int = 3

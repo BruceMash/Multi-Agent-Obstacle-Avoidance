@@ -1,0 +1,4 @@
+gymnasium>=0.29
+numpy>=1.23
+tensorboard>=2.15
+tqdm>=4.66
