@@ -8,7 +8,8 @@ import json
 import os
 import sys
 import time
-from dataclasses import asdict, replace
+from collections import deque
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,12 +38,6 @@ for path in (PROJECT_ROOT, ALGO_ROOT):
 
 from Environment.multi_agent_dmp_env import MultiAgentDMPEnv
 from MASAC.MASAC import MASAC
-from MASAC.curriculum import (
-    CurriculumStage,
-    SuccessRateCurriculum,
-    build_curriculum_stages,
-    build_stage_env_kwargs,
-)
 from MASAC.config import MASAC_EXPERIMENT_CONFIG, MASACExperimentConfig, MASACNetworkConfig # 读取配置信息
 
 
@@ -97,16 +92,8 @@ def build_critic_action_matrix(info: dict, env: MultiAgentDMPEnv) -> np.ndarray:
     return critic_action.astype(np.float32, copy=False)
 
 
-def build_env(
-    config: MASACExperimentConfig,
-    curriculum_stage: CurriculumStage | None = None,
-) -> MultiAgentDMPEnv:
-    kwargs = (
-        config.build_core_env_kwargs()
-        if curriculum_stage is None
-        else build_stage_env_kwargs(config, curriculum_stage)
-    )
-    return MultiAgentDMPEnv(**kwargs)
+def build_env(config: MASACExperimentConfig) -> MultiAgentDMPEnv:
+    return MultiAgentDMPEnv(**config.build_core_env_kwargs())
 
 
 def build_dim_info(env: MultiAgentDMPEnv, agent_ids: list[str]) -> dict[str, tuple[int, int]]:
@@ -156,7 +143,6 @@ def build_network_config(
         actor_log_std_max=float(args.actor_log_std_max),
         ally_pooling=str(experiment_config.ally_pooling),
         agent_pooling=str(experiment_config.agent_pooling),
-        critic_encoder=str(args.critic_encoder),
         goal_distance_clip=float(sensor.goal_distance_clip),
         dmp_k_alpha=float(env.dmp_config.K_alpha),
         dmp_k_beta=float(env.dmp_config.K_beta),
@@ -202,116 +188,6 @@ def mask_count(info: dict[str, Any], key: str) -> int:
     return int(np.sum(np.asarray(info.get(key, []), dtype=bool)))
 
 
-def set_policy_train_mode(policy: MASAC, training: bool) -> None:
-    for agent in policy.agents.values():
-        agent.actor.train(training)
-        agent.critic.train(training)
-        agent.actor_target.train(training)
-        agent.critic_target.train(training)
-
-
-def evaluate_policy(
-    *,
-    policy: MASAC,
-    experiment_config: MASACExperimentConfig,
-    agent_ids: list[str],
-    eval_seeds: list[int],
-    curriculum_stage: CurriculumStage | None = None,
-) -> dict[str, Any]:
-    eval_env = build_env(experiment_config, curriculum_stage)
-    try:
-        previous_training_mode = next(iter(policy.agents.values())).actor.training
-        set_policy_train_mode(policy, False)
-        episode_rows = []
-        for eval_index, eval_seed in enumerate(eval_seeds):
-            obs_matrix, _ = eval_env.reset(seed=int(eval_seed))
-            obs = matrix_to_agent_dict(obs_matrix, agent_ids)
-            episode_reward = np.zeros(int(eval_env.num_agents), dtype=np.float64)
-            episode_step = 0
-            terminated = False
-            truncated = False
-            info: dict[str, Any] = {}
-            inter_agent_collision_event = False
-            obstacle_collision_event = False
-            boundary_collision_event = False
-            min_inter_agent_distance = float("inf")
-
-            while not bool(terminated or truncated):
-                action = policy.evaluate_action(obs)
-                action_matrix = agent_dict_to_matrix(action, agent_ids)
-                action_matrix = np.clip(
-                    action_matrix,
-                    eval_env.action_space.low,
-                    eval_env.action_space.high,
-                ).astype(np.float32)
-                next_obs_matrix, rewards, terminated, truncated, info = eval_env.step(action_matrix)
-                obs = matrix_to_agent_dict(next_obs_matrix, agent_ids)
-                episode_reward += np.asarray(rewards, dtype=np.float64)
-                episode_step += 1
-
-                inter_agent_collision_event = inter_agent_collision_event or (
-                    mask_count(info, "inter_agent_collision_mask") > 0
-                )
-                obstacle_collision_event = obstacle_collision_event or (
-                    mask_count(info, "obstacle_collision_mask") > 0
-                )
-                boundary_collision_event = boundary_collision_event or (
-                    mask_count(info, "boundary_collision_mask") > 0
-                )
-                min_inter_agent_distance = min(
-                    min_inter_agent_distance,
-                    float(info.get("min_inter_agent_distance", np.inf)),
-                )
-
-            success_mask = np.asarray(
-                info.get("success_mask", np.zeros(int(eval_env.num_agents), dtype=bool)),
-                dtype=bool,
-            )
-            success = bool(info.get("success", bool(np.all(success_mask))))
-            reached_agent_count = int(np.sum(success_mask))
-            episode_rows.append(
-                {
-                    "eval_index": eval_index,
-                    "eval_seed": int(eval_seed),
-                    "success": success,
-                    "episode_step": int(episode_step),
-                    "mean_reward": float(np.mean(episode_reward)),
-                    "sum_reward": float(np.sum(episode_reward)),
-                    "reached_agent_count": reached_agent_count,
-                    "agent_success_rate": float(reached_agent_count / float(eval_env.num_agents)),
-                    "inter_agent_collision": bool(inter_agent_collision_event),
-                    "obstacle_collision": bool(obstacle_collision_event),
-                    "boundary_collision": bool(boundary_collision_event),
-                    "min_inter_agent_distance": float(min_inter_agent_distance),
-                }
-            )
-
-        episode_count = max(1, len(episode_rows))
-        return {
-            "eval_episode_count": int(len(episode_rows)),
-            "eval_success_rate": float(np.mean([row["success"] for row in episode_rows])),
-            "eval_agent_success_rate": float(np.mean([row["agent_success_rate"] for row in episode_rows])),
-            "eval_mean_reward": float(np.mean([row["mean_reward"] for row in episode_rows])),
-            "eval_sum_reward": float(np.mean([row["sum_reward"] for row in episode_rows])),
-            "eval_mean_len": float(np.mean([row["episode_step"] for row in episode_rows])),
-            "eval_inter_agent_collision_rate": float(
-                np.sum([row["inter_agent_collision"] for row in episode_rows]) / episode_count
-            ),
-            "eval_obstacle_collision_rate": float(
-                np.sum([row["obstacle_collision"] for row in episode_rows]) / episode_count
-            ),
-            "eval_boundary_collision_rate": float(
-                np.sum([row["boundary_collision"] for row in episode_rows]) / episode_count
-            ),
-            "eval_min_inter_agent_distance": float(
-                np.min([row["min_inter_agent_distance"] for row in episode_rows])
-            ),
-        }
-    finally:
-        set_policy_train_mode(policy, previous_training_mode)
-        eval_env.close()
-
-
 class TerminalProgress:
     """Render training progress with tqdm, with a plain text fallback."""
 
@@ -343,7 +219,6 @@ class TerminalProgress:
             f"MASAC | step {int(status['global_step']):,}/{self.total_steps:,} "
             f"| ep {int(status['episode_count'])} "
             f"| buf {int(status['buffer_size']):,} "
-            f"| {status['curriculum_stage']} "
             f"| SR{self.success_window} {float(status['rolling_success_rate']):.3f} "
             f"| IA {int(status['inter_agent_collision_count'])} "
             f"| OBS {int(status['obstacle_collision_count'])} "
@@ -366,7 +241,6 @@ class TerminalProgress:
             {
                 "ep": int(status["episode_count"]),
                 "buf": f"{int(status['buffer_size']):,}",
-                "stage": status["curriculum_stage"],
                 f"SR{self.success_window}": f"{float(status['rolling_success_rate']):.3f}",
                 "IA": int(status["inter_agent_collision_count"]),
                 "OBS": int(status["obstacle_collision_count"]),
@@ -387,6 +261,147 @@ class TerminalProgress:
             self.pbar = None
 
 
+class ForwardProfiler:
+    """Collect inclusive forward-pass timings for selected MASAC network modules."""
+
+    TARGET_CLASS_NAMES = {
+        "MASACActor",
+        "MASACCritic",
+        "MASACObservationEncoder",
+        "ObservationEncoder",
+        "AllyObservationEncoder",
+        "_CentralizedQBranch",
+        "MultiheadAttention",
+        "GRU",
+    }
+
+    def __init__(
+        self,
+        policy: MASAC,
+        *,
+        device: torch.device,
+        output_path: Path,
+        topk: int = 20,
+    ) -> None:
+        self.device = device
+        self.output_path = output_path
+        self.topk = max(1, int(topk))
+        self.sync_cuda = bool(device.type == "cuda" and torch.cuda.is_available())
+        self.handles = []
+        self.stats: dict[str, dict[str, Any]] = {}
+        self._register(policy)
+
+    def _maybe_sync(self) -> None:
+        if self.sync_cuda:
+            torch.cuda.synchronize(self.device)
+
+    def _should_track(self, module: torch.nn.Module) -> bool:
+        return module.__class__.__name__ in self.TARGET_CLASS_NAMES
+
+    def _register_module(self, label: str, module: torch.nn.Module) -> None:
+        if not self._should_track(module):
+            return
+
+        class_name = module.__class__.__name__
+        key = f"{label}:{class_name}"
+        self.stats.setdefault(
+            key,
+            {
+                "module": label,
+                "class_name": class_name,
+                "calls": 0,
+                "total_ms": 0.0,
+                "max_ms": 0.0,
+            },
+        )
+
+        def pre_hook(tracked_module, _inputs):
+            self._maybe_sync()
+            tracked_module.__masac_profile_start = time.perf_counter()
+
+        def post_hook(tracked_module, _inputs, _output):
+            self._maybe_sync()
+            start = getattr(tracked_module, "__masac_profile_start", None)
+            if start is None:
+                return
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            row = self.stats[key]
+            row["calls"] += 1
+            row["total_ms"] += elapsed_ms
+            row["max_ms"] = max(float(row["max_ms"]), elapsed_ms)
+
+        self.handles.append(module.register_forward_pre_hook(pre_hook))
+        self.handles.append(module.register_forward_hook(post_hook))
+
+    def _register_network(self, prefix: str, network: torch.nn.Module) -> None:
+        for name, module in network.named_modules():
+            label = prefix if name == "" else f"{prefix}.{name}"
+            self._register_module(label, module)
+
+    def _register(self, policy: MASAC) -> None:
+        for agent_id, agent in policy.agents.items():
+            self._register_network(f"{agent_id}.actor", agent.actor)
+            self._register_network(f"{agent_id}.actor_target", agent.actor_target)
+            self._register_network(f"{agent_id}.critic", agent.critic)
+            self._register_network(f"{agent_id}.critic_target", agent.critic_target)
+
+    def rows(self, global_step: int) -> list[dict[str, Any]]:
+        rows = []
+        for key, stat in self.stats.items():
+            calls = int(stat["calls"])
+            if calls <= 0:
+                continue
+            total_ms = float(stat["total_ms"])
+            rows.append(
+                {
+                    "global_step": int(global_step),
+                    "module": stat["module"],
+                    "class_name": stat["class_name"],
+                    "calls": calls,
+                    "total_ms": total_ms,
+                    "mean_ms": total_ms / calls,
+                    "max_ms": float(stat["max_ms"]),
+                }
+            )
+        rows.sort(key=lambda row: row["total_ms"], reverse=True)
+        for rank, row in enumerate(rows, start=1):
+            row["rank"] = rank
+        return rows
+
+    def reset(self) -> None:
+        for stat in self.stats.values():
+            stat["calls"] = 0
+            stat["total_ms"] = 0.0
+            stat["max_ms"] = 0.0
+
+    def write_snapshot(self, global_step: int, *, reset: bool = True) -> list[dict[str, Any]]:
+        rows = self.rows(global_step)
+        for row in rows:
+            append_metrics(self.output_path, row)
+        if reset:
+            self.reset()
+        return rows
+
+    def format_summary(self, rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return "forward_profile: no tracked forward calls yet"
+        lines = [f"forward_profile top {min(self.topk, len(rows))} modules:"]
+        for row in rows[: self.topk]:
+            lines.append(
+                (
+                    "#{rank} {module} [{class_name}] "
+                    "calls={calls} total={total_ms:.2f}ms "
+                    "mean={mean_ms:.3f}ms max={max_ms:.3f}ms"
+                ).format(**row)
+            )
+        return "\n".join(lines)
+
+    def close(self) -> None:
+        for handle in self.handles:
+            handle.remove()
+        self.handles.clear()
+
+
 def write_tensorboard_episode(writer, row: dict[str, Any]) -> None:
     if writer is None:
         return
@@ -397,12 +412,6 @@ def write_tensorboard_episode(writer, row: dict[str, Any]) -> None:
     writer.add_scalar("success/full_success", float(row["success"]), step)
     writer.add_scalar("success/agent_success_rate", row["agent_success_rate"], step)
     writer.add_scalar("success/rolling_success_rate", row["rolling_success_rate"], step)
-    writer.add_scalar("curriculum/phase", row["curriculum_phase"], step)
-    writer.add_scalar("curriculum/level", row["curriculum_level"], step)
-    writer.add_scalar("curriculum/window_count", row["curriculum_window_count"], step)
-    writer.add_scalar("curriculum/ground_box_count", row["ground_box_count"], step)
-    writer.add_scalar("curriculum/aerial_sphere_count", row["aerial_sphere_count"], step)
-    writer.add_scalar("curriculum/dynamic_sphere_count", row["dynamic_sphere_count"], step)
     writer.add_scalar("collision/inter_agent_event", float(row["inter_agent_collision"]), step)
     writer.add_scalar("collision/obstacle_event", float(row["obstacle_collision"]), step)
     writer.add_scalar("collision/boundary_event", float(row["boundary_collision"]), step)
@@ -425,8 +434,6 @@ def write_tensorboard_step(
     inter_agent_collision_count: int,
     obstacle_collision_count: int,
     min_inter_agent_distance: float,
-    curriculum_phase: int,
-    curriculum_level: int,
 ) -> None:
     if writer is None:
         return
@@ -434,64 +441,9 @@ def write_tensorboard_step(
     writer.add_scalar("train/buffer_size", buffer_size, global_step)
     writer.add_scalar("train/episode_count", episode_count, global_step)
     writer.add_scalar("success/rolling_success_rate_step", rolling_success_rate, global_step)
-    writer.add_scalar("curriculum/phase_step", curriculum_phase, global_step)
-    writer.add_scalar("curriculum/level_step", curriculum_level, global_step)
     writer.add_scalar("collision/inter_agent_agent_count_step", inter_agent_collision_count, global_step)
     writer.add_scalar("collision/obstacle_agent_count_step", obstacle_collision_count, global_step)
     writer.add_scalar("safety/min_inter_agent_distance_step", min_inter_agent_distance, global_step)
-
-
-def write_tensorboard_eval(writer, row: dict[str, Any]) -> None:
-    if writer is None:
-        return
-    step = int(row["global_step"])
-    writer.add_scalar("eval/success_rate", row["eval_success_rate"], step)
-    writer.add_scalar("eval/agent_success_rate", row["eval_agent_success_rate"], step)
-    writer.add_scalar("eval/mean_reward", row["eval_mean_reward"], step)
-    writer.add_scalar("eval/sum_reward", row["eval_sum_reward"], step)
-    writer.add_scalar("eval/mean_len", row["eval_mean_len"], step)
-    writer.add_scalar("eval/curriculum_phase", row["curriculum_phase"], step)
-    writer.add_scalar("eval/curriculum_level", row["curriculum_level"], step)
-    writer.add_scalar(
-        "eval/inter_agent_collision_rate",
-        row["eval_inter_agent_collision_rate"],
-        step,
-    )
-    writer.add_scalar(
-        "eval/obstacle_collision_rate",
-        row["eval_obstacle_collision_rate"],
-        step,
-    )
-    writer.add_scalar(
-        "eval/boundary_collision_rate",
-        row["eval_boundary_collision_rate"],
-        step,
-    )
-    writer.add_scalar(
-        "eval/min_inter_agent_distance",
-        row["eval_min_inter_agent_distance"],
-        step,
-    )
-
-
-def parse_int_tuple(value: str) -> tuple[int, ...]:
-    try:
-        parsed = tuple(int(item.strip()) for item in value.split(",") if item.strip())
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("expected comma-separated integers") from error
-    if not parsed or any(item < 0 for item in parsed):
-        raise argparse.ArgumentTypeError("counts must be non-negative integers")
-    return parsed
-
-
-def parse_float_range(value: str) -> tuple[float, float]:
-    try:
-        parsed = tuple(float(item.strip()) for item in value.split(",") if item.strip())
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("expected two comma-separated numbers") from error
-    if len(parsed) != 2 or parsed[0] < 0.0 or parsed[0] >= parsed[1]:
-        raise argparse.ArgumentTypeError("range must satisfy 0 <= minimum < maximum")
-    return parsed
 
 
 def parse_args() -> argparse.Namespace:
@@ -524,110 +476,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-observation-layers", type=int, default=int(config.num_observation_layers))
     parser.add_argument("--actor-log-std-min", type=float, default=float(config.actor_log_std_min))
     parser.add_argument("--actor-log-std-max", type=float, default=float(config.actor_log_std_max))
-    parser.add_argument(
-        "--critic-encoder",
-        type=str,
-        choices=("attention", "mlp"),
-        default=str(config.critic_encoder),
-    )
 
     # Runtime and logging options
     parser.add_argument("--device", type=str, default=str(config.device))
     parser.add_argument("--output-root", type=str, default=str(config.output_root))
     parser.add_argument("--save-interval", type=int, default=int(config.save_interval))
-    parser.add_argument("--eval-interval", type=int, default=int(config.save_interval))
-    parser.add_argument("--eval-episodes", type=int, default=10)
-    parser.add_argument("--eval-seed-base", type=int, default=100_000)
     parser.add_argument("--log-interval", type=int, default=int(config.log_interval))
     parser.add_argument("--progress-interval", type=int, default=int(config.progress_interval))
     parser.add_argument("--success-window", type=int, default=int(config.success_window))
-    parser.add_argument(
-        "--curriculum-success-threshold",
-        type=float,
-        default=float(config.curriculum_success_threshold),
-    )
-    parser.add_argument(
-        "--phase2-box-counts",
-        type=parse_int_tuple,
-        default=tuple(config.curriculum_phase2_box_counts),
-    )
-    parser.add_argument(
-        "--phase2-sphere-counts",
-        type=parse_int_tuple,
-        default=tuple(config.curriculum_phase2_sphere_counts),
-    )
-    parser.add_argument(
-        "--phase3-dynamic-counts",
-        type=parse_int_tuple,
-        default=tuple(config.curriculum_phase3_dynamic_counts),
-    )
-    parser.add_argument(
-        "--box-half-extent-range",
-        type=parse_float_range,
-        default=tuple(config.curriculum_box_half_extent_range),
-    )
-    parser.add_argument(
-        "--box-height-range",
-        type=parse_float_range,
-        default=tuple(config.curriculum_box_height_range),
-    )
-    parser.add_argument(
-        "--aerial-sphere-radius-range",
-        type=parse_float_range,
-        default=tuple(config.curriculum_aerial_sphere_radius_range),
-    )
-    parser.add_argument(
-        "--dynamic-sphere-radius-range",
-        type=parse_float_range,
-        default=tuple(config.curriculum_dynamic_sphere_radius_range),
-    )
-    parser.add_argument(
-        "--dynamic-speed-range",
-        type=parse_float_range,
-        default=tuple(config.curriculum_dynamic_speed_range),
-    )
-    parser.add_argument(
-        "--aerial-min-center-height",
-        type=float,
-        default=float(config.curriculum_aerial_min_center_height),
-    )
-    parser.add_argument(
-        "--obstacle-safety-margin",
-        type=float,
-        default=float(config.curriculum_obstacle_safety_margin),
-    )
-    parser.add_argument(
-        "--start-goal-clearance",
-        type=float,
-        default=float(config.curriculum_start_goal_clearance),
-    )
-    parser.add_argument(
-        "--obstacle-separation",
-        type=float,
-        default=float(config.curriculum_obstacle_separation),
-    )
-    parser.add_argument(
-        "--placement-attempts",
-        type=int,
-        default=int(config.curriculum_placement_attempts),
-    )
-    parser.add_argument(
-        "--curved-turn-rate",
-        type=float,
-        default=float(config.curriculum_curved_turn_rate),
-    )
-    parser.add_argument(
-        "--wandering-strength",
-        type=float,
-        default=float(config.curriculum_wandering_strength),
-    )
-    parser.add_argument(
-        "--disable-curriculum",
-        action="store_true",
-        default=not bool(config.curriculum_enabled),
-    )
     parser.add_argument("--disable-tensorboard", action="store_true", default=bool(config.disable_tensorboard))
     parser.add_argument("--plain-progress", action="store_true", default=bool(config.plain_progress))
+    parser.add_argument("--profile-forward", action="store_true", default=False)
+    parser.add_argument("--profile-forward-interval", type=int, default=1_000)
+    parser.add_argument("--profile-forward-topk", type=int, default=20)
     return parser.parse_args()
 
 
@@ -637,23 +498,9 @@ def train() -> dict[str, str]:
 
     # 训练间隔
     args.log_interval = max(1, int(args.log_interval))
-    args.eval_interval = max(1, int(args.eval_interval))
-    args.eval_episodes = max(1, int(args.eval_episodes))
     args.success_window = max(1, int(args.success_window))  # 计算滚动成功率均值
-    if not 0.0 <= float(args.curriculum_success_threshold) <= 1.0:
-        raise ValueError("curriculum success threshold must be in [0, 1]")
-    non_negative_values = (
-        args.aerial_min_center_height,
-        args.obstacle_safety_margin,
-        args.start_goal_clearance,
-        args.obstacle_separation,
-        args.curved_turn_rate,
-        args.wandering_strength,
-    )
-    if any(float(value) < 0.0 for value in non_negative_values):
-        raise ValueError("curriculum geometry and motion parameters must be non-negative")
-    if int(args.placement_attempts) <= 0:
-        raise ValueError("placement attempts must be positive")
+    args.profile_forward_interval = max(1, int(args.profile_forward_interval))
+    args.profile_forward_topk = max(1, int(args.profile_forward_topk))
     
     # 固定随机种子
     np.random.seed(args.seed)
@@ -661,39 +508,8 @@ def train() -> dict[str, str]:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    experiment_config = replace(
-        MASAC_EXPERIMENT_CONFIG,
-        curriculum_enabled=not bool(args.disable_curriculum),
-        curriculum_success_threshold=float(args.curriculum_success_threshold),
-        curriculum_phase2_box_counts=tuple(args.phase2_box_counts),
-        curriculum_phase2_sphere_counts=tuple(args.phase2_sphere_counts),
-        curriculum_phase3_dynamic_counts=tuple(args.phase3_dynamic_counts),
-        curriculum_box_half_extent_range=tuple(args.box_half_extent_range),
-        curriculum_box_height_range=tuple(args.box_height_range),
-        curriculum_aerial_sphere_radius_range=tuple(args.aerial_sphere_radius_range),
-        curriculum_dynamic_sphere_radius_range=tuple(args.dynamic_sphere_radius_range),
-        curriculum_dynamic_speed_range=tuple(args.dynamic_speed_range),
-        curriculum_aerial_min_center_height=float(args.aerial_min_center_height),
-        curriculum_obstacle_safety_margin=float(args.obstacle_safety_margin),
-        curriculum_start_goal_clearance=float(args.start_goal_clearance),
-        curriculum_obstacle_separation=float(args.obstacle_separation),
-        curriculum_placement_attempts=int(args.placement_attempts),
-        curriculum_curved_turn_rate=float(args.curved_turn_rate),
-        curriculum_wandering_strength=float(args.wandering_strength),
-    )
-    curriculum_stages = build_curriculum_stages(
-        args.phase2_box_counts,
-        args.phase2_sphere_counts,
-        args.phase3_dynamic_counts,
-    )
-    curriculum = SuccessRateCurriculum(
-        curriculum_stages,
-        success_threshold=float(args.curriculum_success_threshold),
-        success_window=int(args.success_window),
-        enabled=not bool(args.disable_curriculum),
-    )
-    active_stage = curriculum.current_stage if curriculum.enabled else None
-    env = build_env(experiment_config, active_stage)
+    experiment_config = MASAC_EXPERIMENT_CONFIG
+    env = build_env(experiment_config)
     if hasattr(env.action_space, "seed"):
         env.action_space.seed(args.seed)
 
@@ -716,11 +532,7 @@ def train() -> dict[str, str]:
     model_dir = run_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.csv"
-    eval_metrics_path = run_dir / "eval_metrics.csv"
-    eval_seeds = [
-        int(args.eval_seed_base) + seed_offset
-        for seed_offset in range(int(args.eval_episodes))
-    ]
+    forward_profile_path = run_dir / "forward_profile.csv"
     progress = TerminalProgress(
         total_steps=int(args.total_steps),
         success_window=int(args.success_window),
@@ -735,6 +547,24 @@ def train() -> dict[str, str]:
     else:
         progress.event("TensorBoard logging is unavailable because tensorboard is not installed.")
 
+    forward_profiler = None
+    if bool(args.profile_forward):
+        forward_profiler = ForwardProfiler(
+            policy,
+            device=device,
+            output_path=forward_profile_path,
+            topk=int(args.profile_forward_topk),
+        )
+        progress.event(
+            (
+                "Forward profiling enabled: "
+                f"{forward_profile_path} "
+                f"(interval={int(args.profile_forward_interval)}, "
+                f"topk={int(args.profile_forward_topk)}, "
+                f"cuda_sync={forward_profiler.sync_cuda})"
+            )
+        )
+
     write_json(
         run_dir / "config.json",
         {
@@ -743,8 +573,6 @@ def train() -> dict[str, str]:
             "core_env_kwargs": experiment_config.build_core_env_kwargs(),
             "dim_info": dim_info,
             "network_config": asdict(network_config),
-            "eval_seeds": eval_seeds,
-            "curriculum": curriculum.to_dict(),
             "device": str(device),
             "tensorboard_enabled": writer is not None,
         },
@@ -756,6 +584,7 @@ def train() -> dict[str, str]:
     episode_count = 0
     episode_step = 0
     start_time = time.time()
+    success_history = deque(maxlen=max(1, int(args.success_window)))
     episode_inter_agent_collision_steps = 0
     episode_obstacle_collision_steps = 0
     episode_boundary_collision_steps = 0
@@ -765,9 +594,6 @@ def train() -> dict[str, str]:
     latest_inter_agent_collision_count = 0
     latest_obstacle_collision_count = 0
     latest_min_inter_agent_distance = float("inf")
-    best_eval_success_rate = -1.0
-    best_eval_mean_reward = -float("inf")
-    best_eval_stage_index = -1
 
     min_learn_size = max(int(args.batch_size), int(args.temporal_steps))
     for global_step in range(1, int(args.total_steps) + 1):
@@ -834,9 +660,8 @@ def train() -> dict[str, str]:
                 dtype=bool,
             )
             success = bool(info.get("success", False))
-            curriculum_result = curriculum.record_episode(success)
-            completed_stage = curriculum_result["completed_stage"]
-            rolling_success_rate = float(curriculum_result["completed_success_rate"])
+            success_history.append(float(success))
+            rolling_success_rate = float(np.mean(success_history)) if success_history else 0.0
             reached_agent_count = int(np.sum(success_mask))
             agent_success_rate = float(reached_agent_count / float(env.num_agents))
             inter_agent_collision_event = episode_inter_agent_collision_steps > 0
@@ -857,15 +682,6 @@ def train() -> dict[str, str]:
                 "reached_agent_count": reached_agent_count,
                 "agent_success_rate": agent_success_rate,
                 "rolling_success_rate": rolling_success_rate,
-                "curriculum_phase": completed_stage.phase,
-                "curriculum_level": completed_stage.level,
-                "curriculum_stage": completed_stage.name,
-                "curriculum_window_count": curriculum_result["completed_window_count"],
-                "curriculum_advanced": curriculum_result["advanced"],
-                "next_curriculum_stage": curriculum_result["next_stage"].name,
-                "ground_box_count": completed_stage.ground_box_count,
-                "aerial_sphere_count": completed_stage.aerial_sphere_count,
-                "dynamic_sphere_count": completed_stage.dynamic_sphere_count,
                 "inter_agent_collision": inter_agent_collision_event,
                 "obstacle_collision": obstacle_collision_event,
                 "boundary_collision": boundary_collision_event,
@@ -883,7 +699,7 @@ def train() -> dict[str, str]:
             progress.event(
                 (
                     "episode={episode} step={global_step} len={episode_step} "
-                    "reward={mean_reward:.3f} success={success} stage={curriculum_stage} "
+                    "reward={mean_reward:.3f} success={success} "
                     "reached={reached_agent_count}/{num_agents} "
                     "SR{window}={rolling_success_rate:.3f} "
                     "IA_collision={inter_agent_collision} "
@@ -896,17 +712,6 @@ def train() -> dict[str, str]:
                 )
             )
 
-            if curriculum_result["advanced"]:
-                next_stage = curriculum_result["next_stage"]
-                progress.event(
-                    f"curriculum advanced: {completed_stage.name} -> {next_stage.name} "
-                    f"(SR={rolling_success_rate:.3f})"
-                )
-                env.close()
-                env = build_env(experiment_config, next_stage)
-                if hasattr(env.action_space, "seed"):
-                    env.action_space.seed(args.seed + curriculum.stage_index)
-
             obs_matrix, _ = env.reset()
             obs = matrix_to_agent_dict(obs_matrix, agent_ids)
             episode_reward[:] = 0.0
@@ -918,13 +723,12 @@ def train() -> dict[str, str]:
             episode_obstacle_collision_agent_count = 0
             episode_boundary_collision_agent_count = 0
 
-        rolling_success_rate = curriculum.success_rate
+        rolling_success_rate = float(np.mean(success_history)) if success_history else 0.0
         if global_step % int(args.progress_interval) == 0 or global_step == 1:
             progress.update(
                 global_step=global_step,
                 episode_count=episode_count,
                 buffer_size=len(policy.buffers[policy.agent_x]),
-                curriculum_stage=curriculum.current_stage.name,
                 rolling_success_rate=rolling_success_rate,
                 inter_agent_collision_count=latest_inter_agent_collision_count,
                 obstacle_collision_count=latest_obstacle_collision_count,
@@ -935,8 +739,7 @@ def train() -> dict[str, str]:
             progress.event(
                 (
                     f"step={global_step} buffer={len(policy.buffers[policy.agent_x])} "
-                    f"episodes={episode_count} stage={curriculum.current_stage.name} "
-                    f"SR{int(args.success_window)}={rolling_success_rate:.3f} "
+                    f"episodes={episode_count} SR{int(args.success_window)}={rolling_success_rate:.3f} "
                     f"IA={latest_inter_agent_collision_count} OBS={latest_obstacle_collision_count} "
                     f"elapsed={time.time() - start_time:.1f}s"
                 )
@@ -950,72 +753,14 @@ def train() -> dict[str, str]:
                 inter_agent_collision_count=latest_inter_agent_collision_count,
                 obstacle_collision_count=latest_obstacle_collision_count,
                 min_inter_agent_distance=latest_min_inter_agent_distance,
-                curriculum_phase=curriculum.current_stage.phase,
-                curriculum_level=curriculum.current_stage.level,
             )
 
-        if global_step % int(args.eval_interval) == 0:
-            eval_row = evaluate_policy(
-                policy=policy,
-                experiment_config=experiment_config,
-                agent_ids=agent_ids,
-                eval_seeds=eval_seeds,
-                curriculum_stage=curriculum.current_stage if curriculum.enabled else None,
-            )
-            eval_row.update(
-                {
-                    "global_step": int(global_step),
-                    "episode_count": int(episode_count),
-                    "elapsed_sec": float(time.time() - start_time),
-                    "eval_seed_base": int(args.eval_seed_base),
-                    "curriculum_phase": curriculum.current_stage.phase,
-                    "curriculum_level": curriculum.current_stage.level,
-                    "curriculum_stage": curriculum.current_stage.name,
-                    "curriculum_stage_index": curriculum.stage_index,
-                }
-            )
-            append_metrics(eval_metrics_path, eval_row)
-            write_tensorboard_eval(writer, eval_row)
-            progress.event(
-                (
-                    f"eval step={global_step} episodes={eval_row['eval_episode_count']} "
-                    f"stage={eval_row['curriculum_stage']} eval_SR={eval_row['eval_success_rate']:.3f} "
-                    f"agent_SR={eval_row['eval_agent_success_rate']:.3f} "
-                    f"mean_reward={eval_row['eval_mean_reward']:.3f} "
-                    f"mean_len={eval_row['eval_mean_len']:.1f} "
-                    f"IA_rate={eval_row['eval_inter_agent_collision_rate']:.3f}"
-                )
-            )
-            improved = (
-                int(curriculum.stage_index) > best_eval_stage_index
-                or (
-                    int(curriculum.stage_index) == best_eval_stage_index
-                    and (
-                        float(eval_row["eval_success_rate"]) > best_eval_success_rate
-                        or (
-                            float(eval_row["eval_success_rate"]) == best_eval_success_rate
-                            and float(eval_row["eval_mean_reward"]) > best_eval_mean_reward
-                        )
-                    )
-                )
-            )
-            if improved:
-                best_eval_stage_index = int(curriculum.stage_index)
-                best_eval_success_rate = float(eval_row["eval_success_rate"])
-                best_eval_mean_reward = float(eval_row["eval_mean_reward"])
-                best_dir = model_dir / "best"
-                best_dir.mkdir(parents=True, exist_ok=True)
-                policy.save(best_dir)
-                best_payload = dict(eval_row)
-                best_payload["eval_seeds"] = list(eval_seeds)
-                write_json(best_dir / "best_eval.json", best_payload)
-                progress.event(
-                    (
-                        f"best model saved: {best_dir} "
-                        f"(eval_SR={best_eval_success_rate:.3f}, "
-                        f"mean_reward={best_eval_mean_reward:.3f})"
-                    )
-                )
+        if (
+            forward_profiler is not None
+            and global_step % int(args.profile_forward_interval) == 0
+        ):
+            rows = forward_profiler.write_snapshot(global_step)
+            progress.event(forward_profiler.format_summary(rows))
 
         if global_step % int(args.save_interval) == 0:
             checkpoint_dir = model_dir / f"step_{global_step}"
@@ -1024,6 +769,11 @@ def train() -> dict[str, str]:
             progress.event(f"checkpoint saved: {checkpoint_dir}")
 
     final_dir = model_dir / "final"
+    if forward_profiler is not None:
+        rows = forward_profiler.write_snapshot(int(args.total_steps), reset=False)
+        if rows:
+            progress.event(forward_profiler.format_summary(rows))
+        forward_profiler.close()
     final_dir.mkdir(parents=True, exist_ok=True)
     policy.save(final_dir)
     progress.event(f"final model saved: {final_dir}")
@@ -1034,7 +784,6 @@ def train() -> dict[str, str]:
     return {
         "run_dir": str(run_dir),
         "metrics": str(metrics_path),
-        "eval_metrics": str(eval_metrics_path),
         "model_dir": str(final_dir),
     }
 
@@ -1044,7 +793,6 @@ def main() -> None:
     print("MASAC training finished.")
     print(f"run_dir: {outputs['run_dir']}")
     print(f"metrics: {outputs['metrics']}")
-    print(f"eval_metrics: {outputs['eval_metrics']}")
     print(f"model_dir: {outputs['model_dir']}")
 
 

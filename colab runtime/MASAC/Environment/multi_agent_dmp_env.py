@@ -42,12 +42,12 @@ class MultiAgentEnvConfig(EnvConfig):
     acceleration_clip_penalty_weight: float = 0.05
     randomize_start_goal: bool = True
     start_position_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = (
-        (0.5, 0.5, 0.4),
-        (1.3, 4.0, 2.0),
+        (0.0, -2.0, -0.8),
+        (0.8, 1.5, 0.8),
     )
     goal_position_bounds: tuple[tuple[float, float, float], tuple[float, float, float]] | None = (
-        (7.7, 0.5, 0.4),
-        (8.5, 4.0, 2.0),
+        (7.2, -2.0, -0.8),
+        (8.0, 1.5, 0.8),
     )
     min_start_distance: float = 0.6
     min_goal_distance: float = 0.0

@@ -914,105 +914,6 @@ class _CentralizedQBranch(nn.Module):
         return self.q_output(q_features)
 
 
-def _select_current_observation(
-    observation: torch.Tensor,
-    temporal_mask: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if observation.dim() == 2:
-        return observation
-    if observation.dim() != 3:
-        raise ValueError(
-            "observation must have shape [batch, obs_dim] or "
-            f"[batch, temporal_steps, obs_dim], got {tuple(observation.shape)}"
-        )
-
-    if temporal_mask is None:
-        return observation[:, -1]
-
-    if temporal_mask.shape != observation.shape[:2]:
-        raise ValueError(
-            f"temporal_mask must have shape {tuple(observation.shape[:2])}, "
-            f"got {tuple(temporal_mask.shape)}"
-        )
-    valid_steps = temporal_mask.to(device=observation.device, dtype=torch.bool)
-    sequence_lengths = valid_steps.sum(dim=1)
-    safe_lengths = sequence_lengths.clamp_min(1)
-    last_indices = safe_lengths - 1
-    batch_indices = torch.arange(observation.shape[0], device=observation.device)
-    current = observation[batch_indices, last_indices]
-    valid_sequences = sequence_lengths.gt(0).unsqueeze(-1).to(observation.dtype)
-    return current * valid_sequences
-
-
-class _CentralizedMLPQBranch(nn.Module):
-    """Lightweight centralized Q estimator over raw current observations/actions."""
-
-    def __init__(
-        self,
-        dim_info: Mapping[str, Sequence[int]],
-        *,
-        hidden_dim: int,
-        num_observation_layers: int,
-    ):
-        super().__init__()
-        if not dim_info:
-            raise ValueError("dim_info cannot be empty")
-        self.agent_ids = list(dim_info.keys())
-        self.dim_info = {
-            agent_id: (int(dims[0]), int(dims[1]))
-            for agent_id, dims in dim_info.items()
-        }
-        input_dim = sum(obs_dim + action_dim for obs_dim, action_dim in self.dim_info.values())
-        self.q_layers = _mlp(input_dim, hidden_dim, num_observation_layers)
-        self.q_output = nn.Linear(hidden_dim, 1)
-
-    def forward(
-        self,
-        observations: Sequence[torch.Tensor],
-        actions: Sequence[torch.Tensor],
-        agent_mask: torch.Tensor | None = None,
-        temporal_masks: Sequence[torch.Tensor | None] | None = None,
-    ) -> torch.Tensor:
-        if len(observations) != len(actions):
-            raise ValueError("observation and action agent counts must match")
-        if len(observations) != len(self.agent_ids):
-            raise ValueError("agent count must match dim_info")
-
-        if temporal_masks is None:
-            temporal_masks = [None] * len(observations)
-        elif len(temporal_masks) != len(observations):
-            raise ValueError("temporal mask agent count must match observations")
-
-        batch_size = actions[0].shape[0]
-        if agent_mask is not None:
-            if agent_mask.shape != (batch_size, len(observations)):
-                raise ValueError(
-                    f"agent_mask must have shape {(batch_size, len(observations))}, "
-                    f"got {tuple(agent_mask.shape)}"
-                )
-            agent_mask = agent_mask.to(device=actions[0].device, dtype=torch.float32)
-
-        features = []
-        for index, (observation, action, temporal_mask) in enumerate(
-            zip(observations, actions, temporal_masks)
-        ):
-            current_observation = _select_current_observation(
-                observation,
-                temporal_mask=temporal_mask,
-            )
-            current_observation = current_observation.reshape(batch_size, -1)
-            action = action.reshape(batch_size, -1)
-            if agent_mask is not None:
-                mask = agent_mask[:, index].unsqueeze(-1)
-                current_observation = current_observation * mask
-                action = action * mask
-            features.extend([current_observation, action])
-
-        q_features = torch.cat(features, dim=-1)
-        q_features = _forward_layers(self.q_layers, q_features)
-        return self.q_output(q_features)
-
-
 class MASACCritic(nn.Module):
     """Scalable centralized double-Q critic without graph message passing."""
 
@@ -1037,7 +938,6 @@ class MASACCritic(nn.Module):
         sensor_elevation_bins: int = 9,
         sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0),
         agent_pooling: str = "mean_max",
-        critic_encoder: str = "attention",
     ):
         super().__init__()
         if not dim_info:
@@ -1058,45 +958,33 @@ class MASACCritic(nn.Module):
         self.focal_agent_id = focal_agent_id or self.agent_ids[0]
         if self.focal_agent_id not in self.dim_info:
             raise KeyError(f"unknown focal agent id: {self.focal_agent_id}")
-        self.critic_encoder = str(critic_encoder)
-        if self.critic_encoder not in {"attention", "mlp"}:
-            raise ValueError("critic_encoder must be 'attention' or 'mlp'")
         focal_agent_index = self.agent_ids.index(self.focal_agent_id)
         obs_dim = next(iter(obs_dims))
         action_dim = next(iter(action_dims))
 
-        if self.critic_encoder == "attention":
-            branch_kwargs = dict(
-                obs_dim=obs_dim,
-                action_dim=action_dim,
-                focal_agent_index=focal_agent_index,
-                sensor_observation_dim=sensor_observation_dim,
-                extra_observation_dim=extra_observation_dim,
-                ally_feature_dim=ally_feature_dim,
-                sensor_output_dim=sensor_output_dim,
-                ally_output_dim=ally_output_dim,
-                sensor_hidden_dim=sensor_hidden_dim,
-                ally_hidden_dim=ally_hidden_dim,
-                hidden_dim=hidden_dim,
-                num_sensor_layers=num_sensor_layers,
-                num_ally_layers=num_ally_layers,
-                num_observation_layers=num_observation_layers,
-                ally_pooling=ally_pooling,
-                sensor_azimuth_bins=sensor_azimuth_bins,
-                sensor_elevation_bins=sensor_elevation_bins,
-                sensor_elevation_range_deg=sensor_elevation_range_deg,
-                agent_pooling=agent_pooling,
-            )
-            self.q1 = _CentralizedQBranch(**branch_kwargs)
-            self.q2 = _CentralizedQBranch(**branch_kwargs)
-        else:
-            branch_kwargs = dict(
-                dim_info=self.dim_info,
-                hidden_dim=hidden_dim,
-                num_observation_layers=num_observation_layers,
-            )
-            self.q1 = _CentralizedMLPQBranch(**branch_kwargs)
-            self.q2 = _CentralizedMLPQBranch(**branch_kwargs)
+        branch_kwargs = dict(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            focal_agent_index=focal_agent_index,
+            sensor_observation_dim=sensor_observation_dim,
+            extra_observation_dim=extra_observation_dim,
+            ally_feature_dim=ally_feature_dim,
+            sensor_output_dim=sensor_output_dim,
+            ally_output_dim=ally_output_dim,
+            sensor_hidden_dim=sensor_hidden_dim,
+            ally_hidden_dim=ally_hidden_dim,
+            hidden_dim=hidden_dim,
+            num_sensor_layers=num_sensor_layers,
+            num_ally_layers=num_ally_layers,
+            num_observation_layers=num_observation_layers,
+            ally_pooling=ally_pooling,
+            sensor_azimuth_bins=sensor_azimuth_bins,
+            sensor_elevation_bins=sensor_elevation_bins,
+            sensor_elevation_range_deg=sensor_elevation_range_deg,
+            agent_pooling=agent_pooling,
+        )
+        self.q1 = _CentralizedQBranch(**branch_kwargs)
+        self.q2 = _CentralizedQBranch(**branch_kwargs)
 
     def _ordered_inputs(
         self,
