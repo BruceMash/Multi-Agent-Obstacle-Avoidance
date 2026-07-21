@@ -76,6 +76,7 @@ class SuccessRateCurriculum:
         success_threshold: float = 0.8,
         success_window: int = 100,
         enabled: bool = True,
+        initial_stage_index: int = 0,
     ):
         self.stages = tuple(stages)
         if not self.stages:
@@ -87,7 +88,9 @@ class SuccessRateCurriculum:
             raise ValueError("success_threshold must be in [0, 1]")
         if self.success_window <= 0:
             raise ValueError("success_window must be positive")
-        self.stage_index = 0
+        self.stage_index = int(initial_stage_index)
+        if not 0 <= self.stage_index < len(self.stages):
+            raise ValueError("initial_stage_index is outside the curriculum stages")
         self.success_history: deque[float] = deque(maxlen=self.success_window)
 
     @property

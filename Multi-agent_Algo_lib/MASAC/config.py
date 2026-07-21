@@ -24,6 +24,7 @@ class MASACNetworkConfig:
     sensor_azimuth_bins: int = 24
     sensor_elevation_bins: int = 9
     sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0)
+    sensor_include_previous_scan: bool = True
     ally_pooling: str = "mean_max"
     agent_pooling: str = "mean_max"
     critic_encoder: str = "attention"
@@ -87,6 +88,7 @@ class MASACNetworkConfig:
         self.sensor_elevation_range_deg = tuple(
             float(value) for value in self.sensor_elevation_range_deg
         )
+        self.sensor_include_previous_scan = bool(self.sensor_include_previous_scan)
         if (
             len(self.sensor_elevation_range_deg) != 2
             or self.sensor_elevation_range_deg[0] >= self.sensor_elevation_range_deg[1]
@@ -156,6 +158,7 @@ class MASACNetworkConfig:
             "sensor_azimuth_bins": self.sensor_azimuth_bins,
             "sensor_elevation_bins": self.sensor_elevation_bins,
             "sensor_elevation_range_deg": self.sensor_elevation_range_deg,
+            "sensor_include_previous_scan": self.sensor_include_previous_scan,
             "ally_pooling": self.ally_pooling,
         }
 
@@ -208,8 +211,9 @@ class MASACExperimentConfig:
     time_step: float = 0.1
     sensing_radius: float = 5.0
     sensor_azimuth_bins: int = 16
-    sensor_elevation_bins: int = 9
+    sensor_elevation_bins: int = 16
     sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0)
+    sensor_include_previous_scan: bool = False
     sensor_goal_distance_clip: float | None = None
     max_steps: int = 200
     goal_tolerance: float = 0.3
@@ -324,6 +328,7 @@ class MASACExperimentConfig:
             "azimuth_bins": self.sensor_azimuth_bins,
             "elevation_bins": self.sensor_elevation_bins,
             "elevation_range_deg": self.sensor_elevation_range_deg,
+            "include_previous_scan": self.sensor_include_previous_scan,
         }
         if self.sensor_goal_distance_clip is not None:
             sensor_config["goal_distance_clip"] = self.sensor_goal_distance_clip

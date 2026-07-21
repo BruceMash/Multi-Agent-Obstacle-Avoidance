@@ -117,6 +117,7 @@ class ObservationEncoder(nn.Module):
         sensor_azimuth_bins: int = 24,
         sensor_elevation_bins: int = 9,
         sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0),
+        sensor_include_previous_scan: bool = True,
         use_temporal_rnn: bool = True,
     ):
         super().__init__()
@@ -124,7 +125,8 @@ class ObservationEncoder(nn.Module):
         self.output_dim = int(output_dim)
         self.hidden_dim = int(hidden_dim)
         self.ego_dim = 7
-        self.ray_measurement_dim = 4
+        self.sensor_include_previous_scan = bool(sensor_include_previous_scan)
+        self.ray_measurement_dim = 4 if self.sensor_include_previous_scan else 2
         self.sensor_azimuth_bins = int(sensor_azimuth_bins)
         self.sensor_elevation_bins = int(sensor_elevation_bins)
         self.sensor_elevation_range_deg = tuple(
@@ -147,7 +149,8 @@ class ObservationEncoder(nn.Module):
         )
         self.register_buffer("ray_encoding", ray_encoding, persistent=False)
 
-        expected_input_dim = self.ego_dim + 2 * self.n_rays
+        scan_count = 2 if self.sensor_include_previous_scan else 1
+        expected_input_dim = self.ego_dim + scan_count * self.n_rays
         if self.input_dim != expected_input_dim:
             raise ValueError(
                 f"sensor input_dim must be {expected_input_dim} for "
@@ -254,8 +257,8 @@ class ObservationEncoder(nn.Module):
             dict:
                 ego_features:     [B, T, 7]
                 current_scan:     [B, T, R]
-                previous_scan:    [B, T, R]
-                scan_delta:       [B, T, R]
+                previous_scan:    [B, T, R] or None
+                scan_delta:       [B, T, R] or None
                 hit_flag:         [B, T, R]
                 ray_measurements: [B, T, R, 4]
                 temporal_mask:    [B, T]
@@ -272,14 +275,15 @@ class ObservationEncoder(nn.Module):
         batch_size, temporal_steps, obs_dim = inputs.shape
 
         ego_dim = self.ego_dim
-        expected_dim = ego_dim + 2 * self.n_rays
+        scan_count = 2 if self.sensor_include_previous_scan else 1
+        expected_dim = ego_dim + scan_count * self.n_rays
 
         if obs_dim != expected_dim:
             raise ValueError(
                 f"expected obs_dim={expected_dim}, got {obs_dim}. "
                 "Observation layout should be "
                 "[velocity(3), goal_direction(3), goal_distance(1), "
-                "current_scan(n_rays), previous_scan(n_rays)]."
+                "current_scan(n_rays), optional previous_scan(n_rays)]."
             )
 
         if temporal_mask is None:
@@ -305,22 +309,20 @@ class ObservationEncoder(nn.Module):
         scan_end = scan_mid + self.n_rays
 
         current_scan = inputs[..., scan_start:scan_mid] # 当前扫描输入
-        previous_scan = inputs[..., scan_mid:scan_end]  # 值卡扫描输入
-
-        scan_delta = current_scan - previous_scan
+        previous_scan = None
+        scan_delta = None
+        if self.sensor_include_previous_scan:
+            previous_scan = inputs[..., scan_mid:scan_end]
+            scan_delta = current_scan - previous_scan
 
         # current_scan 已经被归一化到 [0, 1]，1.0 通常表示未命中或达到最大探测距离。
         hit_flag = (current_scan < 1.0).to(inputs.dtype)
 
-        ray_measurements = torch.stack(
-            [
-                current_scan,
-                previous_scan,
-                scan_delta,
-                hit_flag,
-            ],
-            dim=-1,
-        )
+        measurement_parts = [current_scan]
+        if self.sensor_include_previous_scan:
+            measurement_parts.extend([previous_scan, scan_delta])
+        measurement_parts.append(hit_flag)
+        ray_measurements = torch.stack(measurement_parts, dim=-1)
 
         return {
             "ego_features": ego_features,
@@ -505,6 +507,7 @@ class MASACObservationEncoder(nn.Module):
         sensor_azimuth_bins: int = 24,
         sensor_elevation_bins: int = 9,
         sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0),
+        sensor_include_previous_scan: bool = True,
     ):
         super().__init__()
         self.obs_dim = int(obs_dim)
@@ -553,6 +556,7 @@ class MASACObservationEncoder(nn.Module):
             sensor_azimuth_bins=sensor_azimuth_bins,
             sensor_elevation_bins=sensor_elevation_bins,
             sensor_elevation_range_deg=sensor_elevation_range_deg,
+            sensor_include_previous_scan=sensor_include_previous_scan,
         )
         self.ally_encoder = None
         if self.ally_feature_dim > 0:
@@ -685,6 +689,7 @@ class MASACActor(nn.Module):
         sensor_azimuth_bins: int = 24,
         sensor_elevation_bins: int = 9,
         sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0),
+        sensor_include_previous_scan: bool = True,
         log_std_min: float = -20.0,
         log_std_max: float = 2.0,
         action_low: Sequence[float] | None = None,
@@ -740,6 +745,7 @@ class MASACActor(nn.Module):
             sensor_azimuth_bins=sensor_azimuth_bins,
             sensor_elevation_bins=sensor_elevation_bins,
             sensor_elevation_range_deg=sensor_elevation_range_deg,
+            sensor_include_previous_scan=sensor_include_previous_scan,
         )
         self.policy_layers = _mlp(
             self.observation_encoder.output_dim,
@@ -833,6 +839,7 @@ class _CentralizedQBranch(nn.Module):
         sensor_azimuth_bins: int,
         sensor_elevation_bins: int,
         sensor_elevation_range_deg: tuple[float, float],
+        sensor_include_previous_scan: bool,
         agent_pooling: str,
     ):
         super().__init__()
@@ -872,6 +879,7 @@ class _CentralizedQBranch(nn.Module):
             sensor_azimuth_bins=sensor_azimuth_bins,
             sensor_elevation_bins=sensor_elevation_bins,
             sensor_elevation_range_deg=sensor_elevation_range_deg,
+            sensor_include_previous_scan=sensor_include_previous_scan,
             use_temporal_rnn=False,
         )
 
@@ -1239,6 +1247,7 @@ class MASACCritic(nn.Module):
         sensor_azimuth_bins: int = 24,
         sensor_elevation_bins: int = 9,
         sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0),
+        sensor_include_previous_scan: bool = True,
         agent_pooling: str = "mean_max",
         critic_encoder: str = "attention",
     ):
@@ -1288,6 +1297,7 @@ class MASACCritic(nn.Module):
                 sensor_azimuth_bins=sensor_azimuth_bins,
                 sensor_elevation_bins=sensor_elevation_bins,
                 sensor_elevation_range_deg=sensor_elevation_range_deg,
+                sensor_include_previous_scan=sensor_include_previous_scan,
                 agent_pooling=agent_pooling,
             )
             self.q1 = _CentralizedQBranch(**branch_kwargs)

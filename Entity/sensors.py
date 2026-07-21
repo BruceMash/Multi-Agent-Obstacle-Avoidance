@@ -24,8 +24,8 @@ class LocalObstacleSensor:
     1. 当前速度 3 维
     2. 目标方向单位向量 3 维
     3. 目标距离归一化标量 1 维
-    4. 当前帧雷达扫描 24 x 9
-    5. 上一帧雷达扫描 24 x 9
+    4. 当前帧雷达扫描
+    5. 可选的上一帧雷达扫描
     """
 
     def __init__(
@@ -35,10 +35,12 @@ class LocalObstacleSensor:
         elevation_bins=9,
         elevation_range_deg=(-80.0, 80.0),
         goal_distance_clip=None,
+        include_previous_scan=True,
     ):
         self.sensing_radius = float(sensing_radius)
         self.azimuth_bins = int(azimuth_bins)
         self.elevation_bins = int(elevation_bins)
+        self.include_previous_scan = bool(include_previous_scan)
         if self.sensing_radius <= 0.0:
             raise ValueError("sensing_radius must be positive")
         if self.azimuth_bins <= 0 or self.elevation_bins <= 0:
@@ -72,7 +74,8 @@ class LocalObstacleSensor:
 
     @property
     def observation_dim(self):
-        return 3 + 3 + 1 + 2 * self.n_rays
+        scan_count = 2 if self.include_previous_scan else 1
+        return 3 + 3 + 1 + scan_count * self.n_rays
 
     def reset(self):
         """
@@ -146,16 +149,15 @@ class LocalObstacleSensor:
         collision = bool(min_clearance <= 0.0)
         goal_direction, goal_distance_norm = self._build_goal_features(position, goal)
 
-        observation = np.concatenate(
-            [
-                velocity.astype(np.float32),
-                goal_direction.astype(np.float32),
-                goal_distance_norm.astype(np.float32),
-                current_scan.reshape(-1),
-                previous_scan.reshape(-1),
-            ],
-            axis=0,
-        ).astype(np.float32)
+        observation_parts = [
+            velocity.astype(np.float32),
+            goal_direction.astype(np.float32),
+            goal_distance_norm.astype(np.float32),
+            current_scan.reshape(-1),
+        ]
+        if self.include_previous_scan:
+            observation_parts.append(previous_scan.reshape(-1))
+        observation = np.concatenate(observation_parts, axis=0).astype(np.float32)
 
         self._previous_scan = current_scan.copy()
         return SensorPacket(

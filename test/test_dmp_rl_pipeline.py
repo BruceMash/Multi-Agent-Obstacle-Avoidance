@@ -71,6 +71,34 @@ class TestDMPRLPipeline(unittest.TestCase):
         self.assertLess(packet_second.min_clearance, packet_first.min_clearance)
         self.assertFalse(np.allclose(packet_second.current_scan, packet_first.current_scan))
 
+    def test_sensor_current_only_observation_keeps_internal_history(self):
+        sensor = LocalObstacleSensor(
+            sensing_radius=5.0,
+            azimuth_bins=16,
+            elevation_bins=16,
+            include_previous_scan=False,
+        )
+        sensor.reset()
+        packet_first = sensor.sense(
+            position=np.zeros(3),
+            velocity=np.zeros(3),
+            goal=np.array([6.0, 0.0, 0.0]),
+            static_obstacles=self.static_obstacles,
+        )
+        packet_second = sensor.sense(
+            position=np.array([0.1, 0.0, 0.0]),
+            velocity=np.zeros(3),
+            goal=np.array([6.0, 0.0, 0.0]),
+            static_obstacles=self.static_obstacles,
+        )
+
+        self.assertEqual(packet_first.current_scan.shape, (16, 16))
+        self.assertEqual(packet_first.previous_scan.shape, (16, 16))
+        self.assertEqual(sensor.n_rays, 256)
+        self.assertEqual(sensor.observation_dim, 263)
+        self.assertEqual(packet_first.observation.shape, (263,))
+        self.assertTrue(np.allclose(packet_second.previous_scan, packet_first.current_scan))
+
     def test_sphere_ray_intersection(self):
         obstacle = StaticSphereObstacle(center=[3.0, 0.0, 0.0], radius=0.5)
         distance = obstacle.ray_intersection(

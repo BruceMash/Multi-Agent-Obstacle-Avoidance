@@ -149,6 +149,7 @@ def build_network_config(
         sensor_azimuth_bins=int(sensor.azimuth_bins),
         sensor_elevation_bins=int(sensor.elevation_bins),
         sensor_elevation_range_deg=tuple(float(v) for v in sensor.elevation_range_deg),
+        sensor_include_previous_scan=bool(sensor.include_previous_scan),
         action_low=action_low,
         action_high=action_high,
         temporal_steps=int(args.temporal_steps),
@@ -621,10 +622,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=float(config.curriculum_wandering_strength),
     )
-    parser.add_argument(
+    scenario_group = parser.add_mutually_exclusive_group()
+    scenario_group.add_argument(
         "--disable-curriculum",
         action="store_true",
         default=not bool(config.curriculum_enabled),
+    )
+    scenario_group.add_argument(
+        "--final-stage-only",
+        action="store_true",
+        help="Train directly and exclusively on the final curriculum stage.",
     )
     parser.add_argument("--disable-tensorboard", action="store_true", default=bool(config.disable_tensorboard))
     parser.add_argument("--plain-progress", action="store_true", default=bool(config.plain_progress))
@@ -663,7 +670,7 @@ def train() -> dict[str, str]:
 
     experiment_config = replace(
         MASAC_EXPERIMENT_CONFIG,
-        curriculum_enabled=not bool(args.disable_curriculum),
+        curriculum_enabled=not bool(args.disable_curriculum or args.final_stage_only),
         curriculum_success_threshold=float(args.curriculum_success_threshold),
         curriculum_phase2_box_counts=tuple(args.phase2_box_counts),
         curriculum_phase2_sphere_counts=tuple(args.phase2_sphere_counts),
@@ -690,9 +697,14 @@ def train() -> dict[str, str]:
         curriculum_stages,
         success_threshold=float(args.curriculum_success_threshold),
         success_window=int(args.success_window),
-        enabled=not bool(args.disable_curriculum),
+        enabled=not bool(args.disable_curriculum or args.final_stage_only),
+        initial_stage_index=(len(curriculum_stages) - 1 if args.final_stage_only else 0),
     )
-    active_stage = curriculum.current_stage if curriculum.enabled else None
+    active_stage = (
+        curriculum.current_stage
+        if curriculum.enabled or bool(args.final_stage_only)
+        else None
+    )
     env = build_env(experiment_config, active_stage)
     if hasattr(env.action_space, "seed"):
         env.action_space.seed(args.seed)
@@ -960,7 +972,11 @@ def train() -> dict[str, str]:
                 experiment_config=experiment_config,
                 agent_ids=agent_ids,
                 eval_seeds=eval_seeds,
-                curriculum_stage=curriculum.current_stage if curriculum.enabled else None,
+                curriculum_stage=(
+                    curriculum.current_stage
+                    if curriculum.enabled or bool(args.final_stage_only)
+                    else None
+                ),
             )
             eval_row.update(
                 {

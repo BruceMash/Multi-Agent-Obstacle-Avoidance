@@ -21,6 +21,7 @@ for path in (PROJECT_ROOT, ALGO_ROOT):
 
 from MASAC.MASAC import MASAC
 from MASAC.config import MASAC_EXPERIMENT_CONFIG
+from MASAC.curriculum import build_curriculum_stages
 from train_masac_multi_agent_dmp import (
     agent_dict_to_matrix,
     build_critic_action_matrix,
@@ -426,6 +427,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", type=str, default=str(config.device))
     parser.add_argument("--report-interval", type=int, default=500)
+    parser.add_argument(
+        "--final-stage-only",
+        action="store_true",
+        help="Profile the final curriculum stage instead of the empty scene.",
+    )
     return parser.parse_args()
 
 
@@ -439,7 +445,15 @@ def run_profile() -> None:
         torch.cuda.manual_seed_all(args.seed)
 
     experiment_config = MASAC_EXPERIMENT_CONFIG
-    env = build_env(experiment_config)
+    profile_stage = None
+    if args.final_stage_only:
+        stages = build_curriculum_stages(
+            experiment_config.curriculum_phase2_box_counts,
+            experiment_config.curriculum_phase2_sphere_counts,
+            experiment_config.curriculum_phase3_dynamic_counts,
+        )
+        profile_stage = stages[-1]
+    env = build_env(experiment_config, profile_stage)
     if hasattr(env.action_space, "seed"):
         env.action_space.seed(args.seed)
 
@@ -469,6 +483,7 @@ def run_profile() -> None:
     print(f"updates_per_step: {int(args.updates_per_step)}")
     print(f"temporal_steps: {int(args.temporal_steps)}")
     print(f"critic_encoder: {args.critic_encoder}")
+    print(f"scenario_stage: {profile_stage.name if profile_stage else 'empty'}")
 
     obs_matrix, _ = env.reset(seed=args.seed)
     obs = matrix_to_agent_dict(obs_matrix, agent_ids)

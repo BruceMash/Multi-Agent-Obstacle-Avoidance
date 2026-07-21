@@ -59,6 +59,29 @@ class TestSuccessRateCurriculum(unittest.TestCase):
         self.assertEqual(curriculum.stage_index, 1)
         self.assertEqual(curriculum.window_count, 0)
 
+    def test_disabled_curriculum_can_stay_on_final_stage(self):
+        final_index = len(self.stages) - 1
+        curriculum = SuccessRateCurriculum(
+            self.stages,
+            success_threshold=0.8,
+            success_window=5,
+            enabled=False,
+            initial_stage_index=final_index,
+        )
+        results = [curriculum.record_episode(True) for _ in range(10)]
+
+        self.assertTrue(all(not result["advanced"] for result in results))
+        self.assertEqual(curriculum.stage_index, final_index)
+        self.assertEqual(curriculum.current_stage.name, "phase3_level3")
+
+    def test_rejects_invalid_initial_stage_index(self):
+        with self.assertRaises(ValueError):
+            SuccessRateCurriculum(
+                self.stages,
+                enabled=False,
+                initial_stage_index=len(self.stages),
+            )
+
 
 class TestCurriculumScenes(unittest.TestCase):
     def setUp(self):
@@ -103,6 +126,24 @@ class TestCurriculumScenes(unittest.TestCase):
                 obstacle.step(0.1)
                 self.assertTrue(np.all(obstacle.center >= lower + obstacle.effective_radius))
                 self.assertTrue(np.all(obstacle.center <= upper - obstacle.effective_radius))
+
+    def test_final_stage_has_full_obstacle_counts(self):
+        final_stage = self.stages[-1]
+        generator = CurriculumScenarioGenerator(self.config, final_stage)
+        static = generator.generate_static(starts=self.starts, goals=self.goals, seed=401)
+        dynamic = generator.generate_dynamic(
+            starts=self.starts,
+            goals=self.goals,
+            seed=402,
+            static_obstacles=static,
+        )
+
+        self.assertEqual(final_stage.name, "phase3_level3")
+        self.assertEqual(final_stage.ground_box_count, 3)
+        self.assertEqual(final_stage.aerial_sphere_count, 3)
+        self.assertEqual(final_stage.dynamic_sphere_count, 3)
+        self.assertEqual(len(static), 6)
+        self.assertEqual(len(dynamic), 3)
 
     def test_patterned_obstacle_rejects_unknown_mode(self):
         with self.assertRaises(ValueError):

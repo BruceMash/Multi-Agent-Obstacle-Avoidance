@@ -16,7 +16,7 @@ class CompactCentralizedCriticTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(7)
         self.agent_ids = ["agent_0", "agent_1", "agent_2"]
-        self.sensor_dim = 7 + 2 * (2 * 2)
+        self.sensor_dim = 7 + (2 * 2)
         self.extra_dim = 3
         self.ally_feature_dim = 7
         self.ally_count = 2
@@ -46,6 +46,7 @@ class CompactCentralizedCriticTest(unittest.TestCase):
             num_observation_layers=1,
             sensor_azimuth_bins=2,
             sensor_elevation_bins=2,
+            sensor_include_previous_scan=False,
             agent_pooling="mean_max",
             critic_encoder="attention",
         )
@@ -126,6 +127,7 @@ class CompactCentralizedCriticTest(unittest.TestCase):
             num_layers=1,
             sensor_azimuth_bins=2,
             sensor_elevation_bins=2,
+            sensor_include_previous_scan=False,
         )
         self.assertIsNotNone(encoder.rnn_layers)
 
