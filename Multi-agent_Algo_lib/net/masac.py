@@ -117,6 +117,7 @@ class ObservationEncoder(nn.Module):
         sensor_azimuth_bins: int = 24,
         sensor_elevation_bins: int = 9,
         sensor_elevation_range_deg: tuple[float, float] = (-80.0, 80.0),
+        use_temporal_rnn: bool = True,
     ):
         super().__init__()
         self.input_dim = int(input_dim)
@@ -129,6 +130,7 @@ class ObservationEncoder(nn.Module):
         self.sensor_elevation_range_deg = tuple(
             float(value) for value in sensor_elevation_range_deg
         )
+        self.use_temporal_rnn = bool(use_temporal_rnn)
         if self.sensor_azimuth_bins <= 0 or self.sensor_elevation_bins <= 0:
             raise ValueError("sensor ray bins must be positive")
         if (
@@ -160,12 +162,14 @@ class ObservationEncoder(nn.Module):
         )
         self.ego_layers = _mlp(self.ego_dim, hidden_dim, num_layers)
         self.attn_head = nn.MultiheadAttention(hidden_dim, 1, batch_first=True)
-        self.rnn_layers = nn.GRU(
-            hidden_dim,
-            hidden_dim,
-            rnn_layers,
-            batch_first=True,
-        )
+        self.rnn_layers = None
+        if self.use_temporal_rnn:
+            self.rnn_layers = nn.GRU(
+                hidden_dim,
+                hidden_dim,
+                rnn_layers,
+                batch_first=True,
+            )
         self.ray_position_projection = nn.Linear(7, hidden_dim)
         self.output_layer = nn.Sequential(
             nn.LayerNorm(2 * hidden_dim),
@@ -398,14 +402,17 @@ class ObservationEncoder(nn.Module):
         batch_indices = torch.arange(batch_size, device=x.device)
         current_context = frame_context[batch_indices, last_indices]
 
-        packed_context = nn.utils.rnn.pack_padded_sequence(
-            frame_context,
-            safe_lengths.detach().cpu(),
-            batch_first=True,
-            enforce_sorted=False,
-        )
-        _, temporal_hidden = self.rnn_layers(packed_context)
-        temporal_context = temporal_hidden[-1]
+        if self.rnn_layers is None:
+            temporal_context = current_context
+        else:
+            packed_context = nn.utils.rnn.pack_padded_sequence(
+                frame_context,
+                safe_lengths.detach().cpu(),
+                batch_first=True,
+                enforce_sorted=False,
+            )
+            _, temporal_hidden = self.rnn_layers(packed_context)
+            temporal_context = temporal_hidden[-1]
 
         valid_sequences = sequence_lengths.gt(0).unsqueeze(-1).to(frame_context.dtype)
         current_context = current_context * valid_sequences
@@ -803,7 +810,7 @@ class MASACActor(nn.Module):
 
 
 class _CentralizedQBranch(nn.Module):
-    """One independent centralized Q estimator."""
+    """Centralized Q estimator with focal LiDAR and compact neighbor context."""
 
     def __init__(
         self,
@@ -834,35 +841,89 @@ class _CentralizedQBranch(nn.Module):
         if agent_pooling not in AllyObservationEncoder.VALID_POOLING_METHODS:
             raise ValueError(f"unsupported agent pooling method: {agent_pooling}")
 
-        self.observation_encoder = MASACObservationEncoder(
-            obs_dim=obs_dim,
-            sensor_observation_dim=sensor_observation_dim,
-            extra_observation_dim=extra_observation_dim,
-            ally_feature_dim=ally_feature_dim,
-            sensor_output_dim=sensor_output_dim,
-            ally_output_dim=ally_output_dim,
-            sensor_hidden_dim=sensor_hidden_dim,
-            ally_hidden_dim=ally_hidden_dim,
-            hidden_dim=hidden_dim,
-            num_sensor_layers=num_sensor_layers,
-            num_ally_layers=num_ally_layers,
-            ally_pooling=ally_pooling,
+        if sensor_observation_dim is None:
+            raise ValueError("compact centralized critic requires sensor_observation_dim")
+        self.obs_dim = int(obs_dim)
+        self.action_dim = int(action_dim)
+        self.sensor_observation_dim = int(sensor_observation_dim)
+        self.extra_observation_dim = int(extra_observation_dim)
+        self.ally_feature_dim = int(ally_feature_dim)
+        self.fixed_observation_dim = (
+            self.sensor_observation_dim + self.extra_observation_dim
+        )
+        trailing_dim = self.obs_dim - self.fixed_observation_dim
+        if trailing_dim < 0:
+            raise ValueError("fixed critic observation blocks exceed obs_dim")
+        if self.ally_feature_dim <= 0 and trailing_dim != 0:
+            raise ValueError("critic observation has an unassigned trailing block")
+        if self.ally_feature_dim > 0 and trailing_dim % self.ally_feature_dim != 0:
+            raise ValueError("critic ally block is not divisible by ally_feature_dim")
+        self.ally_count = (
+            trailing_dim // self.ally_feature_dim
+            if self.ally_feature_dim > 0
+            else 0
+        )
+
+        self.focal_sensor_encoder = ObservationEncoder(
+            self.sensor_observation_dim,
+            sensor_output_dim,
+            hidden_dim=sensor_hidden_dim,
+            num_layers=num_sensor_layers,
             sensor_azimuth_bins=sensor_azimuth_bins,
             sensor_elevation_bins=sensor_elevation_bins,
             sensor_elevation_range_deg=sensor_elevation_range_deg,
+            use_temporal_rnn=False,
         )
-        self.state_action_layers = _mlp(
-            self.observation_encoder.output_dim + action_dim,
+
+        self.relation_encoder = None
+        relation_output_dim = 0
+        if self.ally_feature_dim > 0:
+            self.relation_encoder = AllyObservationEncoder(
+                self.ally_feature_dim,
+                ally_output_dim,
+                hidden_dim=ally_hidden_dim,
+                num_layers=num_ally_layers,
+                pooling_method=ally_pooling,
+            )
+            relation_output_dim = int(ally_output_dim)
+
+        # Neighbor tokens intentionally exclude LiDAR, duplicated ally blocks,
+        # and constant DMP gains. They retain ego motion/goal, phase, and action.
+        compact_ego_dim = 7
+        compact_phase_dim = 1 if self.extra_observation_dim > 0 else 0
+        self.neighbor_token_dim = compact_ego_dim + compact_phase_dim + self.action_dim
+        self.neighbor_layers = _mlp(
+            self.neighbor_token_dim,
             hidden_dim,
             num_observation_layers,
         )
+        own_input_dim = int(sensor_output_dim) + compact_phase_dim + self.action_dim
+        self.own_layers = _mlp(own_input_dim, hidden_dim, num_observation_layers)
         pooled_dim = hidden_dim * (2 if agent_pooling == "mean_max" else 1)
         self.q_layers = _mlp(
-            hidden_dim + pooled_dim,
+            hidden_dim + pooled_dim + relation_output_dim,
             hidden_dim,
             num_observation_layers,
         )
         self.q_output = nn.Linear(hidden_dim, 1)
+
+    def _current_blocks(
+        self,
+        observation: torch.Tensor,
+        temporal_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        current = _select_current_observation(observation, temporal_mask)
+        if current.shape[-1] != self.obs_dim:
+            raise ValueError(
+                f"expected critic obs_dim={self.obs_dim}, got {current.shape[-1]}"
+            )
+        sensor_end = self.sensor_observation_dim
+        extra_end = sensor_end + self.extra_observation_dim
+        return (
+            current[..., :sensor_end],
+            current[..., sensor_end:extra_end],
+            current[..., extra_end:],
+        )
 
     def forward(
         self,
@@ -881,22 +942,59 @@ class _CentralizedQBranch(nn.Module):
         elif len(temporal_masks) != len(observations):
             raise ValueError("temporal mask agent count must match observations")
 
-        encoded_observations = [
-            self.observation_encoder(observation, temporal_mask=temporal_mask)
+        current_blocks = [
+            self._current_blocks(observation, temporal_mask)
             for observation, temporal_mask in zip(observations, temporal_masks)
         ]
-        local_features = torch.stack(encoded_observations, dim=1)
-        joint_actions = torch.stack(list(actions), dim=1)
-        tokens = torch.cat([local_features, joint_actions], dim=-1)
-        tokens = _forward_layers(self.state_action_layers, tokens)
-
-        batch_size, agent_count, _ = tokens.shape
+        batch_size = actions[0].shape[0]
+        agent_count = len(observations)
         if not 0 <= self.focal_agent_index < agent_count:
             raise ValueError("focal agent index is outside the current agent set")
 
+        focal_sensor, focal_extra, focal_relations = current_blocks[
+            self.focal_agent_index
+        ]
+        focal_sensor_features = self.focal_sensor_encoder(focal_sensor)
+        focal_parts = [focal_sensor_features]
+        if self.extra_observation_dim > 0:
+            focal_parts.append(focal_extra[..., :1])
+        focal_parts.append(actions[self.focal_agent_index])
+        own_token = _forward_layers(self.own_layers, torch.cat(focal_parts, dim=-1))
+
+        relation_context = None
+        if self.relation_encoder is not None:
+            relation_features = focal_relations.reshape(
+                batch_size,
+                self.ally_count,
+                self.ally_feature_dim,
+            )
+            relation_context = self.relation_encoder(relation_features)
+
+        neighbor_tokens = []
+        neighbor_indices = []
+        for index, ((sensor_obs, extra_obs, _), action) in enumerate(
+            zip(current_blocks, actions)
+        ):
+            if index == self.focal_agent_index:
+                continue
+            token_parts = [sensor_obs[..., :7]]
+            if self.extra_observation_dim > 0:
+                token_parts.append(extra_obs[..., :1])
+            token_parts.append(action)
+            neighbor_tokens.append(torch.cat(token_parts, dim=-1))
+            neighbor_indices.append(index)
+
+        if neighbor_tokens:
+            stacked_neighbors = torch.stack(neighbor_tokens, dim=1)
+            stacked_neighbors = _forward_layers(self.neighbor_layers, stacked_neighbors)
+        else:
+            stacked_neighbors = own_token.new_zeros((batch_size, 0, own_token.shape[-1]))
+
         if agent_mask is None:
-            other_mask = torch.ones(
-                (batch_size, agent_count), dtype=torch.bool, device=tokens.device
+            neighbor_mask = torch.ones(
+                (batch_size, len(neighbor_indices)),
+                dtype=torch.bool,
+                device=own_token.device,
             )
         else:
             if agent_mask.shape != (batch_size, agent_count):
@@ -904,12 +1002,18 @@ class _CentralizedQBranch(nn.Module):
                     f"agent_mask must have shape {(batch_size, agent_count)}, "
                     f"got {tuple(agent_mask.shape)}"
                 )
-            other_mask = agent_mask.to(device=tokens.device, dtype=torch.bool).clone()
-        other_mask[:, self.focal_agent_index] = False
+            full_mask = agent_mask.to(device=own_token.device, dtype=torch.bool)
+            neighbor_mask = full_mask[:, neighbor_indices]
 
-        own_token = tokens[:, self.focal_agent_index]
-        other_context, _ = _masked_pool(tokens, other_mask, self.agent_pooling)
-        q_features = torch.cat([own_token, other_context], dim=-1)
+        other_context, _ = _masked_pool(
+            stacked_neighbors,
+            neighbor_mask,
+            self.agent_pooling,
+        )
+        q_parts = [own_token, other_context]
+        if relation_context is not None:
+            q_parts.append(relation_context)
+        q_features = torch.cat(q_parts, dim=-1)
         q_features = _forward_layers(self.q_layers, q_features)
         return self.q_output(q_features)
 
