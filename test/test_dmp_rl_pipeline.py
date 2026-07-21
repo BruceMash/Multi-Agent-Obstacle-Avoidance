@@ -5,7 +5,12 @@ import numpy as np
 from Controller.dmp_rl import DMPConfig, HeuristicDMPPolicy, SecondOrderDMPController
 from Entity.dynamic_obstacles import MovingSphereObstacle
 from Entity.sensors import LocalObstacleSensor
-from Entity.static_obstacles import AxisAlignedBoxObstacle, StaticSphereObstacle
+from Entity.static_obstacles import (
+    AxisAlignedBoxObstacle,
+    StaticCylinderObstacle,
+    StaticSphereObstacle,
+    WorkspaceBoundaryPlaneObstacle,
+)
 from Environment.single_agent_dmp_env import SingleAgentDMPEnv
 
 
@@ -98,6 +103,112 @@ class TestDMPRLPipeline(unittest.TestCase):
         self.assertEqual(sensor.observation_dim, 263)
         self.assertEqual(packet_first.observation.shape, (263,))
         self.assertTrue(np.allclose(packet_second.previous_scan, packet_first.current_scan))
+
+    def test_broad_phase_preserves_exact_scan_values(self):
+        lower = np.array([-1.0, -2.0, -1.5])
+        upper = np.array([7.0, 2.0, 1.5])
+        boundaries = [
+            WorkspaceBoundaryPlaneObstacle(axis, bound, lower, upper, is_lower)
+            for axis in range(3)
+            for is_lower, bound in ((True, lower[axis]), (False, upper[axis]))
+        ]
+        obstacles = [
+            StaticSphereObstacle(center=[2.2, 0.4, 0.1], radius=0.45, safety_margin=0.1),
+            AxisAlignedBoxObstacle(
+                center=[4.0, -0.5, 0.0],
+                half_extents=[0.5, 0.35, 0.4],
+                safety_margin=0.05,
+            ),
+            StaticCylinderObstacle(
+                center=[5.2, 0.8, 0.0],
+                radius=0.35,
+                half_height=0.7,
+                safety_margin=0.05,
+            ),
+            MovingSphereObstacle(
+                center=[3.2, -0.8, 0.4],
+                radius=0.3,
+                velocity=[0.0, 0.2, 0.0],
+                safety_margin=0.05,
+            ),
+            *boundaries,
+        ]
+        sensor_kwargs = dict(
+            sensing_radius=5.0,
+            azimuth_bins=16,
+            elevation_bins=16,
+            include_previous_scan=False,
+        )
+        exact_sensor = LocalObstacleSensor(**sensor_kwargs, broad_phase_enabled=False)
+        broad_sensor = LocalObstacleSensor(**sensor_kwargs, broad_phase_enabled=True)
+
+        for position in (
+            np.array([0.0, 0.0, 0.0]),
+            np.array([1.1, -0.4, 0.3]),
+            np.array([3.0, 0.2, -0.2]),
+            np.array([-1.2, 0.0, 0.0]),
+        ):
+            exact_packet = exact_sensor.sense(
+                position=position,
+                velocity=np.zeros(3),
+                goal=np.array([6.0, 0.0, 0.0]),
+                static_obstacles=obstacles,
+            )
+            broad_packet = broad_sensor.sense(
+                position=position,
+                velocity=np.zeros(3),
+                goal=np.array([6.0, 0.0, 0.0]),
+                static_obstacles=obstacles,
+            )
+            self.assertTrue(np.array_equal(broad_packet.current_scan, exact_packet.current_scan))
+            self.assertTrue(np.array_equal(broad_packet.observation, exact_packet.observation))
+
+    def test_broad_phase_reduces_exact_intersection_calls(self):
+        class CountingSphere(StaticSphereObstacle):
+            def __init__(self):
+                super().__init__(center=[3.0, 0.0, 0.0], radius=0.8)
+                self.calls = 0
+
+            def ray_intersection(self, origin, direction, max_distance):
+                self.calls += 1
+                return super().ray_intersection(origin, direction, max_distance)
+
+        obstacle = CountingSphere()
+        sensor = LocalObstacleSensor(
+            sensing_radius=5.0,
+            azimuth_bins=16,
+            elevation_bins=16,
+            broad_phase_enabled=True,
+        )
+        sensor.sense(
+            position=np.zeros(3),
+            velocity=np.zeros(3),
+            goal=np.array([6.0, 0.0, 0.0]),
+            static_obstacles=[obstacle],
+        )
+
+        self.assertGreater(obstacle.calls, 0)
+        self.assertLess(obstacle.calls, sensor.n_rays)
+
+    def test_broad_phase_falls_back_for_unknown_obstacle_type(self):
+        class UnknownObstacle:
+            def __init__(self):
+                self.calls = 0
+
+            def ray_intersection(self, origin, direction, max_distance):
+                self.calls += 1
+                return None
+
+        obstacle = UnknownObstacle()
+        sensor = LocalObstacleSensor(
+            sensing_radius=5.0,
+            azimuth_bins=16,
+            elevation_bins=16,
+            broad_phase_enabled=True,
+        )
+        sensor._scan_obstacles(np.zeros(3), [obstacle])
+
+        self.assertEqual(obstacle.calls, sensor.n_rays)
 
     def test_sphere_ray_intersection(self):
         obstacle = StaticSphereObstacle(center=[3.0, 0.0, 0.0], radius=0.5)

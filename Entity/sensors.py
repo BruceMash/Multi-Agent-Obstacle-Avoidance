@@ -2,6 +2,14 @@
 
 import numpy as np
 
+from Entity.dynamic_obstacles import MovingSphereObstacle
+from Entity.static_obstacles import (
+    AxisAlignedBoxObstacle,
+    StaticCylinderObstacle,
+    StaticSphereObstacle,
+    WorkspaceBoundaryPlaneObstacle,
+)
+
 
 @dataclass
 class SensorPacket:
@@ -36,11 +44,13 @@ class LocalObstacleSensor:
         elevation_range_deg=(-80.0, 80.0),
         goal_distance_clip=None,
         include_previous_scan=True,
+        broad_phase_enabled=True,
     ):
         self.sensing_radius = float(sensing_radius)
         self.azimuth_bins = int(azimuth_bins)
         self.elevation_bins = int(elevation_bins)
         self.include_previous_scan = bool(include_previous_scan)
+        self.broad_phase_enabled = bool(broad_phase_enabled)
         if self.sensing_radius <= 0.0:
             raise ValueError("sensing_radius must be positive")
         if self.azimuth_bins <= 0 or self.elevation_bins <= 0:
@@ -98,16 +108,126 @@ class LocalObstacleSensor:
                 )
         return directions
 
+    @staticmethod
+    def _obstacle_aabb(obstacle):
+        """Return a conservative AABB, or None for an unsupported obstacle."""
+        if isinstance(obstacle, WorkspaceBoundaryPlaneObstacle):
+            lower = np.asarray(obstacle.lower_bounds, dtype=float).copy()
+            upper = np.asarray(obstacle.upper_bounds, dtype=float).copy()
+            lower[int(obstacle.axis)] = float(obstacle.bound)
+            upper[int(obstacle.axis)] = float(obstacle.bound)
+            return lower, upper
+
+        if isinstance(obstacle, AxisAlignedBoxObstacle):
+            center = np.asarray(obstacle.center, dtype=float)
+            half_extents = np.asarray(obstacle.expanded_half_extents, dtype=float)
+            return center - half_extents, center + half_extents
+
+        if isinstance(obstacle, StaticCylinderObstacle):
+            center = np.asarray(obstacle.center, dtype=float)
+            half_extents = np.array(
+                [
+                    float(obstacle.expanded_radius),
+                    float(obstacle.expanded_radius),
+                    float(obstacle.expanded_half_height),
+                ],
+                dtype=float,
+            )
+            return center - half_extents, center + half_extents
+
+        if isinstance(obstacle, (StaticSphereObstacle, MovingSphereObstacle)):
+            center = np.asarray(obstacle.center, dtype=float)
+            radius = float(obstacle.effective_radius)
+            return center - radius, center + radius
+
+        return None
+
+    def _ray_aabb_candidates(self, position, directions, lower, upper):
+        """Conservatively select rays that can reach an AABB within sensing range."""
+        position = np.asarray(position, dtype=float)
+        directions = np.asarray(directions, dtype=float)
+        lower = np.asarray(lower, dtype=float)
+        upper = np.asarray(upper, dtype=float)
+
+        scale = max(
+            1.0,
+            self.sensing_radius,
+            float(np.max(np.abs(position))),
+            float(np.max(np.abs(lower))),
+            float(np.max(np.abs(upper))),
+        )
+        tolerance = 1e-7 * scale
+        padded_lower = lower - tolerance
+        padded_upper = upper + tolerance
+
+        ray_count = directions.shape[0]
+        t_near = np.full(ray_count, -np.inf, dtype=float)
+        t_far = np.full(ray_count, np.inf, dtype=float)
+        candidates = np.ones(ray_count, dtype=bool)
+
+        for axis in range(3):
+            axis_direction = directions[:, axis]
+            parallel = np.abs(axis_direction) < 1e-12
+            outside = np.logical_or(
+                position[axis] < padded_lower[axis],
+                position[axis] > padded_upper[axis],
+            )
+            if outside:
+                candidates[parallel] = False
+
+            non_parallel = np.logical_not(parallel)
+            if not np.any(non_parallel):
+                continue
+            t1 = (padded_lower[axis] - position[axis]) / axis_direction[non_parallel]
+            t2 = (padded_upper[axis] - position[axis]) / axis_direction[non_parallel]
+            near = np.minimum(t1, t2)
+            far = np.maximum(t1, t2)
+            t_near[non_parallel] = np.maximum(t_near[non_parallel], near)
+            t_far[non_parallel] = np.minimum(t_far[non_parallel], far)
+
+        candidates &= t_near <= t_far + tolerance
+        candidates &= t_far >= -tolerance
+        candidates &= np.maximum(t_near, 0.0) <= self.sensing_radius + tolerance
+        return candidates
+
+    def _build_candidate_masks(self, position, obstacles):
+        directions = self.ray_directions.reshape(-1, 3)
+        masks = []
+        for obstacle in obstacles:
+            bounds = self._obstacle_aabb(obstacle)
+            if bounds is None:
+                masks.append(np.ones(self.n_rays, dtype=bool))
+            elif obstacle.contains(position):
+                masks.append(np.ones(self.n_rays, dtype=bool))
+            else:
+                masks.append(
+                    self._ray_aabb_candidates(
+                        position,
+                        directions,
+                        bounds[0],
+                        bounds[1],
+                    )
+                )
+        if not masks:
+            return np.zeros((0, self.n_rays), dtype=bool)
+        return np.stack(masks, axis=0)
+
     def _scan_obstacles(self, position, obstacles):
         """
         对每一束射线求最近交点距离；若无交点则返回感知半径。
         """
         distances = np.full(self.scan_shape, self.sensing_radius, dtype=float)
+        candidate_masks = None
+        if self.broad_phase_enabled:
+            candidate_masks = self._build_candidate_masks(position, obstacles)
         for azimuth_index in range(self.azimuth_bins):
             for elevation_index in range(self.elevation_bins):
                 direction = self.ray_directions[azimuth_index, elevation_index]
                 nearest_distance = self.sensing_radius
-                for obstacle in obstacles:
+                ray_index = azimuth_index * self.elevation_bins + elevation_index
+                for obstacle_index, obstacle in enumerate(obstacles):
+                    if candidate_masks is not None and not candidate_masks[obstacle_index, ray_index]:
+                        continue
                     hit_distance = obstacle.ray_intersection(position, direction, self.sensing_radius)
                     if hit_distance is not None and hit_distance < nearest_distance:
                         nearest_distance = hit_distance
