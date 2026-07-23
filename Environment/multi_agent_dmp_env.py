@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -35,6 +36,20 @@ class MultiAgentEnvConfig(EnvConfig):
     inter_agent_collision_penalty: float = 20.0
     inter_agent_potential_weight: float = 1.0
     inter_agent_influence_distance: float = 1.2
+    inter_agent_potential_penalty_max: float = 20.0
+    individual_success_bonus: float = 50.0
+    team_success_bonus: float = 150.0
+    team_collision_penalty: float = 40.0
+    local_obstacle_collision_penalty: float = 40.0
+    local_boundary_collision_penalty: float = 40.0
+    local_inter_agent_collision_penalty: float = 20.0
+    team_timeout_penalty: float = 50.0
+    stagnation_window: int = 20
+    stagnation_progress_threshold: float = 0.08
+    stagnation_patience: int = 5
+    stagnation_penalty_start: float = 0.5
+    stagnation_penalty_growth: float = 0.05
+    stagnation_penalty_max: float = 1.5
     # None means observing all other agents; a non-negative integer limits the
     # number of nearest allies kept in the explicit ally observation block.
     nearest_agent_observation_count: int | None = None
@@ -53,10 +68,10 @@ class MultiAgentEnvConfig(EnvConfig):
     min_goal_distance: float = 0.0
     min_start_goal_distance: float = 6.0
     start_goal_max_attempts: int = 1000
-    near_goal_bonus_radius_1: float = 1.0
-    near_goal_bonus_1: float = 0.2
-    near_goal_bonus_radius_2: float = 0.6
-    near_goal_bonus_2: float = 0.6
+    near_goal_bonus_radius_1: float = 0.0
+    near_goal_bonus_1: float = 0.0
+    near_goal_bonus_radius_2: float = 0.0
+    near_goal_bonus_2: float = 0.0
 
     def __post_init__(self) -> None:    # 初始化场景元素的初始位置
         self.num_agents = int(self.num_agents)
@@ -68,6 +83,20 @@ class MultiAgentEnvConfig(EnvConfig):
         self.inter_agent_collision_penalty = float(self.inter_agent_collision_penalty)
         self.inter_agent_potential_weight = float(self.inter_agent_potential_weight)
         self.inter_agent_influence_distance = float(self.inter_agent_influence_distance)
+        self.inter_agent_potential_penalty_max = float(self.inter_agent_potential_penalty_max)
+        self.individual_success_bonus = float(self.individual_success_bonus)
+        self.team_success_bonus = float(self.team_success_bonus)
+        self.team_collision_penalty = float(self.team_collision_penalty)
+        self.local_obstacle_collision_penalty = float(self.local_obstacle_collision_penalty)
+        self.local_boundary_collision_penalty = float(self.local_boundary_collision_penalty)
+        self.local_inter_agent_collision_penalty = float(self.local_inter_agent_collision_penalty)
+        self.team_timeout_penalty = float(self.team_timeout_penalty)
+        self.stagnation_window = int(self.stagnation_window)
+        self.stagnation_progress_threshold = float(self.stagnation_progress_threshold)
+        self.stagnation_patience = int(self.stagnation_patience)
+        self.stagnation_penalty_start = float(self.stagnation_penalty_start)
+        self.stagnation_penalty_growth = float(self.stagnation_penalty_growth)
+        self.stagnation_penalty_max = float(self.stagnation_penalty_max)
         if self.nearest_agent_observation_count is not None:
             self.nearest_agent_observation_count = int(self.nearest_agent_observation_count)
         self.acceleration_penalty_weight = float(self.acceleration_penalty_weight)
@@ -87,6 +116,27 @@ class MultiAgentEnvConfig(EnvConfig):
             raise ValueError("inter_agent_safe_distance must be positive")
         if self.inter_agent_influence_distance <= 0.0:
             raise ValueError("inter_agent_influence_distance must be positive")
+        if self.inter_agent_potential_penalty_max < 0.0:
+            raise ValueError("inter_agent_potential_penalty_max must be non-negative")
+        reward_parameters = (
+            self.individual_success_bonus,
+            self.team_success_bonus,
+            self.team_collision_penalty,
+            self.local_obstacle_collision_penalty,
+            self.local_boundary_collision_penalty,
+            self.local_inter_agent_collision_penalty,
+            self.team_timeout_penalty,
+            self.stagnation_progress_threshold,
+            self.stagnation_penalty_start,
+            self.stagnation_penalty_growth,
+            self.stagnation_penalty_max,
+        )
+        if any(value < 0.0 for value in reward_parameters):
+            raise ValueError("reward and stagnation parameters must be non-negative")
+        if self.stagnation_window <= 0 or self.stagnation_patience <= 0:
+            raise ValueError("stagnation window and patience must be positive")
+        if self.stagnation_penalty_start > self.stagnation_penalty_max:
+            raise ValueError("stagnation_penalty_start cannot exceed stagnation_penalty_max")
         if (
             self.nearest_agent_observation_count is not None
             and self.nearest_agent_observation_count < 0
@@ -281,6 +331,12 @@ class MultiAgentDMPEnv(gym.Env):
         self.latest_observation = None
         self.latest_collision_info = None
         self.success_rewarded_mask = np.zeros(self.num_agents, dtype=bool)
+        self.stagnation_distance_histories = [
+            deque(maxlen=int(self.env_config.stagnation_window) + 1)
+            for _ in range(self.num_agents)
+        ]
+        self.stagnation_window_progress = np.zeros(self.num_agents, dtype=np.float32)
+        self.stagnation_counters = np.zeros(self.num_agents, dtype=np.int32)
 
         self.action_space = self._build_action_space()
         self.observation_space = self._build_observation_space()
@@ -299,7 +355,7 @@ class MultiAgentDMPEnv(gym.Env):
 
     @property
     def extra_observation_dim(self) -> int:
-        return 3
+        return 5
 
     @property
     def single_pair_observation_dim(self) -> int:
@@ -366,8 +422,9 @@ class MultiAgentDMPEnv(gym.Env):
         goal_direction_high = np.full(self.state_dim, 1.0, dtype=np.float32)
         goal_distance_low = np.zeros(1, dtype=np.float32)
         goal_distance_high = np.ones(1, dtype=np.float32)
-        scan_low = np.zeros(2 * self.sensors[0].n_rays, dtype=np.float32)
-        scan_high = np.ones(2 * self.sensors[0].n_rays, dtype=np.float32)
+        scan_frame_count = 2 if self.sensors[0].include_previous_scan else 1
+        scan_low = np.zeros(scan_frame_count * self.sensors[0].n_rays, dtype=np.float32)
+        scan_high = np.ones(scan_frame_count * self.sensors[0].n_rays, dtype=np.float32)
 
         sensor_low = np.concatenate([velocity_low, goal_direction_low, goal_distance_low, scan_low], axis=0)
         sensor_high = np.concatenate([velocity_high, goal_direction_high, goal_distance_high, scan_high], axis=0)
@@ -393,8 +450,14 @@ class MultiAgentDMPEnv(gym.Env):
             ),
             self.nearest_agent_observation_count,
         )
-        extra_low = np.array([0.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
-        extra_high = np.array([1.0, self.dmp_config.K_alpha, self.dmp_config.K_beta], dtype=np.float32)
+        extra_low = np.array(
+            [0.0, self.dmp_config.K_alpha, self.dmp_config.K_beta, -1.0, 0.0],
+            dtype=np.float32,
+        )
+        extra_high = np.array(
+            [1.0, self.dmp_config.K_alpha, self.dmp_config.K_beta, 1.0, 1.0],
+            dtype=np.float32,
+        )
 
         # 封装单个智能体的观测空间边界
         single_low = np.concatenate([sensor_low, extra_low, inter_agent_low], axis=0)
@@ -653,7 +716,40 @@ class MultiAgentDMPEnv(gym.Env):
 
     def _compose_extra_observation(self, agent_index: int) -> np.ndarray:   # 组合额外观测
         dmp = self.dmps[agent_index]
-        return np.array([dmp.phase, dmp.config.K_alpha, dmp.config.K_beta], dtype=np.float32)
+        progress_scale = max(float(self.env_config.stagnation_progress_threshold), 1e-8)
+        normalized_progress = np.clip(
+            float(self.stagnation_window_progress[agent_index]) / progress_scale,
+            -1.0,
+            1.0,
+        )
+        growth = float(self.env_config.stagnation_penalty_growth)
+        if growth > 0.0:
+            ramp_steps = int(np.ceil(
+                max(
+                    float(self.env_config.stagnation_penalty_max)
+                    - float(self.env_config.stagnation_penalty_start),
+                    0.0,
+                )
+                / growth
+            ))
+        else:
+            ramp_steps = 0
+        counter_scale = max(int(self.env_config.stagnation_patience) + ramp_steps, 1)
+        normalized_counter = np.clip(
+            float(self.stagnation_counters[agent_index]) / float(counter_scale),
+            0.0,
+            1.0,
+        )
+        return np.array(
+            [
+                dmp.phase,
+                dmp.config.K_alpha,
+                dmp.config.K_beta,
+                normalized_progress,
+                normalized_counter,
+            ],
+            dtype=np.float32,
+        )
 
     def _compose_inter_agent_observation(self, agent_index: int) -> np.ndarray: # 组合智能体之间的观测
         nearest_count = self.nearest_agent_observation_count
@@ -990,6 +1086,49 @@ class MultiAgentDMPEnv(gym.Env):
                 penalties[i] += penalty
                 penalties[j] += penalty
 
+        return np.minimum(
+            penalties,
+            float(self.env_config.inter_agent_potential_penalty_max),
+        ).astype(np.float32)
+
+    def _compute_stagnation_penalties(
+        self,
+        current_distances: np.ndarray,
+        success_mask: np.ndarray,
+    ) -> np.ndarray:
+        penalties = np.zeros(self.num_agents, dtype=np.float32)
+        threshold = float(self.env_config.stagnation_progress_threshold)
+        patience = int(self.env_config.stagnation_patience)
+
+        for agent_index, distance in enumerate(current_distances):
+            history = self.stagnation_distance_histories[agent_index]
+            history.append(float(distance))
+            if len(history) == history.maxlen:
+                self.stagnation_window_progress[agent_index] = float(history[0] - history[-1])
+            else:
+                self.stagnation_window_progress[agent_index] = 0.0
+
+            inactive = bool(self.success_rewarded_mask[agent_index] or success_mask[agent_index])
+            if inactive or len(history) < history.maxlen:
+                self.stagnation_counters[agent_index] = 0
+                continue
+
+            if float(self.stagnation_window_progress[agent_index]) < threshold:
+                self.stagnation_counters[agent_index] += 1
+            else:
+                self.stagnation_counters[agent_index] = 0
+
+            counter = int(self.stagnation_counters[agent_index])
+            if counter < patience:
+                continue
+            penalty = float(self.env_config.stagnation_penalty_start) + float(
+                self.env_config.stagnation_penalty_growth
+            ) * float(counter - patience)
+            penalties[agent_index] = min(
+                penalty,
+                float(self.env_config.stagnation_penalty_max),
+            )
+
         return penalties
 
     def _compute_near_goal_bonuses(self, distances_to_goals: np.ndarray) -> np.ndarray:
@@ -1016,7 +1155,7 @@ class MultiAgentDMPEnv(gym.Env):
         *,
         success_mask,
         new_success_mask,
-        success_reward_bonus,
+        successful_episode,
         collision_info,
         truncated,
         distances_to_goals,
@@ -1028,14 +1167,17 @@ class MultiAgentDMPEnv(gym.Env):
         guided_action,
         action_guidance_weights,
         step_rewards,
-        near_goal_bonuses,
         obstacle_potential_penalties,
         boundary_potential_penalties,
         inter_agent_potential_penalties,
+        stagnation_penalties,
         acceleration_penalties,
         acceleration_clip_penalties,
-        collision_penalties,
-        timeout_penalties,
+        individual_success_bonuses, 
+        team_success_bonuses,
+        team_collision_penalties,
+        local_collision_penalties,
+        team_timeout_penalties,
     ) -> dict:
         min_clearances = np.array(
             [
@@ -1059,11 +1201,11 @@ class MultiAgentDMPEnv(gym.Env):
             dtype=np.float32,
         )
         return {
-            "success": bool(np.all(success_mask)),
+            "success": bool(successful_episode),
             "success_mask": success_mask.astype(bool).copy(),
             "new_success_mask": new_success_mask.astype(bool).copy(),
             "success_rewarded_mask": self.success_rewarded_mask.astype(bool).copy(),
-            "per_agent_success_bonus": float(success_reward_bonus),
+            "per_agent_success_bonus": float(self.env_config.individual_success_bonus),
             "collision": bool(collision_info["collision"]),
             "collision_mask": collision_info["collision_mask"].astype(bool).copy(),
             "obstacle_collision_mask": collision_info["obstacle_collision_mask"].astype(bool).copy(),
@@ -1088,14 +1230,25 @@ class MultiAgentDMPEnv(gym.Env):
             "action_guidance_weights": action_guidance_weights.astype(np.float32).copy(),
             "action_guidance_weight": float(np.mean(action_guidance_weights)),
             "reward_step": step_rewards.astype(np.float32).copy(),
-            "reward_near_goal_bonus": near_goal_bonuses.astype(np.float32).copy(),
+            "reward_progress": step_rewards.astype(np.float32).copy(),
             "reward_obstacle_potential_penalty": obstacle_potential_penalties.astype(np.float32).copy(),
             "reward_boundary_potential_penalty": boundary_potential_penalties.astype(np.float32).copy(),
             "reward_inter_agent_potential_penalty": inter_agent_potential_penalties.astype(np.float32).copy(),
+            "reward_stagnation_penalty": stagnation_penalties.astype(np.float32).copy(),
             "reward_acceleration_penalty": acceleration_penalties.astype(np.float32).copy(),
             "reward_acceleration_clip_penalty": acceleration_clip_penalties.astype(np.float32).copy(),
-            "reward_collision_penalty": collision_penalties.astype(np.float32).copy(),
-            "reward_timeout_penalty": timeout_penalties.astype(np.float32).copy(),
+            "reward_individual_success_bonus": individual_success_bonuses.astype(np.float32).copy(),
+            "reward_team_success_bonus": team_success_bonuses.astype(np.float32).copy(),
+            "reward_team_collision_penalty": team_collision_penalties.astype(np.float32).copy(),
+            "reward_local_collision_penalty": local_collision_penalties.astype(np.float32).copy(),
+            "reward_team_timeout_penalty": team_timeout_penalties.astype(np.float32).copy(),
+            "reward_collision_penalty": (
+                team_collision_penalties + local_collision_penalties
+            ).astype(np.float32).copy(),
+            "reward_timeout_penalty": team_timeout_penalties.astype(np.float32).copy(),
+            "stagnation_window_progress": self.stagnation_window_progress.copy(),
+            "stagnation_counters": self.stagnation_counters.copy(),
+            "stagnation_mask": (stagnation_penalties > 0.0).copy(),
         }
 
     def reset(self, *, seed=None, options=None):    # 重置环境
@@ -1111,6 +1264,12 @@ class MultiAgentDMPEnv(gym.Env):
         self.goals = goals.copy()
         self.steps = 0
         self.success_rewarded_mask = np.zeros(self.num_agents, dtype=bool)
+        self.stagnation_distance_histories = [
+            deque(maxlen=int(self.env_config.stagnation_window) + 1)
+            for _ in range(self.num_agents)
+        ]
+        self.stagnation_window_progress = np.zeros(self.num_agents, dtype=np.float32)
+        self.stagnation_counters = np.zeros(self.num_agents, dtype=np.int32)
 
         if "static_obstacles" in options:
             self.static_obstacles = copy.deepcopy(options["static_obstacles"])
@@ -1146,13 +1305,15 @@ class MultiAgentDMPEnv(gym.Env):
                 self._sensor_dynamic_obstacles(agent_index),
             )
 
-        observation = self.get_observation()
-        collision_info = self._check_collision()
-        self.latest_collision_info = collision_info
         distances_to_goals = np.array(
             [np.linalg.norm(self.goals[index] - self.dynamics[index].p) for index in range(self.num_agents)],
             dtype=np.float32,
         )
+        for agent_index, distance in enumerate(distances_to_goals):
+            self.stagnation_distance_histories[agent_index].append(float(distance))
+        observation = self.get_observation()
+        collision_info = self._check_collision()
+        self.latest_collision_info = collision_info
         info = {
             "starts": starts.copy(),
             "goals": goals.copy(),
@@ -1168,6 +1329,8 @@ class MultiAgentDMPEnv(gym.Env):
             "pairwise_distances": collision_info["pairwise_distances"].copy(),
             "min_inter_agent_distance": float(collision_info["min_inter_agent_distance"]),
             "min_boundary_distances": self._compute_min_boundary_distances(),
+            "stagnation_window_progress": self.stagnation_window_progress.copy(),
+            "stagnation_counters": self.stagnation_counters.copy(),
         }
         return observation, info
 
@@ -1235,14 +1398,13 @@ class MultiAgentDMPEnv(gym.Env):
                 self._sensor_dynamic_obstacles(agent_index),
             )   # 获取传感器数据
 
-        observation = self.get_observation()    # 获取传感器数据
         current_distances = np.array(
             [np.linalg.norm(self.goals[index] - self.dynamics[index].p) for index in range(self.num_agents)],
             dtype=float,
         )   # 获取当前到目标点的距离
         progress = previous_distances - current_distances   # 获取进度
         step_rewards = float(self.env_config.step_reward_weight) * progress # 获取奖励
-        near_goal_bonuses = self._compute_near_goal_bonuses(current_distances)
+        success_mask = current_distances <= float(self.env_config.goal_tolerance)
 
         collision_info = self._check_collision()    # 检查碰撞
         self.latest_collision_info = collision_info # 更新碰撞信息
@@ -1259,61 +1421,65 @@ class MultiAgentDMPEnv(gym.Env):
             float(self.env_config.acceleration_clip_penalty_weight)
             * np.sum((commanded_accelerations.astype(float) - applied_accelerations.astype(float)) ** 2, axis=1)
         )   # 获取加速度裁剪惩罚
+        stagnation_penalties = self._compute_stagnation_penalties(
+            current_distances,
+            success_mask,
+        )
 
         rewards = (
             step_rewards
-            + near_goal_bonuses
             - obstacle_potential_penalties
             - boundary_potential_penalties
             - inter_agent_potential_penalties
-            # - acceleration_penalties
-            # - acceleration_clip_penalties
-            - float(self.env_config.step_penalty)
+            - stagnation_penalties
         ).astype(np.float32)
 
-        success_mask = current_distances <= float(self.env_config.goal_tolerance)
         new_success_mask = np.logical_and(success_mask, np.logical_not(self.success_rewarded_mask))
         full_success = bool(np.all(success_mask))
         collision = bool(collision_info["collision"])
-        terminated = bool(full_success or collision)
+        successful_episode = bool(full_success and not collision)
+        terminated = bool(successful_episode or collision)
         truncated = bool((not terminated) and (self.steps >= int(self.env_config.max_steps)))
 
-        collision_penalties = np.zeros(self.num_agents, dtype=np.float32)
-        if np.any(collision_info["obstacle_collision_mask"]):
-            obstacle_mask = collision_info["obstacle_collision_mask"]
-            collision_penalties[obstacle_mask] += float(self.env_config.collision_penalty)
-        if np.any(collision_info["inter_agent_collision_mask"]):
-            inter_mask = collision_info["inter_agent_collision_mask"]
-            collision_penalties[inter_mask] += float(self.env_config.inter_agent_collision_penalty)
-        if np.any(collision_info["boundary_collision_mask"]):
-            boundary_mask = collision_info["boundary_collision_mask"]
-            collision_penalties[boundary_mask] += float(self.env_config.collision_penalty)
-        rewards -= collision_penalties
+        individual_success_bonuses = np.zeros(self.num_agents, dtype=np.float32)
+        team_success_bonuses = np.zeros(self.num_agents, dtype=np.float32)
+        team_collision_penalties = np.zeros(self.num_agents, dtype=np.float32)
+        local_collision_penalties = np.zeros(self.num_agents, dtype=np.float32)
+        team_timeout_penalties = np.zeros(self.num_agents, dtype=np.float32)
 
-        success_reward_bonus = float(self.env_config.success_bonus) / float(self.num_agents)
-        if not collision:
-            rewards[new_success_mask] += success_reward_bonus
+        if collision:
+            team_collision_penalties[:] = float(self.env_config.team_collision_penalty)
+            local_collision_penalties[collision_info["obstacle_collision_mask"]] += float(
+                self.env_config.local_obstacle_collision_penalty
+            )
+            local_collision_penalties[collision_info["boundary_collision_mask"]] += float(
+                self.env_config.local_boundary_collision_penalty
+            )
+            local_collision_penalties[collision_info["inter_agent_collision_mask"]] += float(
+                self.env_config.local_inter_agent_collision_penalty
+            )
+            rewards -= team_collision_penalties + local_collision_penalties
+        else:
+            individual_success_bonuses[new_success_mask] = float(
+                self.env_config.individual_success_bonus
+            )
+            rewards += individual_success_bonuses
             self.success_rewarded_mask = np.logical_or(self.success_rewarded_mask, new_success_mask)
             for agent_index in np.flatnonzero(new_success_mask):
                 next_states[agent_index] = self._freeze_agent(int(agent_index))
+            if successful_episode:
+                team_success_bonuses[:] = float(self.env_config.team_success_bonus)
+                rewards += team_success_bonuses
+            elif truncated:
+                team_timeout_penalties[:] = float(self.env_config.team_timeout_penalty)
+                rewards -= team_timeout_penalties
 
-        timeout_penalties = np.zeros(self.num_agents, dtype=np.float32)
-        if truncated:
-            bounds = np.asarray(self.env_config.workspace_bounds, dtype=float)
-            workspace_diag = float(np.linalg.norm(bounds[1] - bounds[0]))
-            distance_scale = max(workspace_diag, 1e-6)
-            unfinished_mask = np.logical_not(self.success_rewarded_mask)
-            timeout_penalties[unfinished_mask] = (
-                float(self.env_config.timeout_penalty)
-                * current_distances[unfinished_mask]
-                / distance_scale
-            )
-            rewards -= timeout_penalties
+        observation = self.get_observation()
 
         info = self._build_info(
             success_mask=success_mask,
             new_success_mask=new_success_mask,
-            success_reward_bonus=success_reward_bonus,
+            successful_episode=successful_episode,
             collision_info=collision_info,
             truncated=truncated,
             distances_to_goals=current_distances.astype(np.float32),
@@ -1325,14 +1491,17 @@ class MultiAgentDMPEnv(gym.Env):
             guided_action=guided_action,
             action_guidance_weights=action_guidance_weights,
             step_rewards=step_rewards.astype(np.float32),
-            near_goal_bonuses=near_goal_bonuses,
             obstacle_potential_penalties=obstacle_potential_penalties,
             boundary_potential_penalties=boundary_potential_penalties,
             inter_agent_potential_penalties=inter_agent_potential_penalties,
+            stagnation_penalties=stagnation_penalties,
             acceleration_penalties=acceleration_penalties.astype(np.float32),
             acceleration_clip_penalties=acceleration_clip_penalties.astype(np.float32),
-            collision_penalties=collision_penalties,
-            timeout_penalties=timeout_penalties,
+            individual_success_bonuses=individual_success_bonuses,
+            team_success_bonuses=team_success_bonuses,
+            team_collision_penalties=team_collision_penalties,
+            local_collision_penalties=local_collision_penalties,
+            team_timeout_penalties=team_timeout_penalties,
         )
         return observation, rewards.astype(np.float32), terminated, truncated, info
 

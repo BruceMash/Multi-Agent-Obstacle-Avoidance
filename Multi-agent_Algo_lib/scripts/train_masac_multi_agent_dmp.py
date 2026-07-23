@@ -45,6 +45,19 @@ from MASAC.curriculum import (
 )
 from MASAC.config import MASAC_EXPERIMENT_CONFIG, MASACExperimentConfig, MASACNetworkConfig # 读取配置信息
 
+REWARD_COMPONENT_KEYS = (
+    "reward_progress",
+    "reward_obstacle_potential_penalty",
+    "reward_boundary_potential_penalty",
+    "reward_inter_agent_potential_penalty",
+    "reward_stagnation_penalty",
+    "reward_individual_success_bonus",
+    "reward_team_success_bonus",
+    "reward_team_collision_penalty",
+    "reward_local_collision_penalty",
+    "reward_team_timeout_penalty",
+)
+
 
 def matrix_to_agent_dict(values: np.ndarray, agent_ids: list[str]) -> dict[str, np.ndarray]:
     values = np.asarray(values, dtype=np.float32)
@@ -188,6 +201,41 @@ def make_run_dir(output_root: str, seed: int) -> Path:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2, ensure_ascii=False, default=str)
+
+
+def flatten_hparams(payload: dict[str, Any], prefix: str = "") -> dict[str, Any]:   # 添加tensorboard记录
+    flattened: dict[str, Any] = {}
+    for key, value in payload.items():
+        name = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            flattened.update(flatten_hparams(value, name))
+        elif isinstance(value, (str, int, float, bool)):
+            flattened[name] = value
+        elif value is None:
+            flattened[name] = "null"
+        else:
+            flattened[name] = json.dumps(value, ensure_ascii=False, default=str)
+    return flattened
+
+
+def write_tensorboard_configuration(writer, payload: dict[str, Any]) -> None:   # tensorboard记录
+    if writer is None:
+        return
+    for section, values in payload.items():
+        writer.add_text(
+            f"configuration/{section}",
+            f"```json\n{json.dumps(values, indent=2, ensure_ascii=False, default=str)}\n```",
+            0,
+        )
+    try:
+        writer.add_hparams(
+            flatten_hparams(payload),
+            {"hparams/session_start": 0.0},
+            run_name="hparams",
+        )
+    except (TypeError, ValueError):
+        pass
+    writer.flush()
 
 
 def append_metrics(path: Path, row: dict[str, Any]) -> None:
@@ -414,6 +462,10 @@ def write_tensorboard_episode(writer, row: dict[str, Any]) -> None:
     writer.add_scalar("collision/obstacle_agent_count", row["obstacle_collision_agent_count"], step)
     writer.add_scalar("collision/boundary_agent_count", row["boundary_collision_agent_count"], step)
     writer.add_scalar("safety/min_inter_agent_distance", row["min_inter_agent_distance"], step)
+    for key in REWARD_COMPONENT_KEYS:
+        writer.add_scalar(f"reward/{key.removeprefix('reward_')}", row[key], step)
+    writer.add_scalar("stagnation/trigger_steps", row["stagnation_trigger_steps"], step)
+    writer.add_scalar("stagnation/max_counter", row["stagnation_max_counter"], step)
 
 
 def write_tensorboard_step(
@@ -747,24 +799,34 @@ def train() -> dict[str, str]:
     else:
         progress.event("TensorBoard logging is unavailable because tensorboard is not installed.")
 
-    write_json(
-        run_dir / "config.json",
-        {
-            "script_args": vars(args),
-            "experiment_config": asdict(experiment_config),
-            "core_env_kwargs": experiment_config.build_core_env_kwargs(),
-            "dim_info": dim_info,
-            "network_config": asdict(network_config),
-            "eval_seeds": eval_seeds,
-            "curriculum": curriculum.to_dict(),
+    run_config = {
+        "script_args": vars(args),
+        "experiment_config": asdict(experiment_config),
+        "core_env_kwargs": experiment_config.build_core_env_kwargs(),
+        "dim_info": dim_info,
+        "network_config": asdict(network_config),
+        "eval_seeds": eval_seeds,
+        "curriculum": curriculum.to_dict(),
+        "runtime": {
             "device": str(device),
+            "torch_version": str(torch.__version__),
+            "numpy_version": str(np.__version__),
+            "python_version": str(sys.version),
             "tensorboard_enabled": writer is not None,
         },
-    )
+    }
+    write_json(run_dir / "config.json", run_config)
+    write_tensorboard_configuration(writer, run_config)
 
     obs_matrix, _ = env.reset(seed=args.seed)
     obs = matrix_to_agent_dict(obs_matrix, agent_ids)
     episode_reward = np.zeros(int(env.num_agents), dtype=np.float64)
+    episode_reward_components = {
+        key: np.zeros(int(env.num_agents), dtype=np.float64)
+        for key in REWARD_COMPONENT_KEYS
+    }
+    episode_stagnation_trigger_steps = 0
+    episode_stagnation_max_counter = 0
     episode_count = 0
     episode_step = 0
     start_time = time.time()
@@ -810,6 +872,26 @@ def train() -> dict[str, str]:
         if latest_boundary_collision_count > 0:
             episode_boundary_collision_steps += 1
             episode_boundary_collision_agent_count += latest_boundary_collision_count
+        for key in REWARD_COMPONENT_KEYS:
+            episode_reward_components[key] += np.asarray(
+                info.get(key, np.zeros(int(env.num_agents), dtype=np.float32)),
+                dtype=np.float64,
+            )
+        stagnation_mask = np.asarray(
+            info.get("stagnation_mask", np.zeros(int(env.num_agents), dtype=bool)),
+            dtype=bool,
+        )
+        if np.any(stagnation_mask):
+            episode_stagnation_trigger_steps += 1
+        stagnation_counters = np.asarray(
+            info.get("stagnation_counters", np.zeros(int(env.num_agents), dtype=np.int32)),
+            dtype=np.int32,
+        )
+        if stagnation_counters.size:
+            episode_stagnation_max_counter = max(
+                episode_stagnation_max_counter,
+                int(np.max(stagnation_counters)),
+            )
 
         next_obs = matrix_to_agent_dict(next_obs_matrix, agent_ids)
         reward = vector_to_agent_dict(rewards, agent_ids)
@@ -888,6 +970,12 @@ def train() -> dict[str, str]:
                 "obstacle_collision_agent_count": episode_obstacle_collision_agent_count,
                 "boundary_collision_agent_count": episode_boundary_collision_agent_count,
                 "min_inter_agent_distance": float(info.get("min_inter_agent_distance", np.inf)),
+                **{
+                    key: float(np.mean(values))
+                    for key, values in episode_reward_components.items()
+                },
+                "stagnation_trigger_steps": int(episode_stagnation_trigger_steps),
+                "stagnation_max_counter": int(episode_stagnation_max_counter),
                 "elapsed_sec": float(time.time() - start_time),
             }
             append_metrics(metrics_path, row)
@@ -922,6 +1010,10 @@ def train() -> dict[str, str]:
             obs_matrix, _ = env.reset()
             obs = matrix_to_agent_dict(obs_matrix, agent_ids)
             episode_reward[:] = 0.0
+            for values in episode_reward_components.values():
+                values[:] = 0.0
+            episode_stagnation_trigger_steps = 0
+            episode_stagnation_max_counter = 0
             episode_step = 0
             episode_inter_agent_collision_steps = 0
             episode_obstacle_collision_steps = 0
