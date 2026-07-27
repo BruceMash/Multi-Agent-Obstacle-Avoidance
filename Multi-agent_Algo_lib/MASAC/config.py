@@ -320,6 +320,10 @@ class MASACExperimentConfig:
     seed: int = 321
     total_steps: int = 500_000
     start_steps: int = 5_000
+    # 随机采样期间提前更新网络，避免 start_steps 结束时切换到完全未训练的 Actor。
+    learning_starts: int = 1_000
+    # Actor 接管行为策略后继续短暂混合随机动作，避免动作分布在单步内突变。
+    policy_transition_steps: int = 5_000
     batch_size: int = 256
     buffer_size: int = 1_000_000
     actor_lr: float = 1e-4

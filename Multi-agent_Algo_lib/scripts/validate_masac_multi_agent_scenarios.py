@@ -1,4 +1,4 @@
-"""Validate MASAC in three bounded multi-agent obstacle scenarios.
+"""Validate MASAC in bounded custom scenarios or the training distribution.
 
 The script provides both live browser visualization and reproducible rollout
 artifacts.  It intentionally uses only Python's standard-library HTTP server
@@ -36,13 +36,17 @@ from Entity.dynamic_obstacles import MovingSphereObstacle
 from Entity.static_obstacles import AxisAlignedBoxObstacle, StaticSphereObstacle
 from Environment.multi_agent_dmp_env import MultiAgentDMPEnv
 from MASAC.config import MASACExperimentConfig, MASACNetworkConfig
+from MASAC.curriculum import CurriculumStage, build_curriculum_stages, build_stage_env_kwargs
 
 
-SCENARIO_NAMES = ("boundary_only", "boundary_dynamic", "boundary_mixed")
+CUSTOM_SCENARIO_NAMES = ("boundary_only", "boundary_dynamic", "boundary_mixed")
+TRAINING_DISTRIBUTION_SCENARIO = "phase3_level3"
+SCENARIO_NAMES = (*CUSTOM_SCENARIO_NAMES, TRAINING_DISTRIBUTION_SCENARIO)
 SCENARIO_LABELS = {
     "boundary_only": "有边界无障碍物",
     "boundary_dynamic": "有边界动态障碍物",
     "boundary_mixed": "有边界混合动静态障碍物",
+    TRAINING_DISTRIBUTION_SCENARIO: "训练同分布 Phase 3 Level 3",
 }
 AGENT_COLORS = ("#22d3ee", "#34d399", "#fbbf24", "#fb7185", "#a78bfa", "#60a5fa")
 SPATIOTEMPORAL_ENCOUNTER_WINDOW_SECONDS = 0.5
@@ -157,8 +161,30 @@ def _agent_dict_to_matrix(values: dict[str, np.ndarray], agent_ids: list[str]) -
     )
 
 
-def _build_environment(config: MASACExperimentConfig) -> MultiAgentDMPEnv:
-    return MultiAgentDMPEnv(**copy.deepcopy(config.build_core_env_kwargs()))
+def _phase3_level3_stage(config: MASACExperimentConfig) -> CurriculumStage:
+    stages = build_curriculum_stages(
+        config.curriculum_phase2_box_counts,
+        config.curriculum_phase2_sphere_counts,
+        config.curriculum_phase3_dynamic_counts,
+    )
+    matching = [stage for stage in stages if stage.name == TRAINING_DISTRIBUTION_SCENARIO]
+    if not matching:
+        available = ", ".join(stage.name for stage in stages)
+        raise ValueError(
+            f"训练配置不包含 {TRAINING_DISTRIBUTION_SCENARIO}；可用阶段：{available}"
+        )
+    return matching[0]
+
+
+def _build_environment(
+    config: MASACExperimentConfig,
+    scenario_name: str | None = None,
+) -> MultiAgentDMPEnv:
+    if scenario_name == TRAINING_DISTRIBUTION_SCENARIO:
+        kwargs = build_stage_env_kwargs(config, _phase3_level3_stage(config))
+    else:
+        kwargs = config.build_core_env_kwargs()
+    return MultiAgentDMPEnv(**copy.deepcopy(kwargs))
 
 
 def _load_policy(
@@ -428,6 +454,15 @@ def build_scenario(
 ) -> dict[str, Any]:
     if name not in SCENARIO_NAMES:
         raise ValueError(f"不支持的场景：{name}")
+    if name == TRAINING_DISTRIBUTION_SCENARIO:
+        stage = _phase3_level3_stage(config)
+        return {
+            "name": name,
+            "label": SCENARIO_LABELS[name],
+            "seed": seed,
+            "distribution": "training",
+            "curriculum_stage": stage.to_dict(),
+        }
     starts, goals = (
         _fixed_starts_goals(config)
         if seed is None
@@ -461,6 +496,7 @@ def build_scenario(
         "name": name,
         "label": SCENARIO_LABELS[name],
         "seed": seed,
+        "distribution": "custom_validation",
         "starts": starts,
         "goals": goals,
         "static_obstacles": static_obstacles,
@@ -642,7 +678,7 @@ def _html_document(static_payload: dict[str, Any] | None = None) -> str:
       <div class="panel table-wrap"><table><thead><tr><th>场景</th><th>状态</th><th>步数</th><th>总奖励</th><th>最小机距</th></tr></thead><tbody id="summary"></tbody></table></div>
     </div>
   </section>
-  <section class="panel" style="margin-top:12px"><div class="legend" style="margin-bottom:8px"><b>100 种子聚合指标</b>（均值；成功率和碰撞率按 episode 统计）</div><div class="table-wrap"><table><thead><tr><th>场景</th><th>样本数</th><th>成功率</th><th>碰撞率</th><th>路径长度</th><th>飞行时间/s</th><th>平滑代价</th><th>控制代价</th><th>最小安全裕度</th><th>推理时间/ms</th></tr></thead><tbody id="aggregate"></tbody></table></div></section>
+  <section class="panel" style="margin-top:12px"><div class="legend" style="margin-bottom:8px"><b>多种子聚合指标</b>（均值；成功率和碰撞率按 episode 统计）</div><div class="table-wrap"><table><thead><tr><th>场景</th><th>样本数</th><th>成功率</th><th>碰撞率</th><th>路径长度</th><th>飞行时间/s</th><th>平滑代价</th><th>控制代价</th><th>最小安全裕度</th><th>推理时间/ms</th></tr></thead><tbody id="aggregate"></tbody></table></div></section>
 </main>
 <script>
 const STATIC_DATA=__STATIC_PAYLOAD__;
@@ -987,29 +1023,41 @@ def _run_episode(
     max_steps: int,
     stream_live: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    env = _build_environment(config)
+    is_training_distribution = (
+        scenario.get("distribution") == "training"
+        and scenario["name"] == TRAINING_DISTRIBUTION_SCENARIO
+    )
+    env = _build_environment(
+        config,
+        scenario_name=scenario["name"] if is_training_distribution else None,
+    )
     scenario_key = f"{scenario['name']}_seed_{seed}"
     episode_dir = output_dir / "scenarios" / scenario["name"] / str(seed)
     episode_dir.mkdir(parents=True, exist_ok=True)
     try:
-        observation, info = env.reset(
-            seed=seed,
-            options={
-                "starts": np.asarray(scenario["starts"], dtype=float),
-                "goals": np.asarray(scenario["goals"], dtype=float),
-                "static_obstacles": copy.deepcopy(scenario["static_obstacles"]),
-                "dynamic_obstacles": copy.deepcopy(scenario["dynamic_obstacles"]),
-            },
-        )
+        if is_training_distribution:
+            observation, info = env.reset(seed=seed)
+        else:
+            observation, info = env.reset(
+                seed=seed,
+                options={
+                    "starts": np.asarray(scenario["starts"], dtype=float),
+                    "goals": np.asarray(scenario["goals"], dtype=float),
+                    "static_obstacles": copy.deepcopy(scenario["static_obstacles"]),
+                    "dynamic_obstacles": copy.deepcopy(scenario["dynamic_obstacles"]),
+                },
+            )
         scene_payload = {
             "key": scenario_key,
             "scenario": scenario["name"],
             "label": scenario["label"],
+            "distribution": scenario.get("distribution", "custom_validation"),
+            "curriculum_stage": scenario.get("curriculum_stage"),
             "episode": episode_index,
             "seed": seed,
             "workspace_bounds": config.workspace_bounds,
-            "starts": scenario["starts"],
-            "goals": scenario["goals"],
+            "starts": env.starts,
+            "goals": env.goals,
             "static_obstacles": [
                 _serialize_obstacle(obstacle, f"static_{index}", False)
                 for index, obstacle in enumerate(env.static_obstacles)
@@ -1286,13 +1334,21 @@ def _load_saved_trace(output_dir: Path, summary: dict[str, Any]) -> dict[str, An
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="验证 MASAC 在三类有边界多机场景中的行为，并实时生成 HTML 可视化。"
+        description="验证 MASAC 在定制场景或训练同分布场景中的行为，并生成 HTML 可视化。"
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/masac_validation"))
     parser.add_argument("--model-output-root", type=Path, default=Path("artifacts/masac"))
-    parser.add_argument("--scenario", choices=("all", *SCENARIO_NAMES), default="all")
+    parser.add_argument(
+        "--scenario",
+        choices=("all", *SCENARIO_NAMES),
+        default="all",
+        help=(
+            "all 保持运行原有三类定制场景；phase3_level3 使用训练场景生成器"
+            "执行同分布评估。"
+        ),
+    )
     parser.add_argument(
         "--episodes-per-scenario",
         type=int,
@@ -1390,7 +1446,11 @@ def main() -> None:
         if args.open_browser:
             webbrowser.open(url)
 
-    selected_names = list(SCENARIO_NAMES) if args.scenario == "all" else [args.scenario]
+    selected_names = (
+        list(CUSTOM_SCENARIO_NAMES)
+        if args.scenario == "all"
+        else [args.scenario]
+    )
     max_steps = int(args.max_steps or experiment_config.max_steps)
     stream_live = server is not None and (
         float(args.realtime_delay) > 0.0 or test_seed_count <= 5
@@ -1408,6 +1468,14 @@ def main() -> None:
         "policy_mode": args.policy_mode,
         "device": str(device),
         "scenario_names": selected_names,
+        "scenario_distributions": {
+            name: (
+                "training"
+                if name == TRAINING_DISTRIBUTION_SCENARIO
+                else "custom_validation"
+            )
+            for name in selected_names
+        },
         "episodes_per_scenario": test_seed_count,
         "inference_warmup_steps": int(args.inference_warmup_steps),
         "save_all_traces": bool(args.save_all_traces),

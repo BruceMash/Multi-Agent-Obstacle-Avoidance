@@ -690,7 +690,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def train() -> dict[str, str]:
+def train() -> dict[str, str]:  # 训练主循环
     args = parse_args() # 读args
     args.progress_interval = max(1, int(args.progress_interval))
 
@@ -720,7 +720,7 @@ def train() -> dict[str, str]:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    experiment_config = replace(
+    experiment_config = replace(    # 创建实验配置 这部分主要是课程，同时从arg中读取参数
         MASAC_EXPERIMENT_CONFIG,
         curriculum_enabled=not bool(args.disable_curriculum or args.final_stage_only),
         curriculum_success_threshold=float(args.curriculum_success_threshold),

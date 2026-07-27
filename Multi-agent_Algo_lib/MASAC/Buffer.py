@@ -18,7 +18,11 @@ class Buffer:
         self.actions = np.zeros((capacity, act_dim))  # batch_size x action_dim
         self.rewards = np.zeros(capacity)            # just a tensor with length: batch
         self.next_obs = np.zeros((capacity, obs_dim))  # batch_size x state_dim
-        self.dones = np.zeros(capacity, dtype=bool)    # just a tensor with length: batch_size
+        self.dones = np.zeros(capacity, dtype=bool)    # Bellman bootstrap mask，仅对应 terminated。
+        # timeout 允许价值函数 bootstrap，但绝不能把两个 episode 拼成一段 RNN
+        # 历史。因此 episode_ends 必须与 dones 分开保存。
+        # 分别索引terminated和truncated的episode结束标记，便于RNN训练时截断序列。
+        self.episode_ends = np.zeros(capacity, dtype=bool)
         self.transition_ids = np.full(capacity, -1, dtype=np.int64)
 
         self._index = 0
@@ -27,13 +31,17 @@ class Buffer:
 
         self.device = device
 
-    def add(self, obs, action, reward, next_obs, done):
+    def add(self, obs, action, reward, next_obs, done, episode_end=None):
         """ add an experience to the memory """ #
+        if episode_end is None:
+            # 保持旧调用方兼容；新训练入口会显式传入 terminated | truncated。
+            episode_end = done
         self.obs[self._index] = obs
         self.actions[self._index] = action
         self.rewards[self._index] = reward
         self.next_obs[self._index] = next_obs
         self.dones[self._index] = done
+        self.episode_ends[self._index] = episode_end    # 传入episode_end关键字
         self.transition_ids[self._index] = self._total_added
 
         self._index = (self._index + 1) % self.capacity
@@ -62,7 +70,9 @@ class Buffer:
                 expected_transition_id = end_transition_id - back_step
                 if self.transition_ids[buffer_index] != expected_transition_id:
                     break
-                if back_step > 0 and self.dones[buffer_index]:
+                # 回看历史时若上一条 transition 已结束 episode，当前序列必须在此截断。
+                # 这里不能检查 dones，因为 truncated=False-for-bootstrap 仍是时序边界。
+                if back_step > 0 and self.episode_ends[buffer_index]:
                     break
 
                 history.append(data[buffer_index])
@@ -155,13 +165,13 @@ class PER_Buffer:
         self.sumtree = SumTree(capacity)
         self.buffer = Buffer(capacity, obs_dim, act_dim, device)
 
-    def add(self, obs, action, reward, next_obs, done): 
+    def add(self, obs, action, reward, next_obs, done, episode_end=None):
         '''
         第一条数据的优先级为1.0，后续数据的优先级为最大优先级,来保证所有的经验至少被采样一次
         '''
         max_priority = 1.0 if len(self.buffer) == 0 else self.sumtree.max()  
         self.sumtree.add(self.buffer._index, max_priority)
-        self.buffer.add(obs, action, reward, next_obs, done)
+        self.buffer.add(obs, action, reward, next_obs, done, episode_end)
         
         
 

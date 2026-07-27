@@ -23,6 +23,7 @@ from MASAC.MASAC import MASAC
 from MASAC.config import MASAC_EXPERIMENT_CONFIG
 from MASAC.curriculum import build_curriculum_stages
 from train_masac_multi_agent_dmp import (
+    AgentObservationHistory,
     agent_dict_to_matrix,
     build_critic_action_matrix,
     build_dim_info,
@@ -164,11 +165,9 @@ class ProfiledMASAC(MASAC):
                             next_obs[agent_id],
                             temporal_mask=next_obs_mask[agent_id],
                         )
-                        next_action[agent_id] = self.actor_action_to_critic_action(
-                            next_obs[agent_id],
-                            next_actor_action,
-                            temporal_mask=next_obs_mask[agent_id],
-                        )
+                        # 与正式训练保持同一动作语义：Critic 接收 Actor 输出的
+                        # raw action，动力学裁剪不在学习侧重复执行。
+                        next_action[agent_id] = next_actor_action
 
             return (
                 obs,
@@ -272,11 +271,7 @@ class ProfiledMASAC(MASAC):
                                     obs[other_id],
                                     temporal_mask=obs_mask[other_id],
                                 )
-                        new_action[other_id] = self.actor_action_to_critic_action(
-                            obs[other_id],
-                            sampled_action,
-                            temporal_mask=obs_mask[other_id],
-                        )
+                        new_action[other_id] = sampled_action
                         new_log_pi[other_id] = sampled_log_pi
 
                 critic_requires_grad = [
@@ -360,6 +355,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=int(config.seed))
     parser.add_argument("--total-steps", type=int, default=3000)
     parser.add_argument("--start-steps", type=int, default=0)
+    parser.add_argument("--learning-starts", type=int, default=int(config.learning_starts))
+    parser.add_argument(
+        "--policy-transition-steps",
+        type=int,
+        default=int(config.policy_transition_steps),
+    )
     parser.add_argument("--batch-size", type=int, default=int(config.batch_size))
     parser.add_argument("--buffer-size", type=int, default=int(config.buffer_size))
     parser.add_argument("--actor-lr", type=float, default=float(config.actor_lr))
@@ -438,6 +439,8 @@ def parse_args() -> argparse.Namespace:
 def run_profile() -> None:
     args = parse_args()
     args.report_interval = max(1, int(args.report_interval))
+    args.learning_starts = max(0, int(args.learning_starts))
+    args.policy_transition_steps = max(0, int(args.policy_transition_steps))
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -478,6 +481,8 @@ def run_profile() -> None:
     print(f"device: {device}")
     print(f"total_steps: {int(args.total_steps)}")
     print(f"start_steps: {int(args.start_steps)}")
+    print(f"learning_starts: {int(args.learning_starts)}")
+    print(f"policy_transition_steps: {int(args.policy_transition_steps)}")
     print(f"batch_size: {int(args.batch_size)}")
     print(f"learn_interval: {int(args.learn_interval)}")
     print(f"updates_per_step: {int(args.updates_per_step)}")
@@ -487,6 +492,8 @@ def run_profile() -> None:
 
     obs_matrix, _ = env.reset(seed=args.seed)
     obs = matrix_to_agent_dict(obs_matrix, agent_ids)
+    observation_history = AgentObservationHistory(args.temporal_steps, agent_ids)
+    observation_history.reset(obs)
     min_learn_size = max(int(args.batch_size), int(args.temporal_steps))
     episode_count = 0
     episode_step = 0
@@ -499,9 +506,30 @@ def run_profile() -> None:
                 action = matrix_to_agent_dict(action_matrix, agent_ids)
         else:
             with timing.time_block("loop/select_action"):
-                action = policy.select_action(obs)
+                policy_obs, temporal_masks = observation_history.policy_inputs()
+                action = policy.select_action(policy_obs, temporal_masks)
             with timing.time_block("loop/action_pack"):
-                action_matrix = agent_dict_to_matrix(action, agent_ids)
+                policy_action_matrix = agent_dict_to_matrix(action, agent_ids)
+                transition_steps = int(args.policy_transition_steps)
+                policy_weight = (
+                    1.0
+                    if transition_steps <= 0
+                    else min(
+                        1.0,
+                        float(global_step - int(args.start_steps))
+                        / float(transition_steps),
+                    )
+                )
+                if policy_weight < 1.0:
+                    # profiling 入口也保留正式训练的平滑接管过程，
+                    # 从而使耗时统计对应真实执行路径。
+                    random_action_matrix = env.action_space.sample().astype(np.float32)
+                    action_matrix = (
+                        policy_weight * policy_action_matrix
+                        + (1.0 - policy_weight) * random_action_matrix
+                    )
+                else:
+                    action_matrix = policy_action_matrix
                 action_matrix = np.clip(
                     action_matrix,
                     env.action_space.low,
@@ -523,17 +551,29 @@ def run_profile() -> None:
                 agent_id: bool(terminated)
                 for agent_id in agent_ids
             }
+            episode_end_for_buffer = {
+                agent_id: bool(terminated or truncated)
+                for agent_id in agent_ids
+            }
 
         with timing.time_block("loop/replay_add"):
-            policy.add(obs, critic_action, reward, next_obs, done_for_buffer)
+            policy.add(
+                obs,
+                critic_action,
+                reward,
+                next_obs,
+                done_for_buffer,
+                episode_end_for_buffer,
+            )
 
         episode_step += 1
         obs = next_obs
+        observation_history.append(obs)
 
         can_learn = len(policy.buffers[policy.agent_x]) >= min_learn_size
         if (
             can_learn
-            and global_step > int(args.start_steps)
+            and global_step >= int(args.learning_starts)
             and global_step % int(args.learn_interval) == 0
         ):
             for _ in range(int(args.updates_per_step)):
@@ -549,6 +589,7 @@ def run_profile() -> None:
             with timing.time_block("loop/env_reset"):
                 obs_matrix, _ = env.reset()
                 obs = matrix_to_agent_dict(obs_matrix, agent_ids)
+                observation_history.reset(obs)
 
         if global_step % int(args.report_interval) == 0:
             elapsed = time.perf_counter() - wall_start

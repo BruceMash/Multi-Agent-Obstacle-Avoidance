@@ -213,62 +213,90 @@ class MASAC: #先无attention 再加入
         self.is_continue = is_continue
         self.agent_x = list(self.agents.keys())[0] #sample 用
     
-    def select_action(self, obs):
+    def _prepare_actor_input(self, agent_obs, temporal_mask=None):
+        # 在线执行必须允许输入真实的多帧序列及其 mask，才能与 replay 训练时
+        # Actor 看到的数据结构一致；单帧调用仍保留兼容路径。
+        agent_obs = torch.as_tensor(
+            agent_obs,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        if agent_obs.dim() == 1:    # 只有一个维度，重塑维度
+            agent_obs = agent_obs.reshape(1, -1)
+        elif agent_obs.dim() == 2:  # 两个维度，插入一个维度
+            agent_obs = agent_obs.unsqueeze(0)
+        else:
+            raise ValueError(
+                "agent observation must have shape [obs_dim] or "
+                f"[temporal_steps, obs_dim], got {tuple(agent_obs.shape)}"
+            )
+
+        prepared_mask = None
+        if temporal_mask is not None:   # 时序mask存在
+            prepared_mask = torch.as_tensor(
+                temporal_mask,
+                dtype=torch.bool,
+                device=self.device,
+            )
+            if prepared_mask.dim() == 1:
+                prepared_mask = prepared_mask.unsqueeze(0)
+            if agent_obs.dim() != 3 or prepared_mask.shape != agent_obs.shape[:2]:  # agent_obs不为3维或mask维度不匹配，直接valueError
+                raise ValueError(
+                    "temporal mask must match the actor observation time dimension, "
+                    f"got obs={tuple(agent_obs.shape)} mask={tuple(prepared_mask.shape)}"
+                )
+        return agent_obs, prepared_mask
+
+    def select_action(self, obs, temporal_masks=None):
         actions = {}
+        temporal_masks = temporal_masks or {}
         with torch.no_grad():
             for agent_id, agent_obs in obs.items():
-                agent_obs = torch.as_tensor(
+                agent_obs, temporal_mask = self._prepare_actor_input(
                     agent_obs,
-                    dtype=torch.float32,
-                    device=self.device,
+                    temporal_masks.get(agent_id),   # temporal_mask:是一个字典
                 )
-                if agent_obs.dim() == 1:
-                    agent_obs = agent_obs.reshape(1, -1)
-                elif agent_obs.dim() == 2:
-                    agent_obs = agent_obs.unsqueeze(0)
-                else:
-                    raise ValueError(
-                        "agent observation must have shape [obs_dim] or "
-                        f"[temporal_steps, obs_dim], got {tuple(agent_obs.shape)}"
-                    )
                 if self.is_continue:
-                    action, _ = self.agents[agent_id].actor(agent_obs)
+                    action, _ = self.agents[agent_id].actor(
+                        agent_obs,
+                        temporal_mask=temporal_mask,
+                    )   # 得到对应的动作
                     actions[agent_id] = action.cpu().numpy().squeeze(0)
                 else:
                     raise NotImplementedError("discrete MASAC action selection is not implemented")
         return actions
     
-    def evaluate_action(self, obs):
+    def evaluate_action(self, obs, temporal_masks=None):
         actions = {}
+        temporal_masks = temporal_masks or {}   # 构建时序mask
         with torch.no_grad():
             for agent_id, agent_obs in obs.items():
-                agent_obs = torch.as_tensor(
+                agent_obs, temporal_mask = self._prepare_actor_input(
                     agent_obs,
-                    dtype=torch.float32,
-                    device=self.device,
+                    temporal_masks.get(agent_id),  # 时序mask
                 )
-                if agent_obs.dim() == 1:
-                    agent_obs = agent_obs.reshape(1, -1)
-                elif agent_obs.dim() == 2:
-                    agent_obs = agent_obs.unsqueeze(0)
-                else:
-                    raise ValueError(
-                        "agent observation must have shape [obs_dim] or "
-                        f"[temporal_steps, obs_dim], got {tuple(agent_obs.shape)}"
-                    )
                 if self.is_continue:
                     action, _ = self.agents[agent_id].actor(
                         agent_obs,
                         deterministic=True,
+                        temporal_mask=temporal_mask,
                     )
                     actions[agent_id] = action.cpu().numpy().squeeze(0)
                 else:
                     raise NotImplementedError("discrete MASAC action evaluation is not implemented")
         return actions
     
-    def add(self, obs, action, reward, next_obs, done):
+    def add(self, obs, action, reward, next_obs, done, episode_end=None):
+        episode_end = done if episode_end is None else episode_end
         for agent_id, buffer in self.buffers.items():
-            buffer.add(obs[agent_id], action[agent_id], reward[agent_id], next_obs[agent_id], done[agent_id])
+            buffer.add(
+                obs[agent_id],
+                action[agent_id],
+                reward[agent_id],
+                next_obs[agent_id],
+                done[agent_id],
+                episode_end[agent_id],
+            )
 
     def _state_bound_tensor(self, values, name):
         if values is None:
@@ -395,11 +423,9 @@ class MASAC: #先无attention 再加入
                     next_obs[agent_id],
                     temporal_mask=next_obs_mask[agent_id],
                 )
-                next_action[agent_id] = self.actor_action_to_critic_action(
-                    next_obs[agent_id],
-                    next_actor_action,
-                    temporal_mask=next_obs_mask[agent_id],
-                )
+                # Critic 与 Actor 必须使用同一动作变量。环境动力学和裁剪属于
+                # transition 的一部分，不应先把 forcing 多对一映射成 acceleration。
+                next_action[agent_id] = next_actor_action
 
         return (
             obs,
@@ -426,6 +452,9 @@ class MASAC: #先无attention 再加入
             next_action,
             next_log_pi,
         ) = self.sample(batch_size)
+        # 诊断值在每次 update 内按智能体聚合，训练脚本只记录标量，
+        # 避免保留计算图或把日志开销带进热路径。
+        agent_diagnostics = []
         # Reuse one joint replay batch for all focal-agent updates. The replay
         # tensors and target actions are detached, while policy actions are
         # rebuilt inside the loop so each actor update keeps its own graph.
@@ -441,11 +470,7 @@ class MASAC: #先无attention 再加入
                     temporal_mask=obs_mask[other_id],
                 )
 
-                cached_action[other_id] = self.actor_action_to_critic_action(
-                    obs[other_id],
-                    sampled_action,
-                    temporal_mask=obs_mask[other_id],
-                ).detach()
+                cached_action[other_id] = sampled_action.detach()
                 cached_log_pi[other_id] = sampled_log_pi.detach()
         for agent_id, agent in self.agents.items():
             ## 更新前准备
@@ -479,15 +504,20 @@ class MASAC: #先无attention 再加入
                 )
 
             q_target = q_target.detach()
+            q_target_mean = q_target.mean().detach()
             agent.critic_optimizer.zero_grad()
 
             q1 = agent.critic.forward_q1(obs, action, temporal_masks=obs_mask)
             q1_loss = F.mse_loss(q1, q_target)
+            q1_mean = q1.detach().mean()
+            q1_loss_value = q1_loss.detach()
             q1_loss.backward()
             del q1, q1_loss
 
             q2 = agent.critic.forward_q2(obs, action, temporal_masks=obs_mask)
             q2_loss = F.mse_loss(q2, q_target)
+            q2_mean = q2.detach().mean()
+            q2_loss_value = q2_loss.detach()
             q2_loss.backward()
             del q2, q2_loss
 
@@ -506,11 +536,7 @@ class MASAC: #先无attention 再加入
                 temporal_mask=obs_mask[agent_id],
             )
 
-            new_action[agent_id] = self.actor_action_to_critic_action(
-                obs[agent_id],
-                sampled_action,
-                temporal_mask=obs_mask[agent_id],
-            )
+            new_action[agent_id] = sampled_action
 
             new_log_pi[agent_id] = sampled_log_pi
 
@@ -554,6 +580,9 @@ class MASAC: #先无attention 再加入
 
                 # Actor update only needs dQ/da, not critic parameter gradients.
                 actor_loss = (- q_pi - self.alphas[agent_id].alpha.detach() * entropy).mean()
+                actor_loss_value = actor_loss.detach()
+                policy_q_mean = q_pi.detach().mean()
+                entropy_mean = entropy.detach().mean()
                 agent.update_actor(actor_loss)
             finally:
                 for critic_param, requires_grad in zip(
@@ -566,11 +595,37 @@ class MASAC: #先无attention 再加入
             '''公式: Lα = E_{s,a ~ D} [-α * log_pi_a(s,a) - α * H] = E_{s,a ~ D} [α * (-log_pi_a(s,a) - H)]'''
             if self.adaptive_alpha:
                 alpha_loss = (self.alphas[agent_id].alpha * (entropy - self.alphas[agent_id].target_entropy).detach()).mean()
+                alpha_loss_value = alpha_loss.detach()
                 self.alphas[agent_id].update_alpha(alpha_loss)
+            else:
+                alpha_loss_value = torch.zeros((), device=self.device)
+
+            agent_diagnostics.append(
+                {
+                    "critic_loss": q1_loss_value + q2_loss_value,
+                    "actor_loss": actor_loss_value,
+                    "q_replay": 0.5 * (q1_mean + q2_mean),
+                    "q_policy": policy_q_mean,
+                    "q_target": q_target_mean,
+                    "entropy": entropy_mean,
+                    "alpha": self.alphas[agent_id].alpha.detach(),
+                    "alpha_loss": alpha_loss_value,
+                }
+            )
 
 
         ## 更新所有target网络
         self.update_target(tau)
+        diagnostic_keys = tuple(agent_diagnostics[0])
+        # 所有统计先在 GPU 上聚合，再一次性传回 CPU。逐项调用 .item()
+        # 会触发大量 CUDA 同步，并显著放大高频 learn 的日志成本。
+        diagnostic_values = torch.stack(
+            [
+                torch.stack([row[key] for key in diagnostic_keys])
+                for row in agent_diagnostics
+            ]
+        ).mean(dim=0).cpu().tolist()
+        return dict(zip(diagnostic_keys, diagnostic_values))
 
     def update_target(self, tau):
         def soft_update(target, source, tau):
