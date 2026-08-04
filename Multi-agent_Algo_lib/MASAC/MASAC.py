@@ -10,6 +10,8 @@ import torch.nn.functional as F
 
 import numpy as np
 
+from Controller.dmp_flow import compute_dmp_drives, compute_dmp_flow_consistency
+
 _ALGO_LIB_ROOT = Path(__file__).resolve().parents[1]
 if str(_ALGO_LIB_ROOT) not in sys.path:
     sys.path.insert(0, str(_ALGO_LIB_ROOT))
@@ -132,6 +134,7 @@ class MASAC: #先无attention 再加入
         self.dmp_tau = float(self.network_config.dmp_tau)
         self.forcing_term_min = float(self.network_config.forcing_term_min)
         self.forcing_term_max = float(self.network_config.forcing_term_max)
+        self.flow_zero_threshold = float(self.network_config.flow_zero_threshold)
         self.acceleration_low = self._state_bound_tensor(
             self.network_config.acceleration_low,
             "acceleration_low",
@@ -337,62 +340,76 @@ class MASAC: #先无attention 再加入
         return obs[batch_indices, indices]
 
     def actor_action_to_critic_action(self, obs, actor_action, temporal_mask=None):
+        del obs, temporal_mask
+        # Replay 保留环境实际接收的原始 DMP 动作；Critic 内部只进行可逆
+        # 归一化，避免 forcing [-10, 10] 压制 offset [-1, 1] 的梯度。
+        reference_actor = self.agents[self.agent_x].actor
+        action_scale = reference_actor.action_scale.to(
+            device=actor_action.device,
+            dtype=actor_action.dtype,
+        )
+        action_bias = reference_actor.action_bias.to(
+            device=actor_action.device,
+            dtype=actor_action.dtype,
+        )
+        return (actor_action - action_bias) / action_scale.clamp_min(1e-6)
+
+    def compute_flow_consistency_loss(
+        self,
+        obs,
+        sampled_action,
+        *,
+        temporal_mask=None,
+        minimum_consistency=0.0,
+    ):
+        """Build the one-sided actor constraint from the executed DMP flow.
+
+        The goal-offset slice is detached before it contributes to the effective
+        goal. Consequently this auxiliary loss has no direct gradient to either
+        goal-offset output head. The forcing slice still shares the actor's
+        encoder and policy trunk, so those shared parameters receive gradients.
+        """
+
         current_obs = self._current_observation_frame(obs, temporal_mask)
         velocity = current_obs[..., : self.control_dim]
-        goal_direction = current_obs[..., self.control_dim : 2 * self.control_dim]
+        goal_direction = current_obs[
+            ..., self.control_dim : 2 * self.control_dim
+        ]
         goal_distance = current_obs[
-            ...,
-            2 * self.control_dim : 2 * self.control_dim + 1,
+            ..., 2 * self.control_dim : 2 * self.control_dim + 1
         ] * self.goal_distance_clip
+        base_goal_delta = goal_direction * goal_distance
 
-        forcing = actor_action[..., : self.control_dim].clamp(
+        residual_forcing = sampled_action[..., : self.control_dim].clamp(
             self.forcing_term_min,
             self.forcing_term_max,
         )
-        goal_offset = actor_action[..., self.control_dim : 2 * self.control_dim]
-        goal_delta = goal_direction * goal_distance
-        effective_goal_delta = goal_delta + goal_offset
-
-        sensor_dim = int(self.network_config.sensor_observation_dim or 0)
-        extra_dim = int(self.network_config.extra_observation_dim)
-        if extra_dim >= 3 and sensor_dim + 3 <= current_obs.shape[-1]:
-            k_alpha = current_obs[..., sensor_dim + 1 : sensor_dim + 2]
-            k_beta = current_obs[..., sensor_dim + 2 : sensor_dim + 3]
-        else:
-            k_alpha = torch.as_tensor(
-                self.dmp_k_alpha,
-                dtype=current_obs.dtype,
-                device=current_obs.device,
-            )
-            k_beta = torch.as_tensor(
-                self.dmp_k_beta,
-                dtype=current_obs.dtype,
-                device=current_obs.device,
-            )
-
-        tau = torch.as_tensor(
-            self.dmp_tau,
-            dtype=current_obs.dtype,
-            device=current_obs.device,
+        goal_offset = sampled_action[
+            ..., self.control_dim : 2 * self.control_dim
+        ].detach()
+        effective_goal_delta = (base_goal_delta + goal_offset).detach()
+        nominal_drive, residual_drive, _ = compute_dmp_drives(
+            effective_goal_delta,
+            velocity.detach(),
+            residual_forcing,
+            k_alpha=self.dmp_k_alpha,
+            k_beta=self.dmp_k_beta,
+            tau=self.dmp_tau,
         )
-        gate = torch.tanh(torch.abs(effective_goal_delta))
-        acceleration = (
-            k_alpha * (k_beta * effective_goal_delta - tau * velocity)
-            + forcing * gate
-        ) / (tau ** 2)
-
-        if self.acceleration_low is not None and self.acceleration_high is not None:
-            low = self.acceleration_low.to(
-                device=acceleration.device,
-                dtype=acceleration.dtype,
-            )
-            high = self.acceleration_high.to(
-                device=acceleration.device,
-                dtype=acceleration.dtype,
-            )
-            acceleration = torch.max(torch.min(acceleration, high), low)
-
-        return torch.cat([acceleration, goal_offset], dim=-1)
+        nominal_for_loss = nominal_drive.detach()
+        closed_loop_drive = nominal_for_loss + residual_drive
+        consistency = compute_dmp_flow_consistency(
+            nominal_for_loss,
+            closed_loop_drive,
+            zero_threshold=self.flow_zero_threshold,
+        )
+        minimum = torch.as_tensor(
+            minimum_consistency,
+            device=consistency.device,
+            dtype=consistency.dtype,
+        )
+        flow_loss = torch.relu(minimum - consistency).square().mean()
+        return flow_loss, consistency, residual_forcing
 
     def sample(self, batch_size):
         total_size = len(self.buffers[self.agent_x])
@@ -423,9 +440,11 @@ class MASAC: #先无attention 再加入
                     next_obs[agent_id],
                     temporal_mask=next_obs_mask[agent_id],
                 )
-                # Critic 与 Actor 必须使用同一动作变量。环境动力学和裁剪属于
-                # transition 的一部分，不应先把 forcing 多对一映射成 acceleration。
-                next_action[agent_id] = next_actor_action
+                next_action[agent_id] = self.actor_action_to_critic_action(
+                    next_obs[agent_id],
+                    next_actor_action,
+                    temporal_mask=next_obs_mask[agent_id],
+                )
 
         return (
             obs,
@@ -440,7 +459,20 @@ class MASAC: #先无attention 再加入
         ) #包含所有智能体的数据
 
     ## SAC算法相关
-    def learn(self, batch_size ,gamma , tau):
+    def learn(
+        self,
+        batch_size,
+        gamma,
+        tau,
+        *,
+        update_actor=True,
+        action_l2_weight=0.0,
+        enable_flow_consistency_loss=False,
+        flow_consistency_weight=0.01,
+        minimum_flow_consistency=0.0,
+        flow_consistency_warmup_steps=0,
+        global_step=0,
+    ):
         (
             obs,
             action,
@@ -462,6 +494,14 @@ class MASAC: #先无attention 再加入
       # 在 self.sample(batch_size) 之后，for agent_id 循环之前
         cached_action = {}
         cached_log_pi = {}
+        replay_action = {
+            other_id: self.actor_action_to_critic_action(
+                obs[other_id],
+                action[other_id],
+                temporal_mask=obs_mask[other_id],
+            )
+            for other_id in self.agents.keys()
+        }
 
         with torch.no_grad():
             for other_id, other_agent in self.agents.items():
@@ -470,7 +510,11 @@ class MASAC: #先无attention 再加入
                     temporal_mask=obs_mask[other_id],
                 )
 
-                cached_action[other_id] = sampled_action.detach()
+                cached_action[other_id] = self.actor_action_to_critic_action(
+                    obs[other_id],
+                    sampled_action,
+                    temporal_mask=obs_mask[other_id],
+                ).detach()
                 cached_log_pi[other_id] = sampled_log_pi.detach()
         for agent_id, agent in self.agents.items():
             ## 更新前准备
@@ -505,18 +549,21 @@ class MASAC: #先无attention 再加入
 
             q_target = q_target.detach()
             q_target_mean = q_target.mean().detach()
+            q_target_variance = q_target.var(unbiased=False).detach()
             agent.critic_optimizer.zero_grad()
 
-            q1 = agent.critic.forward_q1(obs, action, temporal_masks=obs_mask)
+            q1 = agent.critic.forward_q1(obs, replay_action, temporal_masks=obs_mask)
             q1_loss = F.mse_loss(q1, q_target)
             q1_mean = q1.detach().mean()
+            q1_variance = q1.detach().var(unbiased=False)
             q1_loss_value = q1_loss.detach()
             q1_loss.backward()
             del q1, q1_loss
 
-            q2 = agent.critic.forward_q2(obs, action, temporal_masks=obs_mask)
+            q2 = agent.critic.forward_q2(obs, replay_action, temporal_masks=obs_mask)
             q2_loss = F.mse_loss(q2, q_target)
             q2_mean = q2.detach().mean()
+            q2_variance = q2.detach().var(unbiased=False)
             q2_loss_value = q2_loss.detach()
             q2_loss.backward()
             del q2, q2_loss
@@ -528,88 +575,161 @@ class MASAC: #先无attention 再加入
             '''公式: Lpi_θ = E_{s,a ~ D}[-Q_w(s,a) + alpha * log_pi_a(s,a)]  
             理解为 最大化函数V,V = Q + alpha * H
             '''
-            new_action = dict(cached_action)
-            new_log_pi = dict(cached_log_pi)
+            if bool(update_actor):
+                new_action = dict(cached_action)
+                new_log_pi = dict(cached_log_pi)
 
-            sampled_action, sampled_log_pi = agent.actor(
-                obs[agent_id],
-                temporal_mask=obs_mask[agent_id],
-            )
+                sampled_action, sampled_log_pi = agent.actor(
+                    obs[agent_id],
+                    temporal_mask=obs_mask[agent_id],
+                )
+                new_action[agent_id] = self.actor_action_to_critic_action(
+                    obs[agent_id],
+                    sampled_action,
+                    temporal_mask=obs_mask[agent_id],
+                )
+                new_log_pi[agent_id] = sampled_log_pi
 
-            new_action[agent_id] = sampled_action
-
-            new_log_pi[agent_id] = sampled_log_pi
-
-            critic_requires_grad = [
-                critic_param.requires_grad
-                for critic_param in agent.critic.parameters()
-            ] # 获取critic参数的 requires_grad字段
-
-            for critic_param in agent.critic.parameters(): # 冻结critic参数
-                critic_param.requires_grad_(False)
-            try:
-                if self.action_way == '0':
-                    mixed_action = dict(action)
-                    mixed_action[agent_id] = new_action[agent_id]
-                    q1_pi, q2_pi = agent.critic(
-                        obs,
-                        mixed_action,
-                        temporal_masks=obs_mask,
+                flow_constraint_active = (
+                    bool(enable_flow_consistency_loss)
+                    and int(global_step) >= int(flow_consistency_warmup_steps)
+                )
+                if flow_constraint_active:
+                    (
+                        flow_loss,
+                        flow_consistency,
+                        sampled_residual_forcing,
+                    ) = self.compute_flow_consistency_loss(
+                        obs[agent_id],
+                        sampled_action,
+                        temporal_mask=obs_mask[agent_id],
+                        minimum_consistency=minimum_flow_consistency,
                     )
-                elif self.action_way == '1':
-                    q1_pi, q2_pi = agent.critic(
-                        obs,
-                        new_action,
-                        temporal_masks=obs_mask,
+                    flow_consistency_mean = flow_consistency.detach().mean()
+                    flow_consistency_min = flow_consistency.detach().min()
+                    negative_consistency_rate = (
+                        flow_consistency.detach() < 0.0
+                    ).float().mean()
+                    flow_violation_rate = (
+                        flow_consistency.detach() < float(minimum_flow_consistency)
+                    ).float().mean()
+                    residual_norms = torch.linalg.vector_norm(
+                        sampled_residual_forcing.detach(),
+                        dim=-1,
                     )
+                    residual_forcing_norm_mean = residual_norms.mean()
+                    residual_forcing_norm_max = residual_norms.max()
                 else:
-                    raise ValueError(f"unsupported action_way: {self.action_way}")
-                
-                if self.entropy_way_a == '0':
-                    stacked_log_pi = torch.stack(
-                        [new_log_pi[other_id] for other_id in self.agents.keys()],
-                        dim=1,
-                    ).sum(dim=1)
-                    entropy = -stacked_log_pi
-                elif self.entropy_way_a == '1':
-                    entropy = -new_log_pi[agent_id]
+                    flow_loss = torch.zeros((), device=self.device)
+                    flow_consistency_mean = torch.full((), float("nan"), device=self.device)
+                    flow_consistency_min = torch.full((), float("nan"), device=self.device)
+                    negative_consistency_rate = torch.full((), float("nan"), device=self.device)
+                    flow_violation_rate = torch.full((), float("nan"), device=self.device)
+                    residual_forcing_norm_mean = torch.full((), float("nan"), device=self.device)
+                    residual_forcing_norm_max = torch.full((), float("nan"), device=self.device)
+
+                critic_requires_grad = [
+                    critic_param.requires_grad
+                    for critic_param in agent.critic.parameters()
+                ]
+                for critic_param in agent.critic.parameters():
+                    critic_param.requires_grad_(False)
+                try:
+                    if self.action_way == '0':
+                        mixed_action = dict(replay_action)
+                        mixed_action[agent_id] = new_action[agent_id]
+                        q1_pi, q2_pi = agent.critic(
+                            obs,
+                            mixed_action,
+                            temporal_masks=obs_mask,
+                        )
+                    elif self.action_way == '1':
+                        q1_pi, q2_pi = agent.critic(
+                            obs,
+                            new_action,
+                            temporal_masks=obs_mask,
+                        )
+                    else:
+                        raise ValueError(f"unsupported action_way: {self.action_way}")
+
+                    if self.entropy_way_a == '0':
+                        stacked_log_pi = torch.stack(
+                            [new_log_pi[other_id] for other_id in self.agents.keys()],
+                            dim=1,
+                        ).sum(dim=1)
+                        entropy = -stacked_log_pi
+                    elif self.entropy_way_a == '1':
+                        entropy = -new_log_pi[agent_id]
+                    else:
+                        raise ValueError(f"unsupported entropy_way_a: {self.entropy_way_a}")
+
+                    q_pi = torch.min(q1_pi, q2_pi)
+                    action_l2 = new_action[agent_id].pow(2).mean()
+                    actor_loss = (
+                        -q_pi
+                        - self.alphas[agent_id].alpha.detach() * entropy
+                    ).mean() + float(action_l2_weight) * action_l2
+                    actor_loss = (
+                        actor_loss
+                        + float(flow_consistency_weight) * flow_loss
+                    )
+                    actor_loss_value = actor_loss.detach()
+                    policy_q_mean = q_pi.detach().mean()
+                    policy_q_variance = q_pi.detach().var(unbiased=False)
+                    entropy_mean = entropy.detach().mean()
+                    agent.update_actor(actor_loss)
+                finally:
+                    for critic_param, requires_grad in zip(
+                        agent.critic.parameters(),
+                        critic_requires_grad,
+                    ):
+                        critic_param.requires_grad_(requires_grad)
+
+                ## 更新alpha
+                if self.adaptive_alpha:
+                    alpha_loss = (
+                        self.alphas[agent_id].alpha
+                        * (entropy - self.alphas[agent_id].target_entropy).detach()
+                    ).mean()
+                    alpha_loss_value = alpha_loss.detach()
+                    self.alphas[agent_id].update_alpha(alpha_loss)
                 else:
-                    raise ValueError(f"unsupported entropy_way_a: {self.entropy_way_a}")
-
-                q_pi = torch.min(q1_pi, q2_pi)
-
-                # Actor update only needs dQ/da, not critic parameter gradients.
-                actor_loss = (- q_pi - self.alphas[agent_id].alpha.detach() * entropy).mean()
-                actor_loss_value = actor_loss.detach()
-                policy_q_mean = q_pi.detach().mean()
-                entropy_mean = entropy.detach().mean()
-                agent.update_actor(actor_loss)
-            finally:
-                for critic_param, requires_grad in zip(
-                    agent.critic.parameters(),
-                    critic_requires_grad,
-                ):
-                    critic_param.requires_grad_(requires_grad)
-
-            ## 更新alpha
-            '''公式: Lα = E_{s,a ~ D} [-α * log_pi_a(s,a) - α * H] = E_{s,a ~ D} [α * (-log_pi_a(s,a) - H)]'''
-            if self.adaptive_alpha:
-                alpha_loss = (self.alphas[agent_id].alpha * (entropy - self.alphas[agent_id].target_entropy).detach()).mean()
-                alpha_loss_value = alpha_loss.detach()
-                self.alphas[agent_id].update_alpha(alpha_loss)
+                    alpha_loss_value = torch.zeros((), device=self.device)
             else:
-                alpha_loss_value = torch.zeros((), device=self.device)
+                nan_value = torch.full((), float("nan"), device=self.device)
+                actor_loss_value = nan_value
+                policy_q_mean = nan_value
+                policy_q_variance = nan_value
+                entropy_mean = nan_value
+                alpha_loss_value = nan_value
+                flow_loss = nan_value
+                flow_consistency_mean = nan_value
+                flow_consistency_min = nan_value
+                negative_consistency_rate = nan_value
+                flow_violation_rate = nan_value
+                residual_forcing_norm_mean = nan_value
+                residual_forcing_norm_max = nan_value
 
             agent_diagnostics.append(
                 {
                     "critic_loss": q1_loss_value + q2_loss_value,
                     "actor_loss": actor_loss_value,
                     "q_replay": 0.5 * (q1_mean + q2_mean),
+                    "q_replay_variance": 0.5 * (q1_variance + q2_variance),
                     "q_policy": policy_q_mean,
+                    "q_policy_variance": policy_q_variance,
                     "q_target": q_target_mean,
+                    "q_target_variance": q_target_variance,
                     "entropy": entropy_mean,
                     "alpha": self.alphas[agent_id].alpha.detach(),
                     "alpha_loss": alpha_loss_value,
+                    "flow_loss": flow_loss.detach(),
+                    "flow_consistency_mean": flow_consistency_mean,
+                    "flow_consistency_min": flow_consistency_min,
+                    "negative_consistency_rate": negative_consistency_rate,
+                    "flow_violation_rate": flow_violation_rate,
+                    "residual_forcing_norm_mean": residual_forcing_norm_mean,
+                    "residual_forcing_norm_max": residual_forcing_norm_max,
                 }
             )
 

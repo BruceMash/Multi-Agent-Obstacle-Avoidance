@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import time
+from collections import deque
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,66 @@ REWARD_COMPONENT_KEYS = (
 )
 
 
+class AgentObservationHistory:
+    """维护在线执行所需的逐智能体有限时序观测。"""
+
+    def __init__(self, temporal_steps: int, agent_ids: list[str]):
+        self.temporal_steps = int(temporal_steps)
+        if self.temporal_steps <= 0:
+            raise ValueError("temporal_steps must be positive")
+        self.agent_ids = tuple(agent_ids)
+        if not self.agent_ids:
+            raise ValueError("agent_ids cannot be empty")
+        self._histories = {
+            agent_id: deque(maxlen=self.temporal_steps)
+            for agent_id in self.agent_ids
+        }
+
+    def reset(self, observations: dict[str, np.ndarray]) -> None:
+        for agent_id in self.agent_ids:
+            self._histories[agent_id].clear()
+        self.append(observations)
+
+    def append(self, observations: dict[str, np.ndarray]) -> None:
+        for agent_id in self.agent_ids:
+            self._histories[agent_id].append(
+                np.asarray(observations[agent_id], dtype=np.float32).copy()
+            )
+
+    def policy_inputs(
+        self,
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        observations = {}
+        masks = {}
+        for agent_id in self.agent_ids:
+            frames = list(self._histories[agent_id])
+            if not frames:
+                raise RuntimeError("observation history must be reset before use")
+            observations[agent_id] = np.stack(frames, axis=0).astype(
+                np.float32,
+                copy=False,
+            )
+            masks[agent_id] = np.ones(len(frames), dtype=bool)
+        return observations, masks
+
+
+def compute_policy_weight(
+    global_step: int,
+    start_steps: int,
+    transition_steps: int,
+) -> float:
+    """计算随机探索策略向 Actor 平滑接管的线性权重。"""
+    if int(global_step) <= int(start_steps):
+        return 0.0
+    if int(transition_steps) <= 0:
+        return 1.0
+    return float(np.clip(
+        (int(global_step) - int(start_steps)) / float(transition_steps),
+        0.0,
+        1.0,
+    ))
+
+
 def matrix_to_agent_dict(values: np.ndarray, agent_ids: list[str]) -> dict[str, np.ndarray]:
     values = np.asarray(values, dtype=np.float32)
     return {
@@ -93,14 +154,10 @@ def state_bound_tuple(value, state_dim: int) -> tuple[float, ...]:
 
 
 def build_critic_action_matrix(info: dict, env: MultiAgentDMPEnv) -> np.ndarray:
-    applied_accelerations = np.asarray(
-        info["applied_accelerations"],
-        dtype=np.float32,
-    )
-    guided_action = np.asarray(info["guided_action"], dtype=np.float32)
-    dmp_dims = int(env.dmp_config.dims)
-    goal_offset = guided_action[:, dmp_dims : 2 * dmp_dims]
-    critic_action = np.concatenate([applied_accelerations, goal_offset], axis=1)
+    # Critic、Replay 和 Actor 必须使用环境接收的同一 DMP 动作变量：
+    # [forcing, goal_offset]。动力学映射和加速度裁剪属于 transition，
+    # 若在写入 Replay 前改成 acceleration，会破坏 Bellman target 的动作语义。
+    critic_action = np.asarray(info["raw_action"], dtype=np.float32)
     expected_shape = env.action_shape
     if critic_action.shape != expected_shape:
         raise ValueError(
@@ -179,6 +236,7 @@ def build_network_config(
         forcing_term_max=float(env.dmp_config.forcing_term_max),
         acceleration_low=acceleration_low,
         acceleration_high=acceleration_high,
+        flow_zero_threshold=float(env.dmp_config.flow_zero_threshold),
     )
 
 
@@ -275,6 +333,8 @@ def evaluate_policy(
         for eval_index, eval_seed in enumerate(eval_seeds):
             obs_matrix, _ = eval_env.reset(seed=int(eval_seed))
             obs = matrix_to_agent_dict(obs_matrix, agent_ids)
+            history = AgentObservationHistory(policy.temporal_steps, agent_ids)
+            history.reset(obs)
             episode_reward = np.zeros(int(eval_env.num_agents), dtype=np.float64)
             episode_step = 0
             terminated = False
@@ -286,7 +346,11 @@ def evaluate_policy(
             min_inter_agent_distance = float("inf")
 
             while not bool(terminated or truncated):
-                action = policy.evaluate_action(obs)
+                policy_obs, temporal_masks = history.policy_inputs()
+                action = policy.evaluate_action(
+                    policy_obs,
+                    temporal_masks=temporal_masks,
+                )
                 action_matrix = agent_dict_to_matrix(action, agent_ids)
                 action_matrix = np.clip(
                     action_matrix,
@@ -295,6 +359,7 @@ def evaluate_policy(
                 ).astype(np.float32)
                 next_obs_matrix, rewards, terminated, truncated, info = eval_env.step(action_matrix)
                 obs = matrix_to_agent_dict(next_obs_matrix, agent_ids)
+                history.append(obs)
                 episode_reward += np.asarray(rewards, dtype=np.float64)
                 episode_step += 1
 
@@ -527,6 +592,93 @@ def write_tensorboard_eval(writer, row: dict[str, Any]) -> None:
     )
 
 
+def write_tensorboard_learning(writer, row: dict[str, Any]) -> None:
+    if writer is None:
+        return
+    step = int(row["global_step"])
+    for key in (
+        "critic_loss",
+        "actor_loss",
+        "q_replay",
+        "q_replay_variance",
+        "q_policy",
+        "q_policy_variance",
+        "q_target",
+        "q_target_variance",
+        "entropy",
+        "alpha",
+        "alpha_loss",
+        "flow_loss",
+    ):
+        writer.add_scalar(f"learning/{key}", row[key], step)
+    writer.add_scalar("action/forcing_abs_mean", row["action_forcing_abs_mean"], step)
+    writer.add_scalar("action/offset_abs_mean", row["action_offset_abs_mean"], step)
+    writer.add_scalar("action/saturation_rate", row["action_saturation_rate"], step)
+    writer.add_scalar("exploration/policy_weight", row["policy_weight"], step)
+    writer.add_scalar("dmp/flow_loss", row["flow_loss"], step)
+    for key in (
+        "flow_consistency_mean",
+        "flow_consistency_min",
+        "negative_consistency_rate",
+        "flow_violation_rate",
+        "residual_forcing_norm",
+        "residual_forcing_norm_max",
+        "nominal_drive_norm",
+        "closed_loop_drive_norm",
+        "phase",
+        "phase_rate",
+        "phase_pause_fraction",
+        "active_goal_error",
+        "minimum_obstacle_clearance",
+    ):
+        writer.add_scalar(f"dmp/{key}", row[key], step)
+
+
+def summarize_dmp_info(
+    info: dict[str, Any],
+    *,
+    minimum_consistency: float,
+) -> dict[str, float]:
+    consistency = np.asarray(info.get("flow_consistencies", [np.nan]), dtype=np.float32)
+    phase = np.asarray(info.get("phases", [np.nan]), dtype=np.float32)
+    phase_rate = np.asarray(info.get("phase_rates", [np.nan]), dtype=np.float32)
+    phase_paused = np.asarray(info.get("phase_paused_mask", [False]), dtype=bool)
+    residual_norm = np.asarray(info.get("residual_forcing_norms", [np.nan]), dtype=np.float32)
+    nominal_norm = np.asarray(info.get("nominal_drive_norms", [np.nan]), dtype=np.float32)
+    closed_norm = np.asarray(info.get("closed_loop_drive_norms", [np.nan]), dtype=np.float32)
+    goal_error = np.asarray(info.get("distance_to_goals", [np.nan]), dtype=np.float32)
+    min_clearance = np.asarray(info.get("min_clearances", [np.nan]), dtype=np.float32)
+    active_mask = np.logical_not(np.asarray(
+        info.get("success_rewarded_mask", np.zeros_like(consistency, dtype=bool)),
+        dtype=bool,
+    ))
+    if np.any(active_mask):
+        consistency = consistency[active_mask]
+        phase = phase[active_mask]
+        phase_rate = phase_rate[active_mask]
+        phase_paused = phase_paused[active_mask]
+        residual_norm = residual_norm[active_mask]
+        nominal_norm = nominal_norm[active_mask]
+        closed_norm = closed_norm[active_mask]
+        goal_error = goal_error[active_mask]
+        min_clearance = min_clearance[active_mask]
+    return {
+        "flow_consistency_mean": float(np.mean(consistency)),
+        "flow_consistency_min": float(np.min(consistency)),
+        "negative_consistency_rate": float(np.mean(consistency < 0.0)),
+        "flow_violation_rate": float(np.mean(consistency < float(minimum_consistency))),
+        "residual_forcing_norm": float(np.mean(residual_norm)),
+        "residual_forcing_norm_max": float(np.max(residual_norm)),
+        "nominal_drive_norm": float(np.mean(nominal_norm)),
+        "closed_loop_drive_norm": float(np.mean(closed_norm)),
+        "phase": float(np.mean(phase)),
+        "phase_rate": float(np.mean(phase_rate)),
+        "phase_pause_fraction": float(np.mean(phase_paused)),
+        "active_goal_error": float(np.mean(goal_error)),
+        "minimum_obstacle_clearance": float(np.min(min_clearance)),
+    }
+
+
 def parse_int_tuple(value: str) -> tuple[int, ...]:
     try:
         parsed = tuple(int(item.strip()) for item in value.split(",") if item.strip())
@@ -556,15 +708,71 @@ def parse_args() -> argparse.Namespace:
     # 算法相关
     parser.add_argument("--total-steps", type=int, default=int(config.total_steps))
     parser.add_argument("--start-steps", type=int, default=int(config.start_steps))
+    parser.add_argument(
+        "--learning-starts",
+        type=int,
+        default=int(config.learning_starts),
+    )
+    parser.add_argument(
+        "--policy-transition-steps",
+        type=int,
+        default=int(config.policy_transition_steps),
+    )
     parser.add_argument("--batch-size", type=int, default=int(config.batch_size))
     parser.add_argument("--buffer-size", type=int, default=int(config.buffer_size))
     parser.add_argument("--actor-lr", type=float, default=float(config.actor_lr))
     parser.add_argument("--critic-lr", type=float, default=float(config.critic_lr))
+    parser.add_argument(
+        "--actor-update-interval",
+        type=int,
+        default=int(config.actor_update_interval),
+    )
+    parser.add_argument(
+        "--actor-action-l2-weight",
+        type=float,
+        default=float(config.actor_action_l2_weight),
+    )
+    parser.add_argument(
+        "--enable-flow-consistency-loss",
+        action=argparse.BooleanOptionalAction,
+        default=bool(config.enable_flow_consistency_loss),
+    )
+    parser.add_argument(
+        "--flow-consistency-weight",
+        type=float,
+        default=float(config.flow_consistency_weight),
+    )
+    parser.add_argument(
+        "--minimum-flow-consistency",
+        type=float,
+        default=float(config.minimum_flow_consistency),
+    )
+    parser.add_argument(
+        "--flow-consistency-warmup-steps",
+        type=int,
+        default=int(config.flow_consistency_warmup_steps),
+    )
     parser.add_argument("--gamma", type=float, default=float(config.gamma))
     parser.add_argument("--tau", type=float, default=float(config.soft_update_tau))
     parser.add_argument("--learn-interval", type=int, default=int(config.learn_interval))
     parser.add_argument("--updates-per-step", type=int, default=int(config.updates_per_step))
     parser.add_argument("--temporal-steps", type=int, default=int(config.temporal_steps))
+    parser.add_argument(
+        "--phase-mode",
+        choices=("classic", "fcep"),
+        default=str(config.phase_mode),
+    )
+    parser.add_argument(
+        "--phase-integrator",
+        choices=("legacy_euler", "exponential"),
+        default=str(config.phase_integrator),
+    )
+    parser.add_argument("--phase-min", type=float, default=float(config.phase_min))
+    parser.add_argument(
+        "--flow-zero-threshold",
+        type=float,
+        default=float(config.flow_zero_threshold),
+    )
 
     # 网络结构线管
     parser.add_argument("--hidden-dim", type=int, default=int(config.hidden_dim))
@@ -693,6 +901,23 @@ def parse_args() -> argparse.Namespace:
 def train() -> dict[str, str]:  # 训练主循环
     args = parse_args() # 读args
     args.progress_interval = max(1, int(args.progress_interval))
+    args.start_steps = max(0, int(args.start_steps))
+    args.learning_starts = max(0, int(args.learning_starts))
+    args.policy_transition_steps = max(0, int(args.policy_transition_steps))
+    if int(args.actor_update_interval) <= 0:
+        raise ValueError("actor_update_interval must be positive")
+    if float(args.actor_action_l2_weight) < 0.0:
+        raise ValueError("actor_action_l2_weight must be non-negative")
+    if float(args.flow_consistency_weight) < 0.0:
+        raise ValueError("flow_consistency_weight must be non-negative")
+    if not -1.0 <= float(args.minimum_flow_consistency) <= 1.0:
+        raise ValueError("minimum_flow_consistency must lie in [-1, 1]")
+    if int(args.flow_consistency_warmup_steps) < 0:
+        raise ValueError("flow_consistency_warmup_steps must be non-negative")
+    if not 0.0 <= float(args.phase_min) <= 1.0:
+        raise ValueError("phase_min must lie in [0, 1]")
+    if float(args.flow_zero_threshold) < 0.0:
+        raise ValueError("flow_zero_threshold must be non-negative")
 
     # 训练间隔
     args.log_interval = max(1, int(args.log_interval))
@@ -739,6 +964,14 @@ def train() -> dict[str, str]:  # 训练主循环
         curriculum_placement_attempts=int(args.placement_attempts),
         curriculum_curved_turn_rate=float(args.curved_turn_rate),
         curriculum_wandering_strength=float(args.wandering_strength),
+        phase_mode=str(args.phase_mode),
+        phase_integrator=str(args.phase_integrator),
+        phase_min=float(args.phase_min),
+        flow_zero_threshold=float(args.flow_zero_threshold),
+        enable_flow_consistency_loss=bool(args.enable_flow_consistency_loss),
+        flow_consistency_weight=float(args.flow_consistency_weight),
+        minimum_flow_consistency=float(args.minimum_flow_consistency),
+        flow_consistency_warmup_steps=int(args.flow_consistency_warmup_steps),
     )
     curriculum_stages = build_curriculum_stages(
         args.phase2_box_counts,
@@ -780,6 +1013,7 @@ def train() -> dict[str, str]:  # 训练主循环
     model_dir = run_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.csv"
+    train_metrics_path = run_dir / "train_metrics.csv"
     eval_metrics_path = run_dir / "eval_metrics.csv"
     eval_seeds = [
         int(args.eval_seed_base) + seed_offset
@@ -820,6 +1054,8 @@ def train() -> dict[str, str]:  # 训练主循环
 
     obs_matrix, _ = env.reset(seed=args.seed)
     obs = matrix_to_agent_dict(obs_matrix, agent_ids)
+    observation_history = AgentObservationHistory(args.temporal_steps, agent_ids)
+    observation_history.reset(obs)
     episode_reward = np.zeros(int(env.num_agents), dtype=np.float64)
     episode_reward_components = {
         key: np.zeros(int(env.num_agents), dtype=np.float64)
@@ -842,23 +1078,63 @@ def train() -> dict[str, str]:  # 训练主循环
     best_eval_success_rate = -1.0
     best_eval_mean_reward = -float("inf")
     best_eval_stage_index = -1
+    latest_policy_weight = 0.0
+    latest_diagnostics: dict[str, float] | None = None
+    latest_dmp_diagnostics = {
+        key: float("nan")
+        for key in (
+            "flow_consistency_mean",
+            "flow_consistency_min",
+            "negative_consistency_rate",
+            "flow_violation_rate",
+            "residual_forcing_norm",
+            "residual_forcing_norm_max",
+            "nominal_drive_norm",
+            "closed_loop_drive_norm",
+            "phase",
+            "phase_rate",
+            "phase_pause_fraction",
+            "active_goal_error",
+            "minimum_obstacle_clearance",
+        )
+    }
 
     min_learn_size = max(int(args.batch_size), int(args.temporal_steps))
     for global_step in range(1, int(args.total_steps) + 1):
         if global_step <= int(args.start_steps):
             action_matrix = env.action_space.sample().astype(np.float32)
-            action = matrix_to_agent_dict(action_matrix, agent_ids)
+            latest_policy_weight = 0.0
         else:
-            action = policy.select_action(obs)
-            action_matrix = agent_dict_to_matrix(action, agent_ids)
+            policy_obs, temporal_masks = observation_history.policy_inputs()
+            policy_action = policy.select_action(
+                policy_obs,
+                temporal_masks=temporal_masks,
+            )
+            policy_action_matrix = agent_dict_to_matrix(policy_action, agent_ids)
+            latest_policy_weight = compute_policy_weight(
+                global_step,
+                args.start_steps,
+                args.policy_transition_steps,
+            )
+            if latest_policy_weight < 1.0:
+                random_action_matrix = env.action_space.sample().astype(np.float32)
+                action_matrix = (
+                    latest_policy_weight * policy_action_matrix
+                    + (1.0 - latest_policy_weight) * random_action_matrix
+                )
+            else:
+                action_matrix = policy_action_matrix
             action_matrix = np.clip(
                 action_matrix,
                 env.action_space.low,
                 env.action_space.high,
             ).astype(np.float32)
-            action = matrix_to_agent_dict(action_matrix, agent_ids)
 
         next_obs_matrix, rewards, terminated, truncated, info = env.step(action_matrix)
+        latest_dmp_diagnostics = summarize_dmp_info(
+            info,
+            minimum_consistency=float(args.minimum_flow_consistency),
+        )
         latest_inter_agent_collision_count = mask_count(info, "inter_agent_collision_mask")
         latest_obstacle_collision_count = mask_count(info, "obstacle_collision_mask")
         latest_boundary_collision_count = mask_count(info, "boundary_collision_mask")
@@ -901,23 +1177,45 @@ def train() -> dict[str, str]:  # 训练主循环
             agent_id: bool(terminated)
             for agent_id in agent_ids
         }
-        policy.add(obs, critic_action, reward, next_obs, done_for_buffer)
+        episode_end_for_buffer = {
+            agent_id: bool(terminated or truncated)
+            for agent_id in agent_ids
+        }
+        policy.add(
+            obs,
+            critic_action,
+            reward,
+            next_obs,
+            done_for_buffer,
+            episode_end_for_buffer,
+        )
 
         episode_reward += np.asarray(rewards, dtype=np.float64)
         episode_step += 1
         obs = next_obs
+        observation_history.append(obs)
 
         can_learn = len(policy.buffers[policy.agent_x]) >= min_learn_size
         if (
             can_learn
-            and global_step > int(args.start_steps)
+            and global_step >= int(args.learning_starts)
             and global_step % int(args.learn_interval) == 0
         ):
             for _ in range(int(args.updates_per_step)):
-                policy.learn(
+                latest_diagnostics = policy.learn(
                     batch_size=int(args.batch_size),
                     gamma=float(args.gamma),
                     tau=float(args.tau),
+                    update_actor=(
+                        global_step > int(args.start_steps)
+                        and global_step % int(args.actor_update_interval) == 0
+                    ),
+                    action_l2_weight=float(args.actor_action_l2_weight),
+                    enable_flow_consistency_loss=bool(args.enable_flow_consistency_loss),
+                    flow_consistency_weight=float(args.flow_consistency_weight),
+                    minimum_flow_consistency=float(args.minimum_flow_consistency),
+                    flow_consistency_warmup_steps=int(args.flow_consistency_warmup_steps),
+                    global_step=int(global_step),
                 )
 
         episode_done = bool(terminated or truncated)
@@ -1009,6 +1307,7 @@ def train() -> dict[str, str]:  # 训练主循环
 
             obs_matrix, _ = env.reset()
             obs = matrix_to_agent_dict(obs_matrix, agent_ids)
+            observation_history.reset(obs)
             episode_reward[:] = 0.0
             for values in episode_reward_components.values():
                 values[:] = 0.0
@@ -1036,6 +1335,48 @@ def train() -> dict[str, str]:  # 训练主循环
             )
 
         if global_step % int(args.log_interval) == 0:
+            action_low = np.asarray(env.action_space.low, dtype=np.float32)
+            action_high = np.asarray(env.action_space.high, dtype=np.float32)
+            saturated = np.logical_or(
+                np.isclose(action_matrix, action_low, rtol=0.0, atol=1e-4),
+                np.isclose(action_matrix, action_high, rtol=0.0, atol=1e-4),
+            )
+            diagnostics = latest_diagnostics or {}
+            dmp_dims = int(env.dmp_config.dims)
+            learning_row = {
+                "global_step": int(global_step),
+                "episode_count": int(episode_count),
+                "buffer_size": int(len(policy.buffers[policy.agent_x])),
+                "elapsed_sec": float(time.time() - start_time),
+                **{
+                    key: float(diagnostics.get(key, np.nan))
+                    for key in (
+                        "critic_loss",
+                        "actor_loss",
+                        "q_replay",
+                        "q_replay_variance",
+                        "q_policy",
+                        "q_policy_variance",
+                        "q_target",
+                        "q_target_variance",
+                        "entropy",
+                        "alpha",
+                        "alpha_loss",
+                        "flow_loss",
+                    )
+                },
+                "action_forcing_abs_mean": float(
+                    np.mean(np.abs(action_matrix[:, :dmp_dims]))
+                ),
+                "action_offset_abs_mean": float(
+                    np.mean(np.abs(action_matrix[:, dmp_dims:]))
+                ),
+                "action_saturation_rate": float(np.mean(saturated)),
+                "policy_weight": float(latest_policy_weight),
+                **latest_dmp_diagnostics,
+            }
+            append_metrics(train_metrics_path, learning_row)
+            write_tensorboard_learning(writer, learning_row)
             progress.event(
                 (
                     f"step={global_step} buffer={len(policy.buffers[policy.agent_x])} "

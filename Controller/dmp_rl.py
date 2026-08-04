@@ -2,6 +2,12 @@
 
 import numpy as np
 
+from Controller.dmp_flow import (
+    compute_dmp_drives,
+    compute_dmp_flow_consistency,
+    update_dmp_phase,
+)
+
 
 @dataclass
 class DMPConfig:
@@ -18,6 +24,10 @@ class DMPConfig:
     forcing_term_max: float = 10.0
     forcing_term_min: float = -10.0
     goal_offset_max: float = 1.5
+    phase_mode: str = "classic"
+    phase_integrator: str = "legacy_euler"
+    phase_min: float = 0.0
+    flow_zero_threshold: float = 1.0e-4
 
     def __post_init__(self):
         self.dt = float(self.dt)
@@ -26,6 +36,18 @@ class DMPConfig:
             raise ValueError("dt must be positive")
         if self.dims <= 0:
             raise ValueError("dims must be positive")
+        self.phase_mode = str(self.phase_mode).lower()
+        self.phase_integrator = str(self.phase_integrator).lower()
+        self.phase_min = float(self.phase_min)
+        self.flow_zero_threshold = float(self.flow_zero_threshold)
+        if self.phase_mode not in {"classic", "fcep"}:
+            raise ValueError("phase_mode must be 'classic' or 'fcep'")
+        if self.phase_integrator not in {"legacy_euler", "exponential"}:
+            raise ValueError("phase_integrator must be 'legacy_euler' or 'exponential'")
+        if not 0.0 <= self.phase_min <= 1.0:
+            raise ValueError("phase_min must lie in [0, 1]")
+        if self.flow_zero_threshold < 0.0:
+            raise ValueError("flow_zero_threshold must be non-negative")
 
 
 class SecondOrderDMPController:
@@ -75,26 +97,48 @@ class SecondOrderDMPController:
             self.config.forcing_term_min,
             self.config.forcing_term_max,
         )
-        gate = np.tanh(self.calc_distance(goal_eff, position))
-
-        acceleration = (
-            self.config.K_alpha
-            * (self.config.K_beta * (goal_eff - position) - self.config.tau * velocity)
-            + forcing * gate
-        ) / (self.config.tau ** 2)
-
-        # 按一阶衰减形式更新相位，便于后续接标准 DMP 或 baseline。
-        self.phase = max(
-            0.0,
-            self.phase + (-self.config.alpha_s * self.phase / self.config.tau) * self.config.dt,
+        nominal_drive, residual_drive, closed_loop_drive = compute_dmp_drives(
+            goal_eff - position,
+            velocity,
+            forcing,
+            k_alpha=self.config.K_alpha,
+            k_beta=self.config.K_beta,
+            tau=self.config.tau,
         )
+        acceleration = closed_loop_drive / (self.config.tau ** 2)
+        flow_consistency = float(compute_dmp_flow_consistency(
+            nominal_drive,
+            closed_loop_drive,
+            zero_threshold=self.config.flow_zero_threshold,
+        ))
+
+        previous_phase = float(self.phase)
+        next_phase, phase_rate = update_dmp_phase(
+            previous_phase,
+            flow_consistency,
+            alpha_s=self.config.alpha_s,
+            dt=self.config.dt,
+            tau=self.config.tau,
+            phase_min=self.config.phase_min,
+            phase_mode=self.config.phase_mode,
+            phase_integrator=self.config.phase_integrator,
+        )
+        self.phase = float(next_phase)
 
         return acceleration, {
             "phase": float(self.phase),
+            "previous_phase": previous_phase,
+            "phase_rate": float(phase_rate),
+            "phase_paused": bool(float(phase_rate) <= 0.0),
+            "phase_mode": self.config.phase_mode,
             "tau": float(self.config.tau),
             "goal_eff": goal_eff.copy(),
             "goal_offset": parsed["goal_offset"].copy(),
             "forcing": forcing.copy(),
+            "nominal_drive": np.asarray(nominal_drive, dtype=float).copy(),
+            "residual_drive": np.asarray(residual_drive, dtype=float).copy(),
+            "closed_loop_drive": np.asarray(closed_loop_drive, dtype=float).copy(),
+            "flow_consistency": flow_consistency,
         }
 
     def _parse_action(self, rl_action):

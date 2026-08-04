@@ -764,6 +764,23 @@ class MASACActor(nn.Module):
         self.goal_offset_mu = nn.Linear(hidden_dim, self.goal_offset_action_dim)
         self.goal_offset_log_std = nn.Linear(hidden_dim, self.goal_offset_action_dim)
 
+        # DMP Actor 学习的是基础吸引轨迹上的残差。新策略若以默认线性层
+        # 初始化，会立即产生大幅 forcing/goal offset，并在训练早期频繁触发
+        # 加速度裁剪。均值头从零残差开始，较低初始标准差保留局部探索，
+        # 同时不改变参数形状，因此仍兼容既有 checkpoint。
+        self._initialize_action_heads()
+
+    def _initialize_action_heads(self) -> None:
+        for mean_head in (self.forcing_mu, self.goal_offset_mu):
+            nn.init.zeros_(mean_head.weight)
+            nn.init.zeros_(mean_head.bias)
+        for log_std_head in (
+            self.forcing_log_std,
+            self.goal_offset_log_std,
+        ):
+            nn.init.normal_(log_std_head.weight, mean=0.0, std=1e-3)
+            nn.init.constant_(log_std_head.bias, -2.0)
+
     def encode_observation(
         self,
         obs: torch.Tensor,

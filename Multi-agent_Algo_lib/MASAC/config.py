@@ -41,6 +41,7 @@ class MASACNetworkConfig:
     forcing_term_max: float = 10.0
     acceleration_low: tuple[float, ...] | None = None
     acceleration_high: tuple[float, ...] | None = None
+    flow_zero_threshold: float = 1.0e-4
 
     def __post_init__(self) -> None:
         if self.sensor_observation_dim is not None:
@@ -115,12 +116,15 @@ class MASACNetworkConfig:
         self.dmp_tau = float(self.dmp_tau)
         self.forcing_term_min = float(self.forcing_term_min)
         self.forcing_term_max = float(self.forcing_term_max)
+        self.flow_zero_threshold = float(self.flow_zero_threshold)
         if self.goal_distance_clip <= 0.0:
             raise ValueError("goal_distance_clip must be positive")
         if self.dmp_tau <= 0.0:
             raise ValueError("dmp_tau must be positive")
         if self.forcing_term_min >= self.forcing_term_max:
             raise ValueError("forcing_term_min must be smaller than forcing_term_max")
+        if self.flow_zero_threshold < 0.0:
+            raise ValueError("flow_zero_threshold must be non-negative")
 
         if (self.action_low is None) != (self.action_high is None):
             raise ValueError("action_low and action_high must be both set or both None")
@@ -315,6 +319,10 @@ class MASACExperimentConfig:
     forcing_term_max: float = 10.0
     forcing_term_min: float = -10.0
     goal_offset_max: float = 1.0
+    phase_mode: str = "classic"
+    phase_integrator: str = "legacy_euler"
+    phase_min: float = 0.0
+    flow_zero_threshold: float = 1.0e-4
 
     # MASAC training
     seed: int = 321
@@ -328,6 +336,12 @@ class MASACExperimentConfig:
     buffer_size: int = 1_000_000
     actor_lr: float = 1e-4
     critic_lr: float = 1e-4
+    actor_update_interval: int = 2
+    actor_action_l2_weight: float = 2.0
+    enable_flow_consistency_loss: bool = False
+    flow_consistency_weight: float = 0.01
+    minimum_flow_consistency: float = 0.0
+    flow_consistency_warmup_steps: int = 0
     gamma: float = 0.95
     soft_update_tau: float = 0.01
     learn_interval: int = 1
@@ -371,6 +385,10 @@ class MASACExperimentConfig:
             "forcing_term_max": self.forcing_term_max,
             "forcing_term_min": self.forcing_term_min,
             "goal_offset_max": self.goal_offset_max,
+            "phase_mode": self.phase_mode,
+            "phase_integrator": self.phase_integrator,
+            "phase_min": self.phase_min,
+            "flow_zero_threshold": self.flow_zero_threshold,
         }
 
     def build_env_config(self) -> MultiAgentEnvConfig:

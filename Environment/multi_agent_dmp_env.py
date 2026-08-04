@@ -1200,6 +1200,44 @@ class MultiAgentDMPEnv(gym.Env):
             ],
             dtype=np.float32,
         )
+        flow_consistencies = np.array(
+            [
+                float(info.get("flow_consistency", 1.0))
+                for info in self.latest_controller_infos
+            ],
+            dtype=np.float32,
+        )
+        phase_rates = np.array(
+            [
+                float(info.get("phase_rate", 0.0))
+                for info in self.latest_controller_infos
+            ],
+            dtype=np.float32,
+        )
+        phase_paused_mask = np.array(
+            [
+                bool(info.get("phase_paused", True))
+                for info in self.latest_controller_infos
+            ],
+            dtype=bool,
+        )
+
+        def controller_vectors(key: str) -> np.ndarray:
+            return np.stack(
+                [
+                    np.asarray(
+                        info.get(key, np.zeros(self.state_dim, dtype=np.float32)),
+                        dtype=np.float32,
+                    )
+                    for info in self.latest_controller_infos
+                ],
+                axis=0,
+            )
+
+        nominal_drives = controller_vectors("nominal_drive")
+        residual_drives = controller_vectors("residual_drive")
+        closed_loop_drives = controller_vectors("closed_loop_drive")
+        residual_forcing = controller_vectors("forcing")
         return {
             "success": bool(successful_episode),
             "success_mask": success_mask.astype(bool).copy(),
@@ -1221,7 +1259,17 @@ class MultiAgentDMPEnv(gym.Env):
             "min_boundary_distances": self._compute_min_boundary_distances(),
             "min_clearances": min_clearances,
             "phases": phases,
+            "phase_rates": phase_rates,
+            "phase_paused_mask": phase_paused_mask,
             "taus": taus,
+            "flow_consistencies": flow_consistencies,
+            "nominal_drives": nominal_drives,
+            "residual_drives": residual_drives,
+            "closed_loop_drives": closed_loop_drives,
+            "nominal_drive_norms": np.linalg.norm(nominal_drives, axis=1).astype(np.float32),
+            "residual_drive_norms": np.linalg.norm(residual_drives, axis=1).astype(np.float32),
+            "closed_loop_drive_norms": np.linalg.norm(closed_loop_drives, axis=1).astype(np.float32),
+            "residual_forcing_norms": np.linalg.norm(residual_forcing, axis=1).astype(np.float32),
             "commanded_accelerations": commanded_accelerations.astype(np.float32).copy(),
             "applied_accelerations": applied_accelerations.astype(np.float32).copy(),
             "next_states": next_states.astype(np.float32).copy(),
