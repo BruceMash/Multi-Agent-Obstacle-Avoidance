@@ -1,0 +1,52 @@
+{
+  "profile": "clean_baseline",
+  "status": "selected_for_short_validation_not_converged",
+  "phase_mode": "classic",
+  "enable_flow_consistency_loss": false,
+  "flow_consistency_in_reward": false,
+  "dmp": {
+    "k_alpha": 3.2,
+    "k_beta": 0.8,
+    "tau": 2.5,
+    "alpha_s": 2.0,
+    "phase_integrator": "legacy_euler",
+    "phase_end_threshold": 0.0001
+  },
+  "action": {
+    "order": ["forcing_xyz", "goal_offset_xyz"],
+    "forcing_limit": 10.0,
+    "forcing_gate_kappa": 1.0,
+    "goal_offset_limit": 1.0,
+    "acceleration_limit": 4.0
+  },
+  "rl": {
+    "actor_lr": 0.0001,
+    "critic_lr": 0.0001,
+    "temperature_lr": 0.0001,
+    "initial_temperature": 0.01,
+    "target_entropy": -6.0,
+    "gamma": 0.99,
+    "reward_scale": 1.0,
+    "updates_per_step": 1,
+    "target_update_interval": 1,
+    "actor_gradient_clip": 0.5,
+    "critic_gradient_clip": 0.5
+  },
+  "selection_source": {
+    "dmp": "artifacts/calibration/pure_dmp_20260804_200052/report.json",
+    "action_scale": "artifacts/calibration/action_scale/summary_20260804_202311",
+    "rl": "artifacts/calibration/rl_smoke/summary_20260804_202659"
+  },
+  "training": {
+    "calibration_seeds": [321, 654],
+    "short_validation_seed": 321,
+    "short_validation_steps": 1000,
+    "deterministic_evaluation": true,
+    "fixed_scenarios": true
+  },
+  "limitations": [
+    "The 500-step parameter smokes are diagnostic and do not demonstrate convergence.",
+    "The short clean-baseline validation does not replace multi-seed full training.",
+    "FCEP and flow-consistency Actor loss remain disabled."
+  ]
+}

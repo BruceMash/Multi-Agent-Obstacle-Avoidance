@@ -1,0 +1,22 @@
+{
+  "profile": "action_scale_scan",
+  "inherits": "pure_dmp_selected",
+  "forcing_limit": [5.0, 7.5, 10.0],
+  "forcing_gate_kappa": [0.5, 1.0, 2.0],
+  "acceleration_limit": [4.0],
+  "diagnostic_acceleration_limit": [4.0, 5.0],
+  "gate_modes_for_diagnosis": ["axis", "scalar"],
+  "smoke_training": {
+    "seeds": [321, 654],
+    "steps": 500,
+    "phase_mode": "classic",
+    "enable_flow_consistency_loss": false
+  },
+  "selection": [
+    "success_and_collision_hard_constraints",
+    "forcing_saturation_rate",
+    "effective_residual_ratio",
+    "acceleration_clip_rate",
+    "jerk"
+  ]
+}

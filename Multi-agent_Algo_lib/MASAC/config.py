@@ -39,6 +39,7 @@ class MASACNetworkConfig:
     dmp_tau: float = 1.0
     forcing_term_min: float = -10.0
     forcing_term_max: float = 10.0
+    forcing_gate_kappa: float = 1.0
     acceleration_low: tuple[float, ...] | None = None
     acceleration_high: tuple[float, ...] | None = None
     flow_zero_threshold: float = 1.0e-4
@@ -116,6 +117,7 @@ class MASACNetworkConfig:
         self.dmp_tau = float(self.dmp_tau)
         self.forcing_term_min = float(self.forcing_term_min)
         self.forcing_term_max = float(self.forcing_term_max)
+        self.forcing_gate_kappa = float(self.forcing_gate_kappa)
         self.flow_zero_threshold = float(self.flow_zero_threshold)
         if self.goal_distance_clip <= 0.0:
             raise ValueError("goal_distance_clip must be positive")
@@ -123,6 +125,8 @@ class MASACNetworkConfig:
             raise ValueError("dmp_tau must be positive")
         if self.forcing_term_min >= self.forcing_term_max:
             raise ValueError("forcing_term_min must be smaller than forcing_term_max")
+        if self.forcing_gate_kappa < 0.0:
+            raise ValueError("forcing_gate_kappa must be non-negative")
         if self.flow_zero_threshold < 0.0:
             raise ValueError("flow_zero_threshold must be non-negative")
 
@@ -318,10 +322,12 @@ class MASACExperimentConfig:
     dmp_tau: float = 2.5
     forcing_term_max: float = 10.0
     forcing_term_min: float = -10.0
+    forcing_gate_kappa: float = 1.0
     goal_offset_max: float = 1.0
     phase_mode: str = "classic"
     phase_integrator: str = "legacy_euler"
     phase_min: float = 0.0
+    phase_end_threshold: float = 1.0e-4
     flow_zero_threshold: float = 1.0e-4
 
     # MASAC training
@@ -336,6 +342,9 @@ class MASACExperimentConfig:
     buffer_size: int = 1_000_000
     actor_lr: float = 1e-4
     critic_lr: float = 1e-4
+    temperature_lr: float = 1e-4
+    initial_temperature: float = 0.01
+    target_entropy: float | None = None
     actor_update_interval: int = 2
     actor_action_l2_weight: float = 2.0
     enable_flow_consistency_loss: bool = False
@@ -343,9 +352,13 @@ class MASACExperimentConfig:
     minimum_flow_consistency: float = 0.0
     flow_consistency_warmup_steps: int = 0
     gamma: float = 0.95
+    reward_scale: float = 1.0
     soft_update_tau: float = 0.01
     learn_interval: int = 1
     updates_per_step: int = 1
+    target_update_interval: int = 1
+    actor_gradient_clip: float = 0.5
+    critic_gradient_clip: float = 0.5
     device: str = "auto"
     output_root: str = "artifacts/masac"
     save_interval: int = 50_000
@@ -384,10 +397,12 @@ class MASACExperimentConfig:
             "tau": self.dmp_tau,
             "forcing_term_max": self.forcing_term_max,
             "forcing_term_min": self.forcing_term_min,
+            "forcing_gate_kappa": self.forcing_gate_kappa,
             "goal_offset_max": self.goal_offset_max,
             "phase_mode": self.phase_mode,
             "phase_integrator": self.phase_integrator,
             "phase_min": self.phase_min,
+            "phase_end_threshold": self.phase_end_threshold,
             "flow_zero_threshold": self.flow_zero_threshold,
         }
 

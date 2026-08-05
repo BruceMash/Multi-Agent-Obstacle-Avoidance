@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import os
+import subprocess
 import sys
 import time
 from collections import deque
@@ -52,6 +53,8 @@ REWARD_COMPONENT_KEYS = (
     "reward_boundary_potential_penalty",
     "reward_inter_agent_potential_penalty",
     "reward_stagnation_penalty",
+    "reward_acceleration_penalty",
+    "reward_acceleration_clip_penalty",
     "reward_individual_success_bonus",
     "reward_team_success_bonus",
     "reward_team_collision_penalty",
@@ -234,6 +237,7 @@ def build_network_config(
         dmp_tau=float(env.dmp_config.tau),
         forcing_term_min=float(env.dmp_config.forcing_term_min),
         forcing_term_max=float(env.dmp_config.forcing_term_max),
+        forcing_gate_kappa=float(env.dmp_config.forcing_gate_kappa),
         acceleration_low=acceleration_low,
         acceleration_high=acceleration_high,
         flow_zero_threshold=float(env.dmp_config.flow_zero_threshold),
@@ -259,6 +263,31 @@ def make_run_dir(output_root: str, seed: int) -> Path:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2, ensure_ascii=False, default=str)
+
+
+def read_git_metadata() -> dict[str, Any]:
+    """Capture repository identity without requiring a clean worktree."""
+
+    def run_git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=PROJECT_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        return result.stdout.strip()
+
+    status = run_git("status", "--short")
+    return {
+        "commit": run_git("rev-parse", "HEAD"),
+        "branch": run_git("branch", "--show-current"),
+        "dirty": bool(status),
+        "status_short": status,
+    }
 
 
 def flatten_hparams(payload: dict[str, Any], prefix: str = "") -> dict[str, Any]:   # 添加tensorboard记录
@@ -598,8 +627,13 @@ def write_tensorboard_learning(writer, row: dict[str, Any]) -> None:
     step = int(row["global_step"])
     for key in (
         "critic_loss",
+        "critic_gradient_norm",
+        "critic_gradient_clip_rate",
         "actor_loss",
+        "actor_gradient_norm",
+        "actor_gradient_clip_rate",
         "q_replay",
+        "q_critic_gap",
         "q_replay_variance",
         "q_policy",
         "q_policy_variance",
@@ -614,6 +648,12 @@ def write_tensorboard_learning(writer, row: dict[str, Any]) -> None:
     writer.add_scalar("action/forcing_abs_mean", row["action_forcing_abs_mean"], step)
     writer.add_scalar("action/offset_abs_mean", row["action_offset_abs_mean"], step)
     writer.add_scalar("action/saturation_rate", row["action_saturation_rate"], step)
+    writer.add_scalar("action/forcing_saturation_rate", row["forcing_saturation_rate"], step)
+    writer.add_scalar("action/goal_offset_saturation_rate", row["goal_offset_saturation_rate"], step)
+    writer.add_scalar("action/post_tanh_mean", row["post_tanh_mean"], step)
+    writer.add_scalar("action/post_tanh_std", row["post_tanh_std"], step)
+    writer.add_scalar("action/pre_tanh_proxy_mean", row["pre_tanh_proxy_mean"], step)
+    writer.add_scalar("action/pre_tanh_proxy_std", row["pre_tanh_proxy_std"], step)
     writer.add_scalar("exploration/policy_weight", row["policy_weight"], step)
     writer.add_scalar("dmp/flow_loss", row["flow_loss"], step)
     for key in (
@@ -623,8 +663,14 @@ def write_tensorboard_learning(writer, row: dict[str, Any]) -> None:
         "flow_violation_rate",
         "residual_forcing_norm",
         "residual_forcing_norm_max",
+        "effective_forcing_norm",
+        "spring_drive_norm",
+        "damping_drive_norm",
+        "damping_spring_ratio",
         "nominal_drive_norm",
         "closed_loop_drive_norm",
+        "acceleration_clip_rate",
+        "velocity_clip_rate",
         "phase",
         "phase_rate",
         "phase_pause_fraction",
@@ -644,10 +690,22 @@ def summarize_dmp_info(
     phase_rate = np.asarray(info.get("phase_rates", [np.nan]), dtype=np.float32)
     phase_paused = np.asarray(info.get("phase_paused_mask", [False]), dtype=bool)
     residual_norm = np.asarray(info.get("residual_forcing_norms", [np.nan]), dtype=np.float32)
+    effective_residual_norm = np.asarray(info.get("residual_drive_norms", [np.nan]), dtype=np.float32)
+    spring_norm = np.asarray(info.get("spring_drive_norms", [np.nan]), dtype=np.float32)
+    damping_norm = np.asarray(info.get("damping_drive_norms", [np.nan]), dtype=np.float32)
+    damping_spring_ratio = np.asarray(info.get("damping_spring_ratios", [np.nan]), dtype=np.float32)
     nominal_norm = np.asarray(info.get("nominal_drive_norms", [np.nan]), dtype=np.float32)
     closed_norm = np.asarray(info.get("closed_loop_drive_norms", [np.nan]), dtype=np.float32)
     goal_error = np.asarray(info.get("distance_to_goals", [np.nan]), dtype=np.float32)
     min_clearance = np.asarray(info.get("min_clearances", [np.nan]), dtype=np.float32)
+    acceleration_clip_mask = np.asarray(
+        info.get("acceleration_clip_mask", np.zeros((len(consistency), 1), dtype=bool)),
+        dtype=bool,
+    )
+    velocity_clip_mask = np.asarray(
+        info.get("velocity_clip_mask", np.zeros((len(consistency), 1), dtype=bool)),
+        dtype=bool,
+    )
     active_mask = np.logical_not(np.asarray(
         info.get("success_rewarded_mask", np.zeros_like(consistency, dtype=bool)),
         dtype=bool,
@@ -658,10 +716,16 @@ def summarize_dmp_info(
         phase_rate = phase_rate[active_mask]
         phase_paused = phase_paused[active_mask]
         residual_norm = residual_norm[active_mask]
+        effective_residual_norm = effective_residual_norm[active_mask]
+        spring_norm = spring_norm[active_mask]
+        damping_norm = damping_norm[active_mask]
+        damping_spring_ratio = damping_spring_ratio[active_mask]
         nominal_norm = nominal_norm[active_mask]
         closed_norm = closed_norm[active_mask]
         goal_error = goal_error[active_mask]
         min_clearance = min_clearance[active_mask]
+        acceleration_clip_mask = acceleration_clip_mask[active_mask]
+        velocity_clip_mask = velocity_clip_mask[active_mask]
     return {
         "flow_consistency_mean": float(np.mean(consistency)),
         "flow_consistency_min": float(np.min(consistency)),
@@ -669,8 +733,14 @@ def summarize_dmp_info(
         "flow_violation_rate": float(np.mean(consistency < float(minimum_consistency))),
         "residual_forcing_norm": float(np.mean(residual_norm)),
         "residual_forcing_norm_max": float(np.max(residual_norm)),
+        "effective_forcing_norm": float(np.mean(effective_residual_norm)),
+        "spring_drive_norm": float(np.mean(spring_norm)),
+        "damping_drive_norm": float(np.mean(damping_norm)),
+        "damping_spring_ratio": float(np.mean(damping_spring_ratio)),
         "nominal_drive_norm": float(np.mean(nominal_norm)),
         "closed_loop_drive_norm": float(np.mean(closed_norm)),
+        "acceleration_clip_rate": float(np.mean(np.any(acceleration_clip_mask, axis=-1))),
+        "velocity_clip_rate": float(np.mean(np.any(velocity_clip_mask, axis=-1))),
         "phase": float(np.mean(phase)),
         "phase_rate": float(np.mean(phase_rate)),
         "phase_pause_fraction": float(np.mean(phase_paused)),
@@ -722,6 +792,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--buffer-size", type=int, default=int(config.buffer_size))
     parser.add_argument("--actor-lr", type=float, default=float(config.actor_lr))
     parser.add_argument("--critic-lr", type=float, default=float(config.critic_lr))
+    parser.add_argument("--temperature-lr", type=float, default=float(config.temperature_lr))
+    parser.add_argument(
+        "--initial-temperature",
+        type=float,
+        default=float(config.initial_temperature),
+    )
+    parser.add_argument("--target-entropy", type=float, default=config.target_entropy)
     parser.add_argument(
         "--actor-update-interval",
         type=int,
@@ -753,10 +830,50 @@ def parse_args() -> argparse.Namespace:
         default=int(config.flow_consistency_warmup_steps),
     )
     parser.add_argument("--gamma", type=float, default=float(config.gamma))
+    parser.add_argument("--reward-scale", type=float, default=float(config.reward_scale))
     parser.add_argument("--tau", type=float, default=float(config.soft_update_tau))
     parser.add_argument("--learn-interval", type=int, default=int(config.learn_interval))
     parser.add_argument("--updates-per-step", type=int, default=int(config.updates_per_step))
+    parser.add_argument(
+        "--target-update-interval",
+        type=int,
+        default=int(config.target_update_interval),
+    )
+    parser.add_argument(
+        "--actor-gradient-clip",
+        type=float,
+        default=float(config.actor_gradient_clip),
+    )
+    parser.add_argument(
+        "--critic-gradient-clip",
+        type=float,
+        default=float(config.critic_gradient_clip),
+    )
     parser.add_argument("--temporal-steps", type=int, default=int(config.temporal_steps))
+    parser.add_argument("--k-alpha", type=float, default=float(config.k_alpha))
+    parser.add_argument("--k-beta", type=float, default=float(config.k_beta))
+    parser.add_argument("--dmp-tau", type=float, default=float(config.dmp_tau))
+    parser.add_argument("--alpha-s", type=float, default=float(config.alpha_s))
+    parser.add_argument(
+        "--forcing-limit",
+        type=float,
+        default=float(config.forcing_term_max),
+    )
+    parser.add_argument(
+        "--forcing-gate-kappa",
+        type=float,
+        default=float(config.forcing_gate_kappa),
+    )
+    parser.add_argument(
+        "--goal-offset-limit",
+        type=float,
+        default=float(config.goal_offset_max),
+    )
+    parser.add_argument(
+        "--acceleration-limit",
+        type=float,
+        default=float(config.accelerate_clip[1]),
+    )
     parser.add_argument(
         "--phase-mode",
         choices=("classic", "fcep"),
@@ -768,6 +885,11 @@ def parse_args() -> argparse.Namespace:
         default=str(config.phase_integrator),
     )
     parser.add_argument("--phase-min", type=float, default=float(config.phase_min))
+    parser.add_argument(
+        "--phase-end-threshold",
+        type=float,
+        default=float(config.phase_end_threshold),
+    )
     parser.add_argument(
         "--flow-zero-threshold",
         type=float,
@@ -906,6 +1028,28 @@ def train() -> dict[str, str]:  # 训练主循环
     args.policy_transition_steps = max(0, int(args.policy_transition_steps))
     if int(args.actor_update_interval) <= 0:
         raise ValueError("actor_update_interval must be positive")
+    if int(args.target_update_interval) <= 0:
+        raise ValueError("target_update_interval must be positive")
+    positive_values = (
+        args.actor_lr,
+        args.critic_lr,
+        args.temperature_lr,
+        args.initial_temperature,
+        args.k_alpha,
+        args.k_beta,
+        args.dmp_tau,
+        args.forcing_limit,
+        args.goal_offset_limit,
+        args.acceleration_limit,
+        args.actor_gradient_clip,
+        args.critic_gradient_clip,
+    )
+    if any(float(value) <= 0.0 for value in positive_values):
+        raise ValueError("learning rates, physical limits, DMP gains, and gradient clips must be positive")
+    if float(args.alpha_s) < 0.0 or float(args.forcing_gate_kappa) < 0.0:
+        raise ValueError("alpha_s and forcing_gate_kappa must be non-negative")
+    if float(args.reward_scale) <= 0.0:
+        raise ValueError("reward_scale must be positive")
     if float(args.actor_action_l2_weight) < 0.0:
         raise ValueError("actor_action_l2_weight must be non-negative")
     if float(args.flow_consistency_weight) < 0.0:
@@ -916,6 +1060,8 @@ def train() -> dict[str, str]:  # 训练主循环
         raise ValueError("flow_consistency_warmup_steps must be non-negative")
     if not 0.0 <= float(args.phase_min) <= 1.0:
         raise ValueError("phase_min must lie in [0, 1]")
+    if not 0.0 <= float(args.phase_end_threshold) <= 1.0:
+        raise ValueError("phase_end_threshold must lie in [0, 1]")
     if float(args.flow_zero_threshold) < 0.0:
         raise ValueError("flow_zero_threshold must be non-negative")
 
@@ -947,6 +1093,38 @@ def train() -> dict[str, str]:  # 训练主循环
 
     experiment_config = replace(    # 创建实验配置 这部分主要是课程，同时从arg中读取参数
         MASAC_EXPERIMENT_CONFIG,
+        seed=int(args.seed),
+        total_steps=int(args.total_steps),
+        start_steps=int(args.start_steps),
+        learning_starts=int(args.learning_starts),
+        policy_transition_steps=int(args.policy_transition_steps),
+        batch_size=int(args.batch_size),
+        buffer_size=int(args.buffer_size),
+        actor_lr=float(args.actor_lr),
+        critic_lr=float(args.critic_lr),
+        temperature_lr=float(args.temperature_lr),
+        initial_temperature=float(args.initial_temperature),
+        target_entropy=args.target_entropy,
+        actor_update_interval=int(args.actor_update_interval),
+        actor_action_l2_weight=float(args.actor_action_l2_weight),
+        gamma=float(args.gamma),
+        reward_scale=float(args.reward_scale),
+        soft_update_tau=float(args.tau),
+        learn_interval=int(args.learn_interval),
+        updates_per_step=int(args.updates_per_step),
+        target_update_interval=int(args.target_update_interval),
+        actor_gradient_clip=float(args.actor_gradient_clip),
+        critic_gradient_clip=float(args.critic_gradient_clip),
+        temporal_steps=int(args.temporal_steps),
+        k_alpha=float(args.k_alpha),
+        k_beta=float(args.k_beta),
+        dmp_tau=float(args.dmp_tau),
+        alpha_s=float(args.alpha_s),
+        forcing_term_min=-float(args.forcing_limit),
+        forcing_term_max=float(args.forcing_limit),
+        forcing_gate_kappa=float(args.forcing_gate_kappa),
+        goal_offset_max=float(args.goal_offset_limit),
+        accelerate_clip=(-float(args.acceleration_limit), float(args.acceleration_limit)),
         curriculum_enabled=not bool(args.disable_curriculum or args.final_stage_only),
         curriculum_success_threshold=float(args.curriculum_success_threshold),
         curriculum_phase2_box_counts=tuple(args.phase2_box_counts),
@@ -967,6 +1145,7 @@ def train() -> dict[str, str]:  # 训练主循环
         phase_mode=str(args.phase_mode),
         phase_integrator=str(args.phase_integrator),
         phase_min=float(args.phase_min),
+        phase_end_threshold=float(args.phase_end_threshold),
         flow_zero_threshold=float(args.flow_zero_threshold),
         enable_flow_consistency_loss=bool(args.enable_flow_consistency_loss),
         flow_consistency_weight=float(args.flow_consistency_weight),
@@ -1007,6 +1186,11 @@ def train() -> dict[str, str]:  # 训练主循环
         buffer_size=int(args.buffer_size),
         device=device,
         network_config=network_config,
+        temperature_lr=float(args.temperature_lr),
+        initial_temperature=float(args.initial_temperature),
+        target_entropy=args.target_entropy,
+        actor_gradient_clip=float(args.actor_gradient_clip),
+        critic_gradient_clip=float(args.critic_gradient_clip),
     )
 
     run_dir = make_run_dir(args.output_root, args.seed)
@@ -1034,6 +1218,7 @@ def train() -> dict[str, str]:  # 训练主循环
         progress.event("TensorBoard logging is unavailable because tensorboard is not installed.")
 
     run_config = {
+        "launch_command": subprocess.list2cmdline([sys.executable, *sys.argv]),
         "script_args": vars(args),
         "experiment_config": asdict(experiment_config),
         "core_env_kwargs": experiment_config.build_core_env_kwargs(),
@@ -1048,6 +1233,7 @@ def train() -> dict[str, str]:  # 训练主循环
             "python_version": str(sys.version),
             "tensorboard_enabled": writer is not None,
         },
+        "git": read_git_metadata(),
     }
     write_json(run_dir / "config.json", run_config)
     write_tensorboard_configuration(writer, run_config)
@@ -1089,8 +1275,14 @@ def train() -> dict[str, str]:  # 训练主循环
             "flow_violation_rate",
             "residual_forcing_norm",
             "residual_forcing_norm_max",
+            "effective_forcing_norm",
+            "spring_drive_norm",
+            "damping_drive_norm",
+            "damping_spring_ratio",
             "nominal_drive_norm",
             "closed_loop_drive_norm",
+            "acceleration_clip_rate",
+            "velocity_clip_rate",
             "phase",
             "phase_rate",
             "phase_pause_fraction",
@@ -1170,7 +1362,10 @@ def train() -> dict[str, str]:  # 训练主循环
             )
 
         next_obs = matrix_to_agent_dict(next_obs_matrix, agent_ids)
-        reward = vector_to_agent_dict(rewards, agent_ids)
+        reward = vector_to_agent_dict(
+            np.asarray(rewards, dtype=np.float32) * float(args.reward_scale),
+            agent_ids,
+        )
         critic_action_matrix = build_critic_action_matrix(info, env)
         critic_action = matrix_to_agent_dict(critic_action_matrix, agent_ids)
         done_for_buffer = {
@@ -1201,7 +1396,7 @@ def train() -> dict[str, str]:  # 训练主循环
             and global_step >= int(args.learning_starts)
             and global_step % int(args.learn_interval) == 0
         ):
-            for _ in range(int(args.updates_per_step)):
+            for update_index in range(int(args.updates_per_step)):
                 latest_diagnostics = policy.learn(
                     batch_size=int(args.batch_size),
                     gamma=float(args.gamma),
@@ -1216,6 +1411,10 @@ def train() -> dict[str, str]:  # 训练主循环
                     minimum_flow_consistency=float(args.minimum_flow_consistency),
                     flow_consistency_warmup_steps=int(args.flow_consistency_warmup_steps),
                     global_step=int(global_step),
+                    update_target=(
+                        global_step % int(args.target_update_interval) == 0
+                        and update_index == int(args.updates_per_step) - 1
+                    ),
                 )
 
         episode_done = bool(terminated or truncated)
@@ -1341,6 +1540,14 @@ def train() -> dict[str, str]:  # 训练主循环
                 np.isclose(action_matrix, action_low, rtol=0.0, atol=1e-4),
                 np.isclose(action_matrix, action_high, rtol=0.0, atol=1e-4),
             )
+            action_scale = np.maximum(0.5 * (action_high - action_low), 1.0e-8)
+            action_bias = 0.5 * (action_high + action_low)
+            post_tanh_action = np.clip(
+                (action_matrix - action_bias) / action_scale,
+                -1.0,
+                1.0,
+            )
+            pre_tanh_proxy = np.arctanh(np.clip(post_tanh_action, -0.999999, 0.999999))
             diagnostics = latest_diagnostics or {}
             dmp_dims = int(env.dmp_config.dims)
             learning_row = {
@@ -1352,8 +1559,13 @@ def train() -> dict[str, str]:  # 训练主循环
                     key: float(diagnostics.get(key, np.nan))
                     for key in (
                         "critic_loss",
+                        "critic_gradient_norm",
+                        "critic_gradient_clip_rate",
                         "actor_loss",
+                        "actor_gradient_norm",
+                        "actor_gradient_clip_rate",
                         "q_replay",
+                        "q_critic_gap",
                         "q_replay_variance",
                         "q_policy",
                         "q_policy_variance",
@@ -1372,6 +1584,12 @@ def train() -> dict[str, str]:  # 训练主循环
                     np.mean(np.abs(action_matrix[:, dmp_dims:]))
                 ),
                 "action_saturation_rate": float(np.mean(saturated)),
+                "forcing_saturation_rate": float(np.mean(saturated[:, :dmp_dims])),
+                "goal_offset_saturation_rate": float(np.mean(saturated[:, dmp_dims:])),
+                "post_tanh_mean": float(np.mean(post_tanh_action)),
+                "post_tanh_std": float(np.std(post_tanh_action)),
+                "pre_tanh_proxy_mean": float(np.mean(pre_tanh_proxy)),
+                "pre_tanh_proxy_std": float(np.std(pre_tanh_proxy)),
                 "policy_weight": float(latest_policy_weight),
                 **latest_dmp_diagnostics,
             }

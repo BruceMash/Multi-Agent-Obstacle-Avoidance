@@ -1,0 +1,19 @@
+{
+  "profile": "reward_diagnostic",
+  "modify_reward": false,
+  "components": [
+    "progress",
+    "obstacle_potential_penalty",
+    "boundary_potential_penalty",
+    "inter_agent_potential_penalty",
+    "stagnation_penalty",
+    "acceleration_penalty",
+    "acceleration_clip_penalty",
+    "individual_success_bonus",
+    "team_success_bonus",
+    "team_collision_penalty",
+    "local_collision_penalty",
+    "team_timeout_penalty"
+  ],
+  "statistics": ["episode_sum", "step_mean", "absolute_mean", "p90", "total_reward_ratio", "success_failure_split"]
+}

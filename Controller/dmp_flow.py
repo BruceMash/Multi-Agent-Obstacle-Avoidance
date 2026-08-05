@@ -22,22 +22,42 @@ def compute_dmp_drives(
     k_alpha: float,
     k_beta: float,
     tau: float,
+    forcing_gate_kappa: float = 1.0,
+    forcing_gate_distance=None,
 ):
     """Return the numerator-level nominal, residual, and closed-loop DMP drives.
 
     The controller divides all three terms by ``tau ** 2``. That common positive
     scale does not affect cosine consistency, so keeping numerator-level drives
     avoids unnecessary divisions while exactly preserving the executed flow
-    direction. The residual includes the controller's per-axis distance gate.
+    direction. When ``forcing_gate_distance`` is provided, the residual uses a
+    scalar terminal-distance gate that is broadcast across the control axes.
+    Omitting it preserves the legacy per-axis goal-delta gate for callers that
+    do not yet provide a separate terminal target.
     """
+
+    forcing_gate_kappa = float(forcing_gate_kappa)
+    if forcing_gate_kappa < 0.0:
+        raise ValueError("forcing_gate_kappa must be non-negative")
 
     if _is_torch_tensor(goal_delta):
         if not (_is_torch_tensor(velocity) and _is_torch_tensor(residual_forcing)):
             raise TypeError("all DMP drive inputs must use the same tensor backend")
+        if forcing_gate_distance is not None and not _is_torch_tensor(
+            forcing_gate_distance
+        ):
+            raise TypeError("forcing_gate_distance must use the same tensor backend")
         nominal = float(k_alpha) * (
             float(k_beta) * goal_delta - float(tau) * velocity
         )
-        gated_residual = residual_forcing * torch.tanh(torch.abs(goal_delta))
+        gate_input = (
+            torch.abs(goal_delta)
+            if forcing_gate_distance is None
+            else torch.clamp(forcing_gate_distance, min=0.0)
+        )
+        gated_residual = residual_forcing * torch.tanh(
+            forcing_gate_kappa * gate_input
+        )
     else:
         goal_delta = np.asarray(goal_delta)
         velocity = np.asarray(velocity)
@@ -45,7 +65,14 @@ def compute_dmp_drives(
         nominal = float(k_alpha) * (
             float(k_beta) * goal_delta - float(tau) * velocity
         )
-        gated_residual = residual_forcing * np.tanh(np.abs(goal_delta))
+        gate_input = (
+            np.abs(goal_delta)
+            if forcing_gate_distance is None
+            else np.maximum(np.asarray(forcing_gate_distance), 0.0)
+        )
+        gated_residual = residual_forcing * np.tanh(
+            forcing_gate_kappa * gate_input
+        )
 
     if nominal.shape != gated_residual.shape:
         raise ValueError(

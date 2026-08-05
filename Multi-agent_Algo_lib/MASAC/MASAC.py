@@ -65,22 +65,29 @@ class Agent:
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=actor_lr)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=critic_lr)
 
-    def update_actor(self, loss):
+    def update_actor(self, loss, gradient_clip=0.5):
         self.actor_optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            self.actor.parameters(), float(gradient_clip)
+        )
         self.actor_optimizer.step()
+        return gradient_norm.detach()
 
-    def update_critic(self, loss):
+    def update_critic(self, loss, gradient_clip=0.5):
         self.critic_optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            self.critic.parameters(), float(gradient_clip)
+        )
         self.critic_optimizer.step()
+        return gradient_norm.detach()
 
 ## 第二部分：定义DQN算法类
 class Alpha:    # 自适应调节熵系数
     def __init__(self, action_dim, alpha_lr=0.0001, alpha=0.01,
-                 requires_grad=False, is_continue=True, device="cpu"):
+                 requires_grad=False, is_continue=True, device="cpu",
+                 target_entropy=None):
 
         self.log_alpha = torch.tensor(
             np.log(alpha),
@@ -89,7 +96,9 @@ class Alpha:    # 自适应调节熵系数
             requires_grad=requires_grad,
         ) # We learn log_alpha instead of alpha to ensure that alpha=exp(log_alpha)>0
         self.log_alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=alpha_lr)
-        if is_continue:
+        if target_entropy is not None:
+            self.target_entropy = float(target_entropy)
+        elif is_continue:
             self.target_entropy = -action_dim # Target Entropy = −dim(A) (e.g. , -6 for HalfCheetah-v2) as given in the paper(SAC) 参考原sac论文
         else:
             self.target_entropy = 0.6 * (
@@ -109,7 +118,10 @@ class MASAC: #先无attention 再加入
 
     """
     def __init__(self, dim_info, is_continue, actor_lr, critic_lr, buffer_size,
-                 device, trick=None, network_config=None):
+                 device, trick=None, network_config=None, *,
+                 temperature_lr=1e-4, initial_temperature=0.01,
+                 target_entropy=None, actor_gradient_clip=0.5,
+                 critic_gradient_clip=0.5):
 
         self.device = torch.device(device)
         if network_config is None:
@@ -134,7 +146,10 @@ class MASAC: #先无attention 再加入
         self.dmp_tau = float(self.network_config.dmp_tau)
         self.forcing_term_min = float(self.network_config.forcing_term_min)
         self.forcing_term_max = float(self.network_config.forcing_term_max)
+        self.forcing_gate_kappa = float(self.network_config.forcing_gate_kappa)
         self.flow_zero_threshold = float(self.network_config.flow_zero_threshold)
+        self.actor_gradient_clip = float(actor_gradient_clip)
+        self.critic_gradient_clip = float(critic_gradient_clip)
         self.acceleration_low = self._state_bound_tensor(
             self.network_config.acceleration_low,
             "acceleration_low",
@@ -184,10 +199,12 @@ class MASAC: #先无attention 再加入
                 # 每个agent维护一个alpha
                 self.alphas[agent_id] = Alpha(
                     action_dim,
-                    alpha=0.01,
+                    alpha_lr=float(temperature_lr),
+                    alpha=float(initial_temperature),
                     requires_grad=True,
                     is_continue=is_continue,
                     device=self.device,
+                    target_entropy=target_entropy,
                 ) # Alpha(action_dim).alpha 才是值
             else:   # 固定alpha
                 self.alphas[agent_id] = Alpha(
@@ -395,6 +412,8 @@ class MASAC: #先无attention 再加入
             k_alpha=self.dmp_k_alpha,
             k_beta=self.dmp_k_beta,
             tau=self.dmp_tau,
+            forcing_gate_kappa=self.forcing_gate_kappa,
+            forcing_gate_distance=goal_distance.detach(),
         )
         nominal_for_loss = nominal_drive.detach()
         closed_loop_drive = nominal_for_loss + residual_drive
@@ -472,6 +491,7 @@ class MASAC: #先无attention 再加入
         minimum_flow_consistency=0.0,
         flow_consistency_warmup_steps=0,
         global_step=0,
+        update_target=True,
     ):
         (
             obs,
@@ -568,7 +588,9 @@ class MASAC: #先无attention 再加入
             q2_loss.backward()
             del q2, q2_loss
 
-            torch.nn.utils.clip_grad_norm_(agent.critic.parameters(), 0.5)
+            critic_gradient_norm = torch.nn.utils.clip_grad_norm_(
+                agent.critic.parameters(), self.critic_gradient_clip
+            ).detach()
             agent.critic_optimizer.step()
 
             ## 再更新actor
@@ -677,7 +699,10 @@ class MASAC: #先无attention 再加入
                     policy_q_mean = q_pi.detach().mean()
                     policy_q_variance = q_pi.detach().var(unbiased=False)
                     entropy_mean = entropy.detach().mean()
-                    agent.update_actor(actor_loss)
+                    actor_gradient_norm = agent.update_actor(
+                        actor_loss,
+                        self.actor_gradient_clip,
+                    )
                 finally:
                     for critic_param, requires_grad in zip(
                         agent.critic.parameters(),
@@ -702,6 +727,7 @@ class MASAC: #先无attention 再加入
                 policy_q_variance = nan_value
                 entropy_mean = nan_value
                 alpha_loss_value = nan_value
+                actor_gradient_norm = nan_value
                 flow_loss = nan_value
                 flow_consistency_mean = nan_value
                 flow_consistency_min = nan_value
@@ -713,8 +739,17 @@ class MASAC: #先无attention 再加入
             agent_diagnostics.append(
                 {
                     "critic_loss": q1_loss_value + q2_loss_value,
+                    "critic_gradient_norm": critic_gradient_norm,
+                    "critic_gradient_clip_rate": (
+                        critic_gradient_norm > self.critic_gradient_clip
+                    ).to(dtype=torch.float32),
                     "actor_loss": actor_loss_value,
+                    "actor_gradient_norm": actor_gradient_norm,
+                    "actor_gradient_clip_rate": (
+                        actor_gradient_norm > self.actor_gradient_clip
+                    ).to(dtype=torch.float32),
                     "q_replay": 0.5 * (q1_mean + q2_mean),
+                    "q_critic_gap": torch.abs(q1_mean - q2_mean),
                     "q_replay_variance": 0.5 * (q1_variance + q2_variance),
                     "q_policy": policy_q_mean,
                     "q_policy_variance": policy_q_variance,
@@ -735,7 +770,8 @@ class MASAC: #先无attention 再加入
 
 
         ## 更新所有target网络
-        self.update_target(tau)
+        if bool(update_target):
+            self.update_target(tau)
         diagnostic_keys = tuple(agent_diagnostics[0])
         # 所有统计先在 GPU 上聚合，再一次性传回 CPU。逐项调用 .item()
         # 会触发大量 CUDA 同步，并显著放大高频 learn 的日志成本。
@@ -757,10 +793,30 @@ class MASAC: #先无attention 再加入
             soft_update(agent.critic_target, agent.critic, tau)
 
     def save(self, model_path):
-        torch.save(
-            {name: agent.actor.state_dict() for name, agent in self.agents.items()},
-            os.path.join(model_path, f'MASAC.pth')
-        )
+        payload = {
+            "format_version": 2,
+            "actors": {
+                name: agent.actor.state_dict()
+                for name, agent in self.agents.items()
+            },
+            "critics": {
+                name: agent.critic.state_dict()
+                for name, agent in self.agents.items()
+            },
+            "actor_targets": {
+                name: agent.actor_target.state_dict()
+                for name, agent in self.agents.items()
+            },
+            "critic_targets": {
+                name: agent.critic_target.state_dict()
+                for name, agent in self.agents.items()
+            },
+            "log_alphas": {
+                name: alpha.log_alpha.detach().cpu()
+                for name, alpha in self.alphas.items()
+            },
+        }
+        torch.save(payload, os.path.join(model_path, "MASAC.pth"))
 
     ## 加载模型
     @staticmethod 
@@ -774,9 +830,31 @@ class MASAC: #先无attention 再加入
             device=device,
             network_config=network_config,
         )
-        data = torch.load(os.path.join(model_dir, f'MASAC.pth'), map_location=device)
+        data = torch.load(
+            os.path.join(model_dir, "MASAC.pth"),
+            map_location=device,
+            weights_only=False,
+        )
+        actor_states = data.get("actors", data)
+        policy.checkpoint_has_critics = bool("critics" in data)
+        policy.checkpoint_format_version = int(data.get("format_version", 1))
         for agent_id, agent in policy.agents.items():
-            agent.actor.load_state_dict(data[agent_id])
+            agent.actor.load_state_dict(actor_states[agent_id])
+            if "critics" in data:
+                agent.critic.load_state_dict(data["critics"][agent_id])
+            if "actor_targets" in data:
+                agent.actor_target.load_state_dict(data["actor_targets"][agent_id])
+            else:
+                agent.actor_target.load_state_dict(actor_states[agent_id])
+            if "critic_targets" in data:
+                agent.critic_target.load_state_dict(data["critic_targets"][agent_id])
+            elif "critics" in data:
+                agent.critic_target.load_state_dict(data["critics"][agent_id])
+            if "log_alphas" in data:
+                policy.alphas[agent_id].log_alpha.data.copy_(
+                    data["log_alphas"][agent_id].to(policy.device)
+                )
+                policy.alphas[agent_id].alpha = policy.alphas[agent_id].log_alpha.exp()
 
         return policy
     

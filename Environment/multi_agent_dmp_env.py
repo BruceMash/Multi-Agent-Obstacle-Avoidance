@@ -889,8 +889,12 @@ class MultiAgentDMPEnv(gym.Env):
         dynamic = self.dynamics[agent_index]
         dmp = self.dmps[agent_index]
 
-        goal_eff = self.goals[agent_index] + goal_offset
-        forcing_gate = np.tanh(np.abs(goal_eff - dynamic.p))
+        terminal_distance = float(
+            np.linalg.norm(self.goals[agent_index] - dynamic.p)
+        )
+        forcing_gate = float(
+            np.tanh(dmp.config.forcing_gate_kappa * terminal_distance)
+        )
         action_component = (
             dmp.config.K_alpha * dmp.config.K_beta * goal_offset
             + forcing_component * forcing_gate
@@ -1162,6 +1166,9 @@ class MultiAgentDMPEnv(gym.Env):
         progress,
         commanded_accelerations,
         applied_accelerations,
+        acceleration_clip_mask,
+        unclipped_next_velocities,
+        velocity_clip_mask,
         next_states,
         raw_action,
         guided_action,
@@ -1237,7 +1244,33 @@ class MultiAgentDMPEnv(gym.Env):
         nominal_drives = controller_vectors("nominal_drive")
         residual_drives = controller_vectors("residual_drive")
         closed_loop_drives = controller_vectors("closed_loop_drive")
+        spring_drives = controller_vectors("spring_drive")
+        damping_drives = controller_vectors("damping_drive")
+        forcing_gates = controller_vectors("forcing_gate")
+        goal_deltas = controller_vectors("goal_delta")
+        terminal_goal_deltas = controller_vectors("terminal_goal_delta")
+        goal_offsets = controller_vectors("goal_offset")
+        raw_residual_forcing = controller_vectors("raw_forcing")
         residual_forcing = controller_vectors("forcing")
+        terminal_goal_distances = np.array(
+            [
+                float(
+                    info.get(
+                        "terminal_goal_distance",
+                        np.linalg.norm(self.goals[index] - self.dynamics[index].p),
+                    )
+                )
+                for index, info in enumerate(self.latest_controller_infos)
+            ],
+            dtype=np.float32,
+        )
+        phase_end_reached_mask = np.array(
+            [
+                bool(info.get("phase_end_reached", False))
+                for info in self.latest_controller_infos
+            ],
+            dtype=bool,
+        )
         return {
             "success": bool(successful_episode),
             "success_mask": success_mask.astype(bool).copy(),
@@ -1261,17 +1294,37 @@ class MultiAgentDMPEnv(gym.Env):
             "phases": phases,
             "phase_rates": phase_rates,
             "phase_paused_mask": phase_paused_mask,
+            "phase_end_reached_mask": phase_end_reached_mask,
             "taus": taus,
             "flow_consistencies": flow_consistencies,
+            "spring_drives": spring_drives,
+            "damping_drives": damping_drives,
             "nominal_drives": nominal_drives,
             "residual_drives": residual_drives,
             "closed_loop_drives": closed_loop_drives,
+            "forcing_gates": forcing_gates,
+            "goal_deltas": goal_deltas,
+            "terminal_goal_deltas": terminal_goal_deltas,
+            "terminal_goal_distances": terminal_goal_distances,
+            "forcing_gate_scalars": forcing_gates[:, 0].copy(),
+            "goal_offsets": goal_offsets,
+            "raw_residual_forcing": raw_residual_forcing,
+            "effective_residual_forcing": residual_drives,
+            "spring_drive_norms": np.linalg.norm(spring_drives, axis=1).astype(np.float32),
+            "damping_drive_norms": np.linalg.norm(damping_drives, axis=1).astype(np.float32),
+            "damping_spring_ratios": (
+                np.linalg.norm(damping_drives, axis=1)
+                / (np.linalg.norm(spring_drives, axis=1) + 1.0e-8)
+            ).astype(np.float32),
             "nominal_drive_norms": np.linalg.norm(nominal_drives, axis=1).astype(np.float32),
             "residual_drive_norms": np.linalg.norm(residual_drives, axis=1).astype(np.float32),
             "closed_loop_drive_norms": np.linalg.norm(closed_loop_drives, axis=1).astype(np.float32),
             "residual_forcing_norms": np.linalg.norm(residual_forcing, axis=1).astype(np.float32),
             "commanded_accelerations": commanded_accelerations.astype(np.float32).copy(),
             "applied_accelerations": applied_accelerations.astype(np.float32).copy(),
+            "acceleration_clip_mask": acceleration_clip_mask.astype(bool).copy(),
+            "unclipped_next_velocities": unclipped_next_velocities.astype(np.float32).copy(),
+            "velocity_clip_mask": velocity_clip_mask.astype(bool).copy(),
             "next_states": next_states.astype(np.float32).copy(),
             "raw_action": raw_action.astype(np.float32).copy(),
             "guided_action": guided_action.astype(np.float32).copy(),
@@ -1403,6 +1456,9 @@ class MultiAgentDMPEnv(gym.Env):
         # 计算命令加速度和实际加速度
         commanded_accelerations = np.zeros((self.num_agents, self.state_dim), dtype=np.float32) 
         applied_accelerations = np.zeros((self.num_agents, self.state_dim), dtype=np.float32)
+        acceleration_clip_mask = np.zeros((self.num_agents, self.state_dim), dtype=bool)
+        unclipped_next_velocities = np.zeros((self.num_agents, self.state_dim), dtype=np.float32)
+        velocity_clip_mask = np.zeros((self.num_agents, self.state_dim), dtype=bool)
         next_states = np.zeros((self.num_agents, 2 * self.state_dim), dtype=np.float32)
 
         for agent_index in range(self.num_agents):
@@ -1421,12 +1477,29 @@ class MultiAgentDMPEnv(gym.Env):
                 self.dynamics[agent_index].v,
                 action[agent_index],
                 sensor_packet=self.latest_sensor_packets[agent_index],
+                terminal_goal=self.goals[agent_index],
             )   # 由动作输出获取命令加速度
             applied_acceleration = np.clip(
                 acceleration,
                 self.dynamics[agent_index].accelerate_min,
                 self.dynamics[agent_index].accelerate_max,
             )   # 应用加速度
+            acceleration_clip_mask[agent_index] = np.logical_not(
+                np.isclose(acceleration, applied_acceleration, rtol=0.0, atol=1.0e-7)
+            )
+            candidate_velocity = (
+                self.dynamics[agent_index].v
+                + applied_acceleration * float(self.dynamics[agent_index].dt)
+            )
+            clipped_velocity = np.clip(
+                candidate_velocity,
+                self.dynamics[agent_index].velocity_min,
+                self.dynamics[agent_index].velocity_max,
+            )
+            unclipped_next_velocities[agent_index] = candidate_velocity
+            velocity_clip_mask[agent_index] = np.logical_not(
+                np.isclose(candidate_velocity, clipped_velocity, rtol=0.0, atol=1.0e-7)
+            )
             self.latest_controller_infos[agent_index] = controller_info     # 更新控制器信息
             commanded_accelerations[agent_index] = np.asarray(acceleration, dtype=np.float32)   # 记录命令加速度
             applied_accelerations[agent_index] = np.asarray(applied_acceleration, dtype=np.float32) # 应用加速度
@@ -1534,6 +1607,9 @@ class MultiAgentDMPEnv(gym.Env):
             progress=progress.astype(np.float32),
             commanded_accelerations=commanded_accelerations,
             applied_accelerations=applied_accelerations,
+            acceleration_clip_mask=acceleration_clip_mask,
+            unclipped_next_velocities=unclipped_next_velocities,
+            velocity_clip_mask=velocity_clip_mask,
             next_states=next_states,
             raw_action=raw_action,
             guided_action=guided_action,

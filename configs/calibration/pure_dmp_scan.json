@@ -1,0 +1,43 @@
+{
+  "profile": "pure_dmp_scan",
+  "baseline": {
+    "k_alpha": 3.2,
+    "k_beta": 0.8,
+    "tau": 2.5
+  },
+  "distances": [2.0, 5.0, 8.0],
+  "review_distances": [1.0, 3.0, 6.0, 8.0],
+  "initial_speed": 1.0,
+  "review_initial_speed": 1.5,
+  "terminal_error_limit": 0.3,
+  "overshoot_limit": 0.3,
+  "flight_time_mean_limit": 8.0,
+  "acceleration_clip_rate_max_limit": 0.05,
+  "simulation": {
+    "dt": 0.1,
+    "max_steps": 200,
+    "goal_tolerance": 0.3,
+    "settling_speed": 0.2,
+    "acceleration_limit": 4.0,
+    "velocity_limit": 4.0
+  },
+  "scan": {
+    "k_alpha": [1.6, 2.4, 3.2, 4.0],
+    "k_beta": [0.4, 0.6, 0.8, 1.0],
+    "gain_candidates_for_tau": 3,
+    "tau": [1.75, 2.5, 3.25],
+    "local_review_candidates": 3
+  },
+  "phase_scan": {
+    "integrator": "legacy_euler",
+    "alpha_s": [1.0, 2.0, 3.0, 4.0],
+    "phase_end_threshold": [0.01, 0.001, 0.0001],
+    "phase_radius": 0.3
+  },
+  "constraints": {
+    "delta_goal": 0.0,
+    "forcing": 0.0,
+    "phase_mode": "classic",
+    "enable_flow_consistency_loss": false
+  }
+}

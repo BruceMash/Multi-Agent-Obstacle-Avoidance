@@ -48,6 +48,9 @@ class StandardMASAC(MASAC):
             )
 
         self.temporal_steps = self.network_config.temporal_steps
+        # StandardMASAC复用MASAC.learn；保持与基础类相同的默认裁剪阈值。
+        self.actor_gradient_clip = 0.5
+        self.critic_gradient_clip = 0.5
         action_dims = {int(dims[1]) for dims in dim_info.values()}
         if len(action_dims) != 1:
             raise ValueError(
@@ -106,6 +109,21 @@ class StandardMASAC(MASAC):
         del obs, temporal_mask
         return actor_action
 
+    def learn(self, *args, **kwargs):
+        """保持标准连续动作适配层原有的诊断返回接口。"""
+        diagnostics = super().learn(*args, **kwargs)
+        legacy_keys = (
+            "critic_loss",
+            "actor_loss",
+            "q_replay",
+            "q_policy",
+            "q_target",
+            "entropy",
+            "alpha",
+            "alpha_loss",
+        )
+        return {key: diagnostics[key] for key in legacy_keys}
+
     @classmethod
     def load(
         cls,
@@ -127,9 +145,28 @@ class StandardMASAC(MASAC):
         data = torch.load(
             os.path.join(model_dir, "MASAC.pth"),
             map_location=device,
+            weights_only=False,
         )
+        actor_states = data.get("actors", data)
+        policy.checkpoint_has_critics = bool("critics" in data)
+        policy.checkpoint_format_version = int(data.get("format_version", 1))
         for agent_id, agent in policy.agents.items():
-            agent.actor.load_state_dict(data[agent_id])
+            agent.actor.load_state_dict(actor_states[agent_id])
+            if "critics" in data:
+                agent.critic.load_state_dict(data["critics"][agent_id])
+            if "actor_targets" in data:
+                agent.actor_target.load_state_dict(data["actor_targets"][agent_id])
+            else:
+                agent.actor_target.load_state_dict(actor_states[agent_id])
+            if "critic_targets" in data:
+                agent.critic_target.load_state_dict(data["critic_targets"][agent_id])
+            elif "critics" in data:
+                agent.critic_target.load_state_dict(data["critics"][agent_id])
+            if "log_alphas" in data:
+                policy.alphas[agent_id].log_alpha.data.copy_(
+                    data["log_alphas"][agent_id].to(policy.device)
+                )
+                policy.alphas[agent_id].alpha = policy.alphas[agent_id].log_alpha.exp()
         return policy
 
 

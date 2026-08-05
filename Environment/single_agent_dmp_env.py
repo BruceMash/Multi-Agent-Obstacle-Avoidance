@@ -431,6 +431,7 @@ class SingleAgentDMPEnv(gym.Env):
             self.dynamics.v,
             action,
             sensor_packet=self.latest_sensor_packet,
+            terminal_goal=self.goal,
         )
 
         # 再用动力学模型允许的加速度范围做一次裁剪
@@ -606,8 +607,10 @@ class SingleAgentDMPEnv(gym.Env):
     def _compute_policy_action_direction(self, policy_action: np.ndarray) -> np.ndarray | None:
         forcing_component = np.asarray(policy_action[: self.state_dim], dtype=float)
         goal_offset = np.asarray(policy_action[self.state_dim: 2 * self.state_dim], dtype=float)
-        goal_eff = self.goal + goal_offset
-        forcing_gate = np.tanh(np.abs(goal_eff - self.dynamics.p))
+        terminal_distance = float(np.linalg.norm(self.goal - self.dynamics.p))
+        forcing_gate = float(
+            np.tanh(self.dmp.config.forcing_gate_kappa * terminal_distance)
+        )
         action_component = (
             self.dmp.config.K_alpha * self.dmp.config.K_beta * goal_offset
             + forcing_component * forcing_gate
@@ -693,6 +696,26 @@ class SingleAgentDMPEnv(gym.Env):
             "min_clearance": float(self.latest_sensor_packet.min_clearance),
             "phase": float(self.latest_controller_info.get("phase", self.dmp.phase)),
             "tau": float(self.latest_controller_info.get("tau", self.dmp.config.tau)),
+            "terminal_goal_distance": float(
+                self.latest_controller_info.get(
+                    "terminal_goal_distance",
+                    np.linalg.norm(self.goal - self.dynamics.p),
+                )
+            ),
+            "forcing_gate": np.asarray(
+                self.latest_controller_info.get(
+                    "forcing_gate",
+                    np.full(
+                        self.state_dim,
+                        np.tanh(
+                            self.dmp.config.forcing_gate_kappa
+                            * np.linalg.norm(self.goal - self.dynamics.p)
+                        ),
+                        dtype=np.float32,
+                    ),
+                ),
+                dtype=np.float32,
+            ).copy(),
             "sensor_observation": self.get_sensor_observation().copy(),
             "commanded_acceleration": np.asarray(commanded_acceleration, dtype=np.float32).copy(),
             "applied_acceleration": np.asarray(applied_acceleration, dtype=np.float32).copy(),

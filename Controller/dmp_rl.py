@@ -23,10 +23,12 @@ class DMPConfig:
     tau: float = 1.2
     forcing_term_max: float = 10.0
     forcing_term_min: float = -10.0
+    forcing_gate_kappa: float = 1.0
     goal_offset_max: float = 1.5
     phase_mode: str = "classic"
     phase_integrator: str = "legacy_euler"
     phase_min: float = 0.0
+    phase_end_threshold: float = 1.0e-4
     flow_zero_threshold: float = 1.0e-4
 
     def __post_init__(self):
@@ -39,6 +41,8 @@ class DMPConfig:
         self.phase_mode = str(self.phase_mode).lower()
         self.phase_integrator = str(self.phase_integrator).lower()
         self.phase_min = float(self.phase_min)
+        self.phase_end_threshold = float(self.phase_end_threshold)
+        self.forcing_gate_kappa = float(self.forcing_gate_kappa)
         self.flow_zero_threshold = float(self.flow_zero_threshold)
         if self.phase_mode not in {"classic", "fcep"}:
             raise ValueError("phase_mode must be 'classic' or 'fcep'")
@@ -46,6 +50,10 @@ class DMPConfig:
             raise ValueError("phase_integrator must be 'legacy_euler' or 'exponential'")
         if not 0.0 <= self.phase_min <= 1.0:
             raise ValueError("phase_min must lie in [0, 1]")
+        if not 0.0 <= self.phase_end_threshold <= 1.0:
+            raise ValueError("phase_end_threshold must lie in [0, 1]")
+        if self.forcing_gate_kappa < 0.0:
+            raise ValueError("forcing_gate_kappa must be non-negative")
         if self.flow_zero_threshold < 0.0:
             raise ValueError("flow_zero_threshold must be non-negative")
 
@@ -74,7 +82,14 @@ class SecondOrderDMPController:
             raise ValueError("start and goal must match DMP dims")
         self.phase = 1.0
 
-    def compute_acceleration(self, position, velocity, rl_action, sensor_packet=None):
+    def compute_acceleration(
+        self,
+        position,
+        velocity,
+        rl_action,
+        sensor_packet=None,
+        terminal_goal=None,
+    ):
         """
         计算当前 DMP 加速度。
 
@@ -84,28 +99,61 @@ class SecondOrderDMPController:
         position = np.asarray(position, dtype=float)
         velocity = np.asarray(velocity, dtype=float)
         rl_action = np.asarray(rl_action, dtype=float)
+        terminal_goal = (
+            self.goal.copy()
+            if terminal_goal is None
+            else np.asarray(terminal_goal, dtype=float)
+        )
 
         if position.shape != (self.config.dims,) or velocity.shape != (self.config.dims,):
             raise ValueError("position and velocity must match DMP dims")
         if rl_action.shape != (2 * self.config.dims,):
             raise ValueError("rl_action must have shape (2 * dims,)")
+        if terminal_goal.shape != (self.config.dims,):
+            raise ValueError("terminal_goal must match DMP dims")
 
         parsed = self._parse_action(rl_action)
         goal_eff = self.goal + parsed["goal_offset"]
+        raw_forcing = parsed["forcing_term"].copy()
         forcing = np.clip(
-            parsed["forcing_term"],
+            raw_forcing,
             self.config.forcing_term_min,
             self.config.forcing_term_max,
         )
+        goal_delta = goal_eff - position
+        terminal_goal_delta = terminal_goal - position
+        terminal_goal_distance = float(np.linalg.norm(terminal_goal_delta))
+        forcing_gate_scalar = float(
+            np.tanh(self.config.forcing_gate_kappa * terminal_goal_distance)
+        )
+        forcing_gate = np.full(
+            self.config.dims,
+            forcing_gate_scalar,
+            dtype=float,
+        )
+        spring_drive = (
+            float(self.config.K_alpha)
+            * float(self.config.K_beta)
+            * goal_delta
+        )
+        damping_drive = (
+            -float(self.config.K_alpha)
+            * float(self.config.tau)
+            * velocity
+        )
         nominal_drive, residual_drive, closed_loop_drive = compute_dmp_drives(
-            goal_eff - position,
+            goal_delta,
             velocity,
             forcing,
             k_alpha=self.config.K_alpha,
             k_beta=self.config.K_beta,
             tau=self.config.tau,
+            forcing_gate_kappa=self.config.forcing_gate_kappa,
+            forcing_gate_distance=terminal_goal_distance,
         )
         acceleration = closed_loop_drive / (self.config.tau ** 2)
+        spring_norm = float(np.linalg.norm(spring_drive))
+        damping_norm = float(np.linalg.norm(damping_drive))
         flow_consistency = float(compute_dmp_flow_consistency(
             nominal_drive,
             closed_loop_drive,
@@ -130,11 +178,24 @@ class SecondOrderDMPController:
             "previous_phase": previous_phase,
             "phase_rate": float(phase_rate),
             "phase_paused": bool(float(phase_rate) <= 0.0),
+            "phase_end_reached": bool(float(self.phase) <= self.config.phase_end_threshold),
             "phase_mode": self.config.phase_mode,
             "tau": float(self.config.tau),
             "goal_eff": goal_eff.copy(),
+            "goal_delta": goal_delta.copy(),
+            "terminal_goal": terminal_goal.copy(),
+            "terminal_goal_delta": terminal_goal_delta.copy(),
+            "terminal_goal_distance": terminal_goal_distance,
             "goal_offset": parsed["goal_offset"].copy(),
+            "raw_forcing": raw_forcing,
             "forcing": forcing.copy(),
+            "forcing_gate": forcing_gate,
+            "forcing_gate_scalar": forcing_gate_scalar,
+            "spring_drive": np.asarray(spring_drive, dtype=float).copy(),
+            "damping_drive": np.asarray(damping_drive, dtype=float).copy(),
+            "spring_drive_norm": spring_norm,
+            "damping_drive_norm": damping_norm,
+            "damping_spring_ratio": damping_norm / (spring_norm + 1.0e-8),
             "nominal_drive": np.asarray(nominal_drive, dtype=float).copy(),
             "residual_drive": np.asarray(residual_drive, dtype=float).copy(),
             "closed_loop_drive": np.asarray(closed_loop_drive, dtype=float).copy(),

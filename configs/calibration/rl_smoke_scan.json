@@ -1,0 +1,16 @@
+{
+  "profile": "rl_smoke_scan",
+  "inherits": "action_scale_selected",
+  "seeds": [321, 654],
+  "steps": 500,
+  "actor_lr": [0.00005, 0.0001],
+  "critic_lr": [0.00005, 0.0001],
+  "temperature_lr": [0.0001],
+  "target_entropy": [-6.0],
+  "updates_per_step": [1],
+  "target_update_interval": [1],
+  "reward_scale": [1.0],
+  "phase_mode": "classic",
+  "enable_flow_consistency_loss": false,
+  "single_factor_only": true
+}

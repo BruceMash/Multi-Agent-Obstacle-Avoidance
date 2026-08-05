@@ -1,0 +1,8 @@
+{
+  "profile": "critic_action_scan",
+  "action_scale_lambda": [0.0, 0.25, 0.5, 0.75, 1.0],
+  "scenarios": ["open_flight", "static_detour", "dynamic_crossing", "two_agent_crossing", "narrow_yielding"],
+  "metrics": ["q1", "q2", "q_min", "q_gap", "replay_outcome"],
+  "phase_mode": "classic",
+  "enable_flow_consistency_loss": false
+}

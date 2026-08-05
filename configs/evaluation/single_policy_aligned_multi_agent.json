@@ -1,0 +1,8 @@
+{
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "episodes_per_stage": 50,
+  "seed_base": 202608050,
+  "num_agents": 3,
+  "max_steps": 50,
+  "peer_radius": 0.3
+}

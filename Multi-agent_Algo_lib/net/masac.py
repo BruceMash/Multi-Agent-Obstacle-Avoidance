@@ -796,7 +796,8 @@ class MASACActor(nn.Module):
         with_logprob: bool = True,
         ally_mask: torch.Tensor | None = None,
         temporal_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return_diagnostics: bool = False,
+    ):
         features = self.encode_observation(obs, ally_mask, temporal_mask)
         features = _forward_layers(self.policy_layers, features)
 
@@ -829,6 +830,13 @@ class MASACActor(nn.Module):
         if log_prob is not None:
             log_prob = log_prob - self.action_scale.log().sum()
 
+        if return_diagnostics:
+            return action, log_prob, {
+                "mean": mean,
+                "log_std": log_std,
+                "pre_tanh_action": pre_tanh_action,
+                "post_tanh_action": squashed_action,
+            }
         return action, log_prob
 
 
