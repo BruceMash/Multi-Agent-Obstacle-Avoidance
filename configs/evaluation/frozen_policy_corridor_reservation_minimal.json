@@ -1,0 +1,60 @@
+{
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "artifact_dir": "artifacts/frozen_policy_corridor_reservation_minimal_20260805",
+  "seed_base": 202608050,
+  "smoke_seed_count": 10,
+  "expanded_seed_count": 30,
+  "num_agents": 3,
+  "max_steps": 200,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "inter_agent_collision_distance": 0.6,
+  "observation_mode": "peer_spheres",
+  "include_boundaries_in_sensor": false,
+  "terminate_on_boundary_collision": false,
+  "groups": ["E0_single_agent_route_replay", "E1_three_agent_staggered_oracle"],
+  "corridor_geometry": {
+    "inference_mode": "parallel_axis_aligned_boxes",
+    "wall_pair_tolerance": 1e-06,
+    "hold_offset_from_entry": 0.35,
+    "hold_vertical_offset": 0.7,
+    "hold_zone_vertical_half_extent": 0.15,
+    "deceleration_offset_from_hold": 0.2,
+    "entry_offset_inside_corridor": 0.35,
+    "exit_offset_outside_corridor": 0.3,
+    "progress_offset_from_hold": 0.1,
+    "conflict_lateral_margin": 0.0,
+    "release_margin": 0.2,
+    "minimum_static_clearance": 0.3
+  },
+  "waypoint_execution": {
+    "waypoint_tolerance": 0.35,
+    "hold_zone_radius": 0.35,
+    "hold_speed_threshold": 0.25,
+    "hold_stable_steps": 10,
+    "hold_tracking_timeout_steps": 60,
+    "entry_tracking_timeout_steps": 80,
+    "state_hysteresis_steps": 3,
+    "stagger_release_steps": [0, 40, 0]
+  },
+  "reservation": {
+    "capacity": 1,
+    "aging_weight": 0.01,
+    "entry_margin_steps": 5,
+    "exit_margin_steps": 10,
+    "deadlock_steps": 50
+  },
+  "rollout": {
+    "enabled": false,
+    "horizon_steps": 30,
+    "peer_prediction_mode": "maintain_current_active_waypoint",
+    "entry_margin_steps": 5,
+    "exit_margin_steps": 10
+  },
+  "gates": {
+    "e0_min_agent_success_rate": 0.9,
+    "e1_min_team_success_rate": 0.8,
+    "e3_min_team_success_improvement": 0.2
+  }
+}

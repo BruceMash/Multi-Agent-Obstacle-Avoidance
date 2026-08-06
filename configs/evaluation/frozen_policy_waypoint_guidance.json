@@ -3,20 +3,30 @@
   "episodes_per_stage": 50,
   "seed_base": 202608050,
   "num_agents": 3,
-  "max_steps": 50,
+  "max_steps": 200,
   "peer_radius": 0.3,
   "stages": [
     "C_parallel_peer_spheres",
     "D_permuted_peer_spheres",
     "E_head_on_narrow_peer_spheres"
   ],
-  "lookahead_depths": [1, 2, 3],
+  "lookahead_depths": [3],
   "boundary_margin": 0.4,
   "collision_clearance": 0.0,
   "segment_samples": 16,
   "reached_tolerance": 0.25,
   "stagnation_steps": 10,
   "stagnation_progress_epsilon": 0.01,
+  "priority_hold": {
+    "priority_order": [0, 1, 2],
+    "nominal_speed": 0.8,
+    "prediction_horizon": 2.5,
+    "conflict_separation": 0.85,
+    "release_clear_steps": 3,
+    "deadlock_steps": 30,
+    "yield_distance": 0.9,
+    "retreat_distance": 0.45
+  },
   "proposal": {
     "safe_radius": 1.15,
     "terminal_safe_radius": 0.3,

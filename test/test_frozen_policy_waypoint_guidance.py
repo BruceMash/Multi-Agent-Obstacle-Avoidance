@@ -14,11 +14,14 @@ for search_path in (REPO_ROOT, ALGO_ROOT, SCRIPTS_ROOT):
         sys.path.insert(0, str(search_path))
 
 from scripts.evaluate_frozen_policy_waypoint_guidance import (
+    PriorityHoldState,
     build_active_goal_observations,
     point_inside_guidance_bounds,
+    predict_constant_velocity_conflicts,
     predict_actions_without_postprocessing,
     segment_is_clear,
     set_dmp_active_goal_preserve_phase,
+    update_priority_hold_targets,
 )
 from scripts.evaluate_single_policy_aligned_multi_agent import (
     build_single_distribution_multi_config,
@@ -147,5 +150,104 @@ def test_boundary_filter_and_segment_check_reject_outside_waypoint():
             collision_clearance=0.0,
             samples=8,
         )
+    finally:
+        env.close()
+
+
+def test_conflict_predictor_distinguishes_parallel_and_head_on_intents():
+    positions = np.asarray([[0.0, -1.0, 0.0], [0.0, 1.0, 0.0]])
+    parallel_goals = np.asarray([[4.0, -1.0, 0.0], [4.0, 1.0, 0.0]])
+    active = np.asarray([True, True])
+    assert predict_constant_velocity_conflicts(
+        positions,
+        parallel_goals,
+        active,
+        nominal_speed=1.0,
+        horizon=3.0,
+        separation=0.85,
+    ) == []
+
+    head_on_positions = np.asarray([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]])
+    head_on_goals = np.asarray([[4.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    conflicts = predict_constant_velocity_conflicts(
+        head_on_positions,
+        head_on_goals,
+        active,
+        nominal_speed=1.0,
+        horizon=3.0,
+        separation=0.85,
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0][0:2] == (0, 1)
+    assert np.isclose(conflicts[0][2], 2.0)
+    assert np.isclose(conflicts[0][3], 0.0)
+
+
+def test_priority_hold_changes_only_lower_priority_active_goal_and_releases():
+    env = _make_env()
+    try:
+        positions = np.asarray(
+            [[0.2, 0.0, 0.0], [7.8, 0.0, 0.0], [0.2, -1.8, -0.6]],
+            dtype=float,
+        )
+        goals = np.asarray(
+            [[7.8, 0.0, 0.0], [0.2, 0.0, 0.0], [7.8, -1.8, -0.6]],
+            dtype=float,
+        )
+        env.reset(
+            seed=7,
+            options={
+                "starts": positions,
+                "goals": goals,
+                "static_obstacles": [],
+                "dynamic_obstacles": [],
+            },
+        )
+        states = [PriorityHoldState() for _ in range(3)]
+        scheduled, hold_mask, diagnostics = update_priority_hold_targets(
+            env,
+            goals,
+            np.asarray([True, True, False]),
+            states,
+            priority_order=[0, 1, 2],
+            nominal_speed=1.0,
+            prediction_horizon=5.0,
+            conflict_separation=0.85,
+            release_clear_steps=1,
+            deadlock_steps=10,
+            boundary_margin=0.4,
+            collision_clearance=0.0,
+            segment_samples=8,
+            yield_distance=0.9,
+            retreat_distance=0.45,
+        )
+        np.testing.assert_allclose(scheduled[0], goals[0])
+        assert not hold_mask[0]
+        assert hold_mask[1]
+        assert diagnostics["hold_events"] == 1
+        assert not np.allclose(scheduled[1], goals[1])
+        held_point = scheduled[1].copy()
+
+        released, hold_mask, diagnostics = update_priority_hold_targets(
+            env,
+            goals,
+            np.asarray([False, True, False]),
+            states,
+            priority_order=[0, 1, 2],
+            nominal_speed=1.0,
+            prediction_horizon=5.0,
+            conflict_separation=0.85,
+            release_clear_steps=1,
+            deadlock_steps=10,
+            boundary_margin=0.4,
+            collision_clearance=0.0,
+            segment_samples=8,
+            yield_distance=0.9,
+            retreat_distance=0.45,
+        )
+        assert np.linalg.norm(held_point - goals[1]) > 1.0e-6
+        assert not np.any(hold_mask)
+        assert diagnostics["releases"] == 1
+        np.testing.assert_allclose(released, goals)
     finally:
         env.close()

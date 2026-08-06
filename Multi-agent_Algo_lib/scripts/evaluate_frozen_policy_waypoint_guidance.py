@@ -60,10 +60,12 @@ DEFAULT_CONFIG_PATH = (
     REPO_ROOT / "configs" / "evaluation" / "frozen_policy_waypoint_guidance.json"
 )
 CONTROLLER_LABELS = {
-    "baseline": LEGACY_CONTROLLER_LABELS["baseline"],
+    "baseline": "Frozen single policy (blind)",
+    "peer_spheres": LEGACY_CONTROLLER_LABELS["baseline"],
     "w1": "冻结策略 + Guidance W1",
     "w2": "冻结策略 + Guidance W2",
     "w3": "冻结策略 + Guidance W3",
+    "w3_priority_hold": "Frozen policy + Guidance W3 + Priority/Hold",
 }
 WAYPOINT_METRIC_KEYS = (
     "waypoint_request_count",
@@ -81,6 +83,14 @@ WAYPOINT_METRIC_KEYS = (
     "waypoint_proposal_time_mean_ms",
     "waypoint_fallback_agent_step_rate",
     "waypoint_replans_per_step",
+    "coordination_conflict_count",
+    "coordination_hold_event_count",
+    "coordination_release_count",
+    "coordination_hold_agent_steps",
+    "coordination_hold_fraction",
+    "coordination_wait_time_mean",
+    "coordination_max_hold_steps",
+    "coordination_deadlock_event_count",
 )
 
 
@@ -90,6 +100,16 @@ class ActiveWaypointState:
     selected_depth: int = 0
     previous_task_distance: float | None = None
     stagnation_steps: int = 0
+
+
+@dataclass
+class PriorityHoldState:
+    active: bool = False
+    point: np.ndarray | None = None
+    clear_steps: int = 0
+    consecutive_steps: int = 0
+    maximum_consecutive_steps: int = 0
+    deadlock_reported: bool = False
 
 
 def normalize(vector: np.ndarray) -> np.ndarray:
@@ -134,6 +154,261 @@ def segment_is_clear(
         if any(float(obstacle.signed_distance(point)) <= float(collision_clearance) for obstacle in obstacles):
             return False
     return True
+
+
+def predict_constant_velocity_conflicts(
+    positions: np.ndarray,
+    active_goals: np.ndarray,
+    active_mask: np.ndarray,
+    *,
+    nominal_speed: float,
+    horizon: float,
+    separation: float,
+) -> list[tuple[int, int, float, float]]:
+    """Predict pairwise conflicts from active-goal intent velocities.
+
+    The predictor is deliberately deterministic and does not alter the policy
+    action.  It only supplies the upper scheduler with a short-horizon estimate
+    of the closest approach between two intended waypoint motions.
+    """
+
+    positions = np.asarray(positions, dtype=float)
+    active_goals = np.asarray(active_goals, dtype=float)
+    active_mask = np.asarray(active_mask, dtype=bool)
+    if positions.shape != active_goals.shape or positions.ndim != 2:
+        raise ValueError("positions and active_goals must have the same [agents, dims] shape")
+    if active_mask.shape != (positions.shape[0],):
+        raise ValueError("active_mask must have shape [agents]")
+    if float(nominal_speed) < 0.0 or float(horizon) <= 0.0 or float(separation) <= 0.0:
+        raise ValueError("scheduler speed, horizon, and separation must be positive")
+
+    intent_velocities = np.stack(
+        [normalize(goal - position) * float(nominal_speed) for position, goal in zip(positions, active_goals)],
+        axis=0,
+    )
+    conflicts: list[tuple[int, int, float, float]] = []
+    for first in range(len(positions)):
+        if not bool(active_mask[first]):
+            continue
+        for second in range(first + 1, len(positions)):
+            if not bool(active_mask[second]):
+                continue
+            relative_position = positions[first] - positions[second]
+            relative_velocity = intent_velocities[first] - intent_velocities[second]
+            speed_squared = float(np.dot(relative_velocity, relative_velocity))
+            if speed_squared <= 1.0e-10:
+                closest_time = 0.0
+            else:
+                closest_time = float(np.clip(
+                    -np.dot(relative_position, relative_velocity) / speed_squared,
+                    0.0,
+                    float(horizon),
+                ))
+            closest_distance = float(np.linalg.norm(
+                relative_position + closest_time * relative_velocity
+            ))
+            if closest_distance < float(separation):
+                conflicts.append((first, second, closest_time, closest_distance))
+    return conflicts
+
+
+def _point_segment_distance(point: np.ndarray, start: np.ndarray, end: np.ndarray) -> float:
+    point = np.asarray(point, dtype=float)
+    start = np.asarray(start, dtype=float)
+    end = np.asarray(end, dtype=float)
+    delta = end - start
+    denominator = float(np.dot(delta, delta))
+    if denominator <= 1.0e-10:
+        return float(np.linalg.norm(point - start))
+    ratio = float(np.clip(np.dot(point - start, delta) / denominator, 0.0, 1.0))
+    return float(np.linalg.norm(point - (start + ratio * delta)))
+
+
+def choose_priority_wait_point(
+    env: Any,
+    agent_index: int,
+    candidate_goal: np.ndarray,
+    higher_priority_agents: list[int],
+    candidate_goals: np.ndarray,
+    *,
+    boundary_margin: float,
+    collision_clearance: float,
+    segment_samples: int,
+    yield_distance: float,
+    retreat_distance: float,
+) -> np.ndarray:
+    """Choose a reachable waiting waypoint away from priority flight segments."""
+
+    position = np.asarray(env.dynamics[agent_index].p, dtype=float)
+    direction = normalize(np.asarray(candidate_goal, dtype=float) - position)
+    lateral = normalize(np.asarray([-direction[1], direction[0], 0.0], dtype=float))
+    if float(np.linalg.norm(lateral)) <= 1.0e-9:
+        lateral = np.asarray([0.0, 1.0, 0.0], dtype=float)
+    vertical = np.asarray([0.0, 0.0, 1.0], dtype=float)
+    retreat = -direction * float(retreat_distance)
+    candidate_offsets = (
+        lateral * float(yield_distance),
+        -lateral * float(yield_distance),
+        retreat + 0.65 * lateral * float(yield_distance),
+        retreat - 0.65 * lateral * float(yield_distance),
+        vertical * float(yield_distance),
+        -vertical * float(yield_distance),
+        retreat,
+        np.zeros_like(position),
+    )
+    peer_positions = np.asarray(env._positions(), dtype=float)
+    lower, upper = np.asarray(env.env_config.workspace_bounds, dtype=float)
+    best_point = position.copy()
+    best_score = -float("inf")
+    for offset in candidate_offsets:
+        point = position + offset
+        if not segment_is_clear(
+            env,
+            agent_index,
+            position,
+            point,
+            boundary_margin=boundary_margin,
+            collision_clearance=collision_clearance,
+            samples=segment_samples,
+        ):
+            continue
+        priority_clearance = min(
+            (
+                _point_segment_distance(
+                    point,
+                    peer_positions[higher],
+                    candidate_goals[higher],
+                )
+                for higher in higher_priority_agents
+            ),
+            default=float("inf"),
+        )
+        peer_clearance = min(
+            (
+                float(np.linalg.norm(point - peer_positions[peer]))
+                for peer in range(len(peer_positions))
+                if peer != int(agent_index)
+            ),
+            default=float("inf"),
+        )
+        boundary_clearance = float(np.min(np.concatenate([point - lower, upper - point])))
+        movement_cost = float(np.linalg.norm(point - position))
+        score = (
+            2.0 * min(priority_clearance, 5.0)
+            + min(peer_clearance, 5.0)
+            + 0.25 * boundary_clearance
+            - 0.10 * movement_cost
+        )
+        if score > best_score:
+            best_score = score
+            best_point = point.copy()
+    return best_point
+
+
+def update_priority_hold_targets(
+    env: Any,
+    candidate_goals: np.ndarray,
+    active_mask: np.ndarray,
+    states: list[PriorityHoldState],
+    *,
+    priority_order: list[int],
+    nominal_speed: float,
+    prediction_horizon: float,
+    conflict_separation: float,
+    release_clear_steps: int,
+    deadlock_steps: int,
+    boundary_margin: float,
+    collision_clearance: float,
+    segment_samples: int,
+    yield_distance: float,
+    retreat_distance: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    """Apply deterministic priority/hold decisions to candidate active goals."""
+
+    candidate_goals = np.asarray(candidate_goals, dtype=float)
+    active_mask = np.asarray(active_mask, dtype=bool)
+    if len(states) != int(env.num_agents):
+        raise ValueError("one priority hold state is required per agent")
+    if sorted(priority_order) != list(range(int(env.num_agents))):
+        raise ValueError("priority_order must be a permutation of agent indices")
+    rank = {agent: index for index, agent in enumerate(priority_order)}
+    conflicts = predict_constant_velocity_conflicts(
+        env._positions(),
+        candidate_goals,
+        active_mask,
+        nominal_speed=nominal_speed,
+        horizon=prediction_horizon,
+        separation=conflict_separation,
+    )
+    losing_to: dict[int, list[int]] = {}
+    for first, second, _, _ in conflicts:
+        loser, winner = (
+            (first, second) if rank[first] > rank[second] else (second, first)
+        )
+        losing_to.setdefault(loser, []).append(winner)
+
+    active_goals = candidate_goals.copy()
+    hold_mask = np.zeros(int(env.num_agents), dtype=bool)
+    diagnostics = {
+        "conflicts": len(conflicts),
+        "hold_events": 0,
+        "releases": 0,
+        "deadlock_events": 0,
+    }
+    for agent_index, state in enumerate(states):
+        if not bool(active_mask[agent_index]):
+            state.active = False
+            state.point = None
+            state.clear_steps = 0
+            state.consecutive_steps = 0
+            state.deadlock_reported = False
+            continue
+
+        should_hold = agent_index in losing_to
+        if should_hold:
+            state.clear_steps = 0
+            if not state.active:
+                state.active = True
+                state.point = choose_priority_wait_point(
+                    env,
+                    agent_index,
+                    candidate_goals[agent_index],
+                    losing_to[agent_index],
+                    candidate_goals,
+                    boundary_margin=boundary_margin,
+                    collision_clearance=collision_clearance,
+                    segment_samples=segment_samples,
+                    yield_distance=yield_distance,
+                    retreat_distance=retreat_distance,
+                )
+                state.consecutive_steps = 0
+                state.deadlock_reported = False
+                diagnostics["hold_events"] += 1
+        elif state.active:
+            state.clear_steps += 1
+            if state.clear_steps >= int(release_clear_steps):
+                state.active = False
+                state.point = None
+                state.clear_steps = 0
+                state.consecutive_steps = 0
+                state.deadlock_reported = False
+                diagnostics["releases"] += 1
+
+        if state.active and state.point is not None:
+            hold_mask[agent_index] = True
+            active_goals[agent_index] = state.point.copy()
+            state.consecutive_steps += 1
+            state.maximum_consecutive_steps = max(
+                state.maximum_consecutive_steps,
+                state.consecutive_steps,
+            )
+            if (
+                state.consecutive_steps >= int(deadlock_steps)
+                and not state.deadlock_reported
+            ):
+                state.deadlock_reported = True
+                diagnostics["deadlock_events"] += 1
+    return active_goals, hold_mask, diagnostics
 
 
 def set_dmp_active_goal_preserve_phase(dmp: Any, active_goal: np.ndarray) -> None:
@@ -344,6 +619,15 @@ def run_waypoint_episode(
     segment_samples: int,
     stagnation_steps: int,
     stagnation_progress_epsilon: float,
+    priority_hold_enabled: bool = False,
+    priority_order: list[int] | None = None,
+    scheduler_nominal_speed: float = 0.8,
+    scheduler_prediction_horizon: float = 2.5,
+    scheduler_conflict_separation: float = 0.85,
+    scheduler_release_clear_steps: int = 3,
+    scheduler_deadlock_steps: int = 30,
+    scheduler_yield_distance: float = 0.9,
+    scheduler_retreat_distance: float = 0.45,
 ) -> dict[str, Any]:
     env = _build_environment(
         config,
@@ -357,6 +641,12 @@ def run_waypoint_episode(
         _, info = env.reset(seed=int(seed), options=copy.deepcopy(scenario_options))
         task_goals = np.asarray(env.goals, dtype=float).copy()
         states = [ActiveWaypointState() for _ in range(int(env.num_agents))]
+        priority_states = [PriorityHoldState() for _ in range(int(env.num_agents))]
+        resolved_priority_order = (
+            list(range(int(env.num_agents)))
+            if priority_order is None
+            else [int(value) for value in priority_order]
+        )
         positions = env._positions()
         path_lengths = np.zeros(env.num_agents, dtype=float)
         ever_success = np.zeros(env.num_agents, dtype=bool)
@@ -390,6 +680,13 @@ def run_waypoint_episode(
             "obstacle": 0,
             "segment_fallback": 0,
         }
+        coordination_counters = {
+            "conflicts": 0,
+            "hold_events": 0,
+            "releases": 0,
+            "hold_agent_steps": 0,
+            "deadlock_events": 0,
+        }
         collision = False
         obstacle_collision = False
         inter_agent_collision = False
@@ -411,13 +708,22 @@ def run_waypoint_episode(
                 task_distance = float(
                     np.linalg.norm(task_goals[agent_index] - positions[agent_index])
                 )
-                update_stagnation(
-                    state,
-                    task_distance,
-                    progress_epsilon=stagnation_progress_epsilon,
-                )
                 reason: str | None = None
-                if state.point is None:
+                scheduler_holding = bool(
+                    priority_hold_enabled and priority_states[agent_index].active
+                )
+                if scheduler_holding:
+                    state.previous_task_distance = task_distance
+                    state.stagnation_steps = 0
+                else:
+                    update_stagnation(
+                        state,
+                        task_distance,
+                        progress_epsilon=stagnation_progress_epsilon,
+                    )
+                if scheduler_holding:
+                    reason = None
+                elif state.point is None:
                     reason = "initial"
                 elif active_waypoint_invalid(
                     env,
@@ -485,6 +791,42 @@ def run_waypoint_episode(
                 set_dmp_active_goal_preserve_phase(
                     env.dmps[agent_index], active_goals[agent_index]
                 )
+
+            if bool(priority_hold_enabled):
+                active_goals, hold_mask, scheduler_diagnostics = update_priority_hold_targets(
+                    env,
+                    active_goals,
+                    active_mask,
+                    priority_states,
+                    priority_order=resolved_priority_order,
+                    nominal_speed=scheduler_nominal_speed,
+                    prediction_horizon=scheduler_prediction_horizon,
+                    conflict_separation=scheduler_conflict_separation,
+                    release_clear_steps=scheduler_release_clear_steps,
+                    deadlock_steps=scheduler_deadlock_steps,
+                    boundary_margin=boundary_margin,
+                    collision_clearance=collision_clearance,
+                    segment_samples=segment_samples,
+                    yield_distance=scheduler_yield_distance,
+                    retreat_distance=scheduler_retreat_distance,
+                )
+                coordination_counters["conflicts"] += int(
+                    scheduler_diagnostics["conflicts"]
+                )
+                coordination_counters["hold_events"] += int(
+                    scheduler_diagnostics["hold_events"]
+                )
+                coordination_counters["releases"] += int(
+                    scheduler_diagnostics["releases"]
+                )
+                coordination_counters["deadlock_events"] += int(
+                    scheduler_diagnostics["deadlock_events"]
+                )
+                coordination_counters["hold_agent_steps"] += int(np.sum(hold_mask))
+                for agent_index in range(int(env.num_agents)):
+                    set_dmp_active_goal_preserve_phase(
+                        env.dmps[agent_index], active_goals[agent_index]
+                    )
 
             observations = build_active_goal_observations(env, active_goals)
             inference_start = time.perf_counter_ns()
@@ -598,6 +940,21 @@ def run_waypoint_episode(
             "waypoint_proposal_time_mean_ms": _safe_mean(proposal_times_ms),
             "waypoint_fallback_agent_step_rate": fallback_agent_steps / max(1, active_agent_steps),
             "waypoint_replans_per_step": counters["request"] / max(1, int(env.steps)),
+            "coordination_conflict_count": int(coordination_counters["conflicts"]),
+            "coordination_hold_event_count": int(coordination_counters["hold_events"]),
+            "coordination_release_count": int(coordination_counters["releases"]),
+            "coordination_hold_agent_steps": int(coordination_counters["hold_agent_steps"]),
+            "coordination_hold_fraction": coordination_counters["hold_agent_steps"] / max(1, active_agent_steps),
+            "coordination_wait_time_mean": (
+                coordination_counters["hold_agent_steps"]
+                * float(config.time_step)
+                / max(1, int(env.num_agents))
+            ),
+            "coordination_max_hold_steps": max(
+                (state.maximum_consecutive_steps for state in priority_states),
+                default=0,
+            ),
+            "coordination_deadlock_event_count": int(coordination_counters["deadlock_events"]),
         }
     finally:
         env.close()
@@ -666,7 +1023,14 @@ def write_report(
     comparisons: list[dict[str, Any]],
     checkpoint: Path,
 ) -> None:
-    controller_order = {"baseline": 0, "w1": 1, "w2": 2, "w3": 3}
+    controller_order = {
+        "baseline": 0,
+        "peer_spheres": 1,
+        "w1": 2,
+        "w2": 3,
+        "w3": 4,
+        "w3_priority_hold": 5,
+    }
     rows = sorted(
         aggregates,
         key=lambda row: (row["scenario"], controller_order[row["controller"]]),
@@ -721,6 +1085,31 @@ def write_report(
                 variant_only=row["variant_success_only"],
             )
         )
+    coordinated_rows = [
+        row for row in rows if row["controller"] == "w3_priority_hold"
+    ]
+    if coordinated_rows:
+        lines.extend(
+            [
+                "",
+                "## Priority/Hold diagnostics",
+                "",
+                "| Scenario | conflict count | hold events | hold fraction | mean wait / s | max hold steps | deadlock events |",
+                "|---|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in coordinated_rows:
+            lines.append(
+                "| {scenario} | {conflicts:.2f} | {events:.2f} | {fraction:.2%} | {wait:.3f} | {maximum:.2f} | {deadlocks:.2f} |".format(
+                    scenario=row["scenario_label"],
+                    conflicts=row["coordination_conflict_count_mean"],
+                    events=row["coordination_hold_event_count_mean"],
+                    fraction=row["coordination_hold_fraction_mean"],
+                    wait=row["coordination_wait_time_mean_mean"],
+                    maximum=row["coordination_max_hold_steps_mean"],
+                    deadlocks=row["coordination_deadlock_event_count_mean"],
+                )
+            )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -737,6 +1126,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes-per-stage", type=int, default=None)
     parser.add_argument("--seed-base", type=int, default=None)
     parser.add_argument("--stages", type=str, default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
     return parser.parse_args()
 
 
@@ -755,7 +1145,9 @@ def main() -> Path:
     seed_base = int(args.seed_base or settings.get("seed_base", 202608050))
     peer_radius = float(settings.get("peer_radius", 0.3))
     num_agents = int(settings.get("num_agents", 3))
-    max_steps = int(settings.get("max_steps", 50))
+    max_steps = int(
+        args.max_steps if args.max_steps is not None else settings.get("max_steps", 200)
+    )
     boundary_margin = float(settings.get("boundary_margin", 0.4))
     collision_clearance = float(settings.get("collision_clearance", 0.0))
     segment_samples = int(settings.get("segment_samples", 16))
@@ -764,8 +1156,15 @@ def main() -> Path:
     stagnation_progress_epsilon = float(settings.get("stagnation_progress_epsilon", 0.01))
     proposal_config = ProposalConfig(**dict(settings.get("proposal", {})))
     depths = [int(value) for value in settings.get("lookahead_depths", [1, 2, 3])]
-    if episodes_per_stage <= 0 or any(depth <= 0 for depth in depths):
+    scheduler_settings = dict(settings.get("priority_hold", {}))
+    priority_order = [
+        int(value)
+        for value in scheduler_settings.get("priority_order", list(range(num_agents)))
+    ]
+    if episodes_per_stage <= 0 or max_steps <= 0 or any(depth <= 0 for depth in depths):
         raise ValueError("episode count and lookahead depths must be positive")
+    if sorted(priority_order) != list(range(num_agents)):
+        raise ValueError("priority_hold.priority_order must contain every agent exactly once")
 
     requested_stages = (
         [value.strip() for value in args.stages.split(",") if value.strip()]
@@ -799,6 +1198,7 @@ def main() -> Path:
             "checkpoint": checkpoint,
             "checkpoint_sha256": _sha256(checkpoint),
             "episodes_per_stage": episodes_per_stage,
+            "max_steps": max_steps,
             "seed_base": seed_base,
             "stages": stages,
             "lookahead_depths": depths,
@@ -816,12 +1216,15 @@ def main() -> Path:
             "stagnation_steps": stagnation_steps,
             "stagnation_progress_epsilon": stagnation_progress_epsilon,
             "proposal_config": asdict(proposal_config),
+            "priority_hold": scheduler_settings,
             "aligned_config": asdict(config),
         },
     )
 
     rows: list[dict[str, Any]] = []
-    controllers = ["baseline"] + [f"w{depth}" for depth in depths]
+    controllers = ["baseline", "peer_spheres"] + [f"w{depth}" for depth in depths]
+    if 3 in depths:
+        controllers.append("w3_priority_hold")
     total = len(stages) * episodes_per_stage * len(controllers)
     completed = 0
     labels = {
@@ -842,7 +1245,7 @@ def main() -> Path:
                 scenario_name=scenario_name,
                 seed=seed,
                 episode_index=episode_index,
-                observation_mode="peer_spheres",
+                observation_mode="blind",
                 peer_radius=peer_radius,
                 scenario_options_override=options,
                 scenario_label_override=scenario_label,
@@ -853,6 +1256,26 @@ def main() -> Path:
             baseline["controller_label"] = CONTROLLER_LABELS["baseline"]
             _zero_waypoint_metrics(baseline)
             rows.append(baseline)
+            completed += 1
+
+            peer_spheres = run_baseline_episode(
+                model=model,
+                config=config,
+                suite="frozen_policy_waypoint_guidance",
+                scenario_name=scenario_name,
+                seed=seed,
+                episode_index=episode_index,
+                observation_mode="peer_spheres",
+                peer_radius=peer_radius,
+                scenario_options_override=options,
+                scenario_label_override=scenario_label,
+                include_boundaries_in_sensor=False,
+                terminate_on_boundary_collision=False,
+            )
+            peer_spheres["controller"] = "peer_spheres"
+            peer_spheres["controller_label"] = CONTROLLER_LABELS["peer_spheres"]
+            _zero_waypoint_metrics(peer_spheres)
+            rows.append(peer_spheres)
             completed += 1
 
             for depth in depths:
@@ -879,6 +1302,54 @@ def main() -> Path:
                 row["controller_label"] = CONTROLLER_LABELS[controller]
                 rows.append(row)
                 completed += 1
+                if depth == 3:
+                    coordinated = run_waypoint_episode(
+                        model=model,
+                        config=config,
+                        scenario_name=scenario_name,
+                        scenario_label=scenario_label,
+                        seed=seed,
+                        episode_index=episode_index,
+                        peer_radius=peer_radius,
+                        scenario_options=options,
+                        requested_depth=depth,
+                        proposal_config=proposal_config,
+                        reached_tolerance=reached_tolerance,
+                        boundary_margin=boundary_margin,
+                        collision_clearance=collision_clearance,
+                        segment_samples=segment_samples,
+                        stagnation_steps=stagnation_steps,
+                        stagnation_progress_epsilon=stagnation_progress_epsilon,
+                        priority_hold_enabled=True,
+                        priority_order=priority_order,
+                        scheduler_nominal_speed=float(
+                            scheduler_settings.get("nominal_speed", 0.8)
+                        ),
+                        scheduler_prediction_horizon=float(
+                            scheduler_settings.get("prediction_horizon", 2.5)
+                        ),
+                        scheduler_conflict_separation=float(
+                            scheduler_settings.get("conflict_separation", 0.85)
+                        ),
+                        scheduler_release_clear_steps=int(
+                            scheduler_settings.get("release_clear_steps", 3)
+                        ),
+                        scheduler_deadlock_steps=int(
+                            scheduler_settings.get("deadlock_steps", 30)
+                        ),
+                        scheduler_yield_distance=float(
+                            scheduler_settings.get("yield_distance", 0.9)
+                        ),
+                        scheduler_retreat_distance=float(
+                            scheduler_settings.get("retreat_distance", 0.45)
+                        ),
+                    )
+                    coordinated["controller"] = "w3_priority_hold"
+                    coordinated["controller_label"] = CONTROLLER_LABELS[
+                        "w3_priority_hold"
+                    ]
+                    rows.append(coordinated)
+                    completed += 1
             if completed % 20 == 0 or completed == total:
                 print(f"[{completed}/{total}] {scenario_name}")
 
