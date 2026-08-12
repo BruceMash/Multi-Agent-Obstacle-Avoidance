@@ -19,6 +19,7 @@ from Entity.KinematicModel import PartialDynamic
 from Entity.sensors import LocalObstacleSensor
 from Entity.static_obstacles import WorkspaceBoundaryPlaneObstacle
 from Environment.single_agent_dmp_env import EnvConfig
+from Environment.frozen_sac_dmp_execution import propagate_sac_dmp_action
 
 
 @dataclass  # 简化数据类的表示
@@ -1472,38 +1473,35 @@ class MultiAgentDMPEnv(gym.Env):
                 }
                 continue
 
-            acceleration, controller_info = self.dmps[agent_index].compute_acceleration(
-                self.dynamics[agent_index].p,
-                self.dynamics[agent_index].v,
-                action[agent_index],
-                sensor_packet=self.latest_sensor_packets[agent_index],
+            transition = propagate_sac_dmp_action(
+                position=self.dynamics[agent_index].p,
+                velocity=self.dynamics[agent_index].v,
+                phase=self.dmps[agent_index].phase,
+                active_goal=self.dmps[agent_index].goal,
                 terminal_goal=self.goals[agent_index],
-            )   # 由动作输出获取命令加速度
-            applied_acceleration = np.clip(
-                acceleration,
-                self.dynamics[agent_index].accelerate_min,
-                self.dynamics[agent_index].accelerate_max,
-            )   # 应用加速度
+                action=action[agent_index],
+                dmp_config=self.dmps[agent_index].config,
+                dynamics=self.dynamics[agent_index],
+            )
+            acceleration = transition.commanded_acceleration
+            applied_acceleration = transition.applied_acceleration
             acceleration_clip_mask[agent_index] = np.logical_not(
                 np.isclose(acceleration, applied_acceleration, rtol=0.0, atol=1.0e-7)
             )
-            candidate_velocity = (
-                self.dynamics[agent_index].v
-                + applied_acceleration * float(self.dynamics[agent_index].dt)
-            )
-            clipped_velocity = np.clip(
-                candidate_velocity,
-                self.dynamics[agent_index].velocity_min,
-                self.dynamics[agent_index].velocity_max,
-            )
+            candidate_velocity = transition.unclipped_next_velocity
+            clipped_velocity = transition.velocity
             unclipped_next_velocities[agent_index] = candidate_velocity
             velocity_clip_mask[agent_index] = np.logical_not(
                 np.isclose(candidate_velocity, clipped_velocity, rtol=0.0, atol=1.0e-7)
             )
-            self.latest_controller_infos[agent_index] = controller_info     # 更新控制器信息
+            self.dmps[agent_index].phase = transition.phase
+            self.latest_controller_infos[agent_index] = transition.controller_info
             commanded_accelerations[agent_index] = np.asarray(acceleration, dtype=np.float32)   # 记录命令加速度
             applied_accelerations[agent_index] = np.asarray(applied_acceleration, dtype=np.float32) # 应用加速度
-            next_states[agent_index] = self.dynamics[agent_index].step(applied_acceleration)    # 更新动力学并记录下一状态
+            self.dynamics[agent_index].p = transition.position.copy()
+            self.dynamics[agent_index].v = transition.velocity.copy()
+            self.dynamics[agent_index].state = transition.state.copy()
+            next_states[agent_index] = transition.state
 
         for obstacle in self.dynamic_obstacles: # 更新动态障碍物状态
             obstacle.step(self.dynamics[0].dt)

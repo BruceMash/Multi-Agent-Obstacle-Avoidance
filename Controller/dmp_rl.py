@@ -58,6 +58,123 @@ class DMPConfig:
             raise ValueError("flow_zero_threshold must be non-negative")
 
 
+def compute_dmp_transition(
+    *,
+    config: DMPConfig,
+    position,
+    velocity,
+    rl_action,
+    active_goal,
+    terminal_goal,
+    phase,
+):
+    """计算一次无副作用的 DMP 状态转移。
+
+    ``active_goal`` 决定弹簧项，``terminal_goal`` 仅决定 forcing gate。
+    该区分与当前历史 checkpoint 的真实执行语义保持一致。
+    """
+    position = np.asarray(position, dtype=float)
+    velocity = np.asarray(velocity, dtype=float)
+    rl_action = np.asarray(rl_action, dtype=float)
+    active_goal = np.asarray(active_goal, dtype=float)
+    terminal_goal = np.asarray(terminal_goal, dtype=float)
+    expected_state_shape = (config.dims,)
+    if position.shape != expected_state_shape or velocity.shape != expected_state_shape:
+        raise ValueError("position and velocity must match DMP dims")
+    if active_goal.shape != expected_state_shape:
+        raise ValueError("active_goal must match DMP dims")
+    if terminal_goal.shape != expected_state_shape:
+        raise ValueError("terminal_goal must match DMP dims")
+    if rl_action.shape != (2 * config.dims,):
+        raise ValueError("rl_action must have shape (2 * dims,)")
+    if not np.all(np.isfinite(position)) or not np.all(np.isfinite(velocity)):
+        raise ValueError("position and velocity must be finite")
+    if not np.all(np.isfinite(rl_action)):
+        raise ValueError("rl_action must be finite")
+    if not np.all(np.isfinite(active_goal)) or not np.all(np.isfinite(terminal_goal)):
+        raise ValueError("active_goal and terminal_goal must be finite")
+    phase = float(phase)
+    if not np.isfinite(phase):
+        raise ValueError("phase must be finite")
+
+    raw_forcing = rl_action[: config.dims].copy()
+    forcing = np.clip(raw_forcing, config.forcing_term_min, config.forcing_term_max)
+    goal_offset = np.clip(
+        rl_action[config.dims : 2 * config.dims],
+        -config.goal_offset_max,
+        config.goal_offset_max,
+    )
+    goal_eff = active_goal + goal_offset
+    goal_delta = goal_eff - position
+    terminal_goal_delta = terminal_goal - position
+    terminal_goal_distance = float(np.linalg.norm(terminal_goal_delta))
+    forcing_gate_scalar = float(
+        np.tanh(config.forcing_gate_kappa * terminal_goal_distance)
+    )
+    forcing_gate = np.full(config.dims, forcing_gate_scalar, dtype=float)
+    spring_drive = float(config.K_alpha) * float(config.K_beta) * goal_delta
+    damping_drive = -float(config.K_alpha) * float(config.tau) * velocity
+    nominal_drive, residual_drive, closed_loop_drive = compute_dmp_drives(
+        goal_delta,
+        velocity,
+        forcing,
+        k_alpha=config.K_alpha,
+        k_beta=config.K_beta,
+        tau=config.tau,
+        forcing_gate_kappa=config.forcing_gate_kappa,
+        forcing_gate_distance=terminal_goal_distance,
+    )
+    acceleration = closed_loop_drive / (config.tau ** 2)
+    spring_norm = float(np.linalg.norm(spring_drive))
+    damping_norm = float(np.linalg.norm(damping_drive))
+    flow_consistency = float(
+        compute_dmp_flow_consistency(
+            nominal_drive,
+            closed_loop_drive,
+            zero_threshold=config.flow_zero_threshold,
+        )
+    )
+    next_phase, phase_rate = update_dmp_phase(
+        phase,
+        flow_consistency,
+        alpha_s=config.alpha_s,
+        dt=config.dt,
+        tau=config.tau,
+        phase_min=config.phase_min,
+        phase_mode=config.phase_mode,
+        phase_integrator=config.phase_integrator,
+    )
+    info = {
+        "phase": float(next_phase),
+        "previous_phase": phase,
+        "phase_rate": float(phase_rate),
+        "phase_paused": bool(float(phase_rate) <= 0.0),
+        "phase_end_reached": bool(float(next_phase) <= config.phase_end_threshold),
+        "phase_mode": config.phase_mode,
+        "tau": float(config.tau),
+        "goal_eff": goal_eff.copy(),
+        "goal_delta": goal_delta.copy(),
+        "terminal_goal": terminal_goal.copy(),
+        "terminal_goal_delta": terminal_goal_delta.copy(),
+        "terminal_goal_distance": terminal_goal_distance,
+        "goal_offset": goal_offset.copy(),
+        "raw_forcing": raw_forcing,
+        "forcing": forcing.copy(),
+        "forcing_gate": forcing_gate,
+        "forcing_gate_scalar": forcing_gate_scalar,
+        "spring_drive": np.asarray(spring_drive, dtype=float).copy(),
+        "damping_drive": np.asarray(damping_drive, dtype=float).copy(),
+        "spring_drive_norm": spring_norm,
+        "damping_drive_norm": damping_norm,
+        "damping_spring_ratio": damping_norm / (spring_norm + 1.0e-8),
+        "nominal_drive": np.asarray(nominal_drive, dtype=float).copy(),
+        "residual_drive": np.asarray(residual_drive, dtype=float).copy(),
+        "closed_loop_drive": np.asarray(closed_loop_drive, dtype=float).copy(),
+        "flow_consistency": flow_consistency,
+    }
+    return np.asarray(acceleration, dtype=float), float(next_phase), info
+
+
 class SecondOrderDMPController:
     """
     面向质点模型的二阶 DMP 控制器。
@@ -96,111 +213,22 @@ class SecondOrderDMPController:
         单机action 的组织方式为：
         [forcing_x, forcing_y, forcing_z, goal_offset_x, goal_offset_y, goal_offset_z]
         """
-        position = np.asarray(position, dtype=float)
-        velocity = np.asarray(velocity, dtype=float)
-        rl_action = np.asarray(rl_action, dtype=float)
         terminal_goal = (
             self.goal.copy()
             if terminal_goal is None
             else np.asarray(terminal_goal, dtype=float)
         )
-
-        if position.shape != (self.config.dims,) or velocity.shape != (self.config.dims,):
-            raise ValueError("position and velocity must match DMP dims")
-        if rl_action.shape != (2 * self.config.dims,):
-            raise ValueError("rl_action must have shape (2 * dims,)")
-        if terminal_goal.shape != (self.config.dims,):
-            raise ValueError("terminal_goal must match DMP dims")
-
-        parsed = self._parse_action(rl_action)
-        goal_eff = self.goal + parsed["goal_offset"]
-        raw_forcing = parsed["forcing_term"].copy()
-        forcing = np.clip(
-            raw_forcing,
-            self.config.forcing_term_min,
-            self.config.forcing_term_max,
+        acceleration, next_phase, info = compute_dmp_transition(
+            config=self.config,
+            position=position,
+            velocity=velocity,
+            rl_action=rl_action,
+            active_goal=self.goal,
+            terminal_goal=terminal_goal,
+            phase=self.phase,
         )
-        goal_delta = goal_eff - position
-        terminal_goal_delta = terminal_goal - position
-        terminal_goal_distance = float(np.linalg.norm(terminal_goal_delta))
-        forcing_gate_scalar = float(
-            np.tanh(self.config.forcing_gate_kappa * terminal_goal_distance)
-        )
-        forcing_gate = np.full(
-            self.config.dims,
-            forcing_gate_scalar,
-            dtype=float,
-        )
-        spring_drive = (
-            float(self.config.K_alpha)
-            * float(self.config.K_beta)
-            * goal_delta
-        )
-        damping_drive = (
-            -float(self.config.K_alpha)
-            * float(self.config.tau)
-            * velocity
-        )
-        nominal_drive, residual_drive, closed_loop_drive = compute_dmp_drives(
-            goal_delta,
-            velocity,
-            forcing,
-            k_alpha=self.config.K_alpha,
-            k_beta=self.config.K_beta,
-            tau=self.config.tau,
-            forcing_gate_kappa=self.config.forcing_gate_kappa,
-            forcing_gate_distance=terminal_goal_distance,
-        )
-        acceleration = closed_loop_drive / (self.config.tau ** 2)
-        spring_norm = float(np.linalg.norm(spring_drive))
-        damping_norm = float(np.linalg.norm(damping_drive))
-        flow_consistency = float(compute_dmp_flow_consistency(
-            nominal_drive,
-            closed_loop_drive,
-            zero_threshold=self.config.flow_zero_threshold,
-        ))
-
-        previous_phase = float(self.phase)
-        next_phase, phase_rate = update_dmp_phase(
-            previous_phase,
-            flow_consistency,
-            alpha_s=self.config.alpha_s,
-            dt=self.config.dt,
-            tau=self.config.tau,
-            phase_min=self.config.phase_min,
-            phase_mode=self.config.phase_mode,
-            phase_integrator=self.config.phase_integrator,
-        )
-        self.phase = float(next_phase)
-
-        return acceleration, {
-            "phase": float(self.phase),
-            "previous_phase": previous_phase,
-            "phase_rate": float(phase_rate),
-            "phase_paused": bool(float(phase_rate) <= 0.0),
-            "phase_end_reached": bool(float(self.phase) <= self.config.phase_end_threshold),
-            "phase_mode": self.config.phase_mode,
-            "tau": float(self.config.tau),
-            "goal_eff": goal_eff.copy(),
-            "goal_delta": goal_delta.copy(),
-            "terminal_goal": terminal_goal.copy(),
-            "terminal_goal_delta": terminal_goal_delta.copy(),
-            "terminal_goal_distance": terminal_goal_distance,
-            "goal_offset": parsed["goal_offset"].copy(),
-            "raw_forcing": raw_forcing,
-            "forcing": forcing.copy(),
-            "forcing_gate": forcing_gate,
-            "forcing_gate_scalar": forcing_gate_scalar,
-            "spring_drive": np.asarray(spring_drive, dtype=float).copy(),
-            "damping_drive": np.asarray(damping_drive, dtype=float).copy(),
-            "spring_drive_norm": spring_norm,
-            "damping_drive_norm": damping_norm,
-            "damping_spring_ratio": damping_norm / (spring_norm + 1.0e-8),
-            "nominal_drive": np.asarray(nominal_drive, dtype=float).copy(),
-            "residual_drive": np.asarray(residual_drive, dtype=float).copy(),
-            "closed_loop_drive": np.asarray(closed_loop_drive, dtype=float).copy(),
-            "flow_consistency": flow_consistency,
-        }
+        self.phase = next_phase
+        return acceleration, info
 
     def _parse_action(self, rl_action):
         """

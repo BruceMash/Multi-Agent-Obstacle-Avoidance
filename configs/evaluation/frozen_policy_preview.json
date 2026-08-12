@@ -1,0 +1,17 @@
+{
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "seed": 20260812,
+  "agent_index": 0,
+  "horizon": 8,
+  "candidate_consumer": "reference_point_demo_top_k",
+  "consumer_top_k": 10,
+  "debug_candidate_index": null,
+  "output_dir": "artifacts/frozen_policy_preview_debug",
+  "local_observation_model": "frozen_visible_surface_approximation",
+  "clearance_source": "frozen_lidar_surface_samples",
+  "clearance_is_approximate": true,
+  "lidar_hit_source_available": false,
+  "dynamic_entity_extrapolation": false,
+  "forcing_gate_distance_source": "terminal_task_goal",
+  "boundary_constraint_added": false
+}

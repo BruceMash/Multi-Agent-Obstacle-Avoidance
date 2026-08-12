@@ -2,6 +2,45 @@
 
 import numpy as np
 
+
+def propagate_point_mass(
+    *,
+    position,
+    velocity,
+    acceleration,
+    dt,
+    acceleration_min,
+    acceleration_max,
+    velocity_min,
+    velocity_max,
+):
+    """按 ``PartialDynamic.step`` 的原始顺序执行无副作用质点传播。"""
+    position = np.asarray(position, dtype=float)
+    velocity = np.asarray(velocity, dtype=float)
+    acceleration = np.asarray(acceleration, dtype=float)
+    if position.shape != (3,) or velocity.shape != (3,) or acceleration.shape != (3,):
+        raise ValueError("position, velocity and acceleration must have shape (3,)")
+    if not (
+        np.all(np.isfinite(position))
+        and np.all(np.isfinite(velocity))
+        and np.all(np.isfinite(acceleration))
+    ):
+        raise ValueError("point-mass transition inputs must be finite")
+    dt = float(dt)
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be a positive finite scalar")
+    applied_acceleration = np.clip(acceleration, acceleration_min, acceleration_max)
+    next_velocity_unclipped = velocity + applied_acceleration * dt
+    next_velocity = np.clip(next_velocity_unclipped, velocity_min, velocity_max)
+    next_position = position + velocity * dt + 0.5 * applied_acceleration * (dt ** 2)
+    return {
+        "position": next_position,
+        "velocity": next_velocity,
+        "state": np.concatenate([next_position, next_velocity]),
+        "applied_acceleration": applied_acceleration,
+        "unclipped_next_velocity": next_velocity_unclipped,
+    }
+
 '''
 先用质点模型跑通实验，再看是不是可以往
 '''
@@ -152,20 +191,18 @@ class PartialDynamic:
         return np.clip(value, floor, ceiling)
 
     def step(self, action): # 步进
-        action = np.asarray(action, dtype=float)
-        if action.shape != (3,):
-            raise ValueError('action must have shape (3,)')
-
-        action = self.clip(action, self.accelerate_min, self.accelerate_max)
-
-        v_t = self.v.copy()
-        p_t = self.p.copy()
-
-        v_t_next = self.clip(v_t + action * self.dt, self.velocity_min, self.velocity_max)
-        p_t_next = p_t + v_t * self.dt + 0.5 * action * (self.dt ** 2)
-
-        self.v = v_t_next
-        self.p = p_t_next
+        transition = propagate_point_mass(
+            position=self.p,
+            velocity=self.v,
+            acceleration=action,
+            dt=self.dt,
+            acceleration_min=self.accelerate_min,
+            acceleration_max=self.accelerate_max,
+            velocity_min=self.velocity_min,
+            velocity_max=self.velocity_max,
+        )
+        self.v = transition["velocity"]
+        self.p = transition["position"]
         self.state = self._compose_state()
         return self.state.copy()
     
@@ -190,5 +227,4 @@ class PartialDynamic:
         return self.state.copy()
 
         
-
 

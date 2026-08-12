@@ -35,6 +35,10 @@ from experiment_config import EXPERIMENT_CONFIG as SINGLE_AGENT_CONFIG  # noqa: 
 from runner_sac import build_env as build_single_env  # noqa: E402
 from runner_sac import build_model as build_single_model  # noqa: E402
 from runner_sac import load_checkpoint  # noqa: E402
+from Environment.frozen_sac_dmp_execution import (  # noqa: E402
+    build_historical_actor_observation,
+    predict_frozen_actions,
+)
 from scripts.evaluate_single_policy_aligned_multi_agent import (  # noqa: E402
     STAGE_SPECS,
     build_single_distribution_multi_config,
@@ -425,31 +429,37 @@ def predict_actions_without_postprocessing(
     expected_shape: tuple[int, ...],
 ) -> np.ndarray:
     """Return the deterministic network action without blending or correction."""
-    actions, _ = model.predict(observations, deterministic=True)
-    actions = np.asarray(actions)
-    if actions.shape != expected_shape:
-        raise ValueError(f"policy action shape {actions.shape} != {expected_shape}")
-    return actions
+    return predict_frozen_actions(
+        model,
+        observations,
+        expected_shape=expected_shape,
+    )
 
 
 def build_active_goal_observations(
     env: Any,
     active_goals: np.ndarray,
 ) -> np.ndarray:
-    observations = build_policy_observations(env).copy()
-    positions = np.asarray(env._positions(), dtype=float)
+    rows: list[np.ndarray] = []
     for agent_index in range(int(env.num_agents)):
-        delta = np.asarray(active_goals[agent_index], dtype=float) - positions[agent_index]
-        distance = float(np.linalg.norm(delta))
-        observations[agent_index, 3:6] = normalize(delta).astype(np.float32)
-        observations[agent_index, 6] = np.float32(
-            np.clip(
-                distance / float(env.sensors[agent_index].goal_distance_clip),
-                0.0,
-                1.0,
+        packet = env.latest_sensor_packets[agent_index]
+        if packet is None:
+            raise RuntimeError("environment must be reset before building observations")
+        dmp = env.dmps[agent_index]
+        rows.append(
+            build_historical_actor_observation(
+                velocity=env.dynamics[agent_index].v,
+                active_goal=active_goals[agent_index],
+                position=env.dynamics[agent_index].p,
+                current_scan=packet.current_scan,
+                previous_scan=packet.previous_scan,
+                goal_distance_clip=env.sensors[agent_index].goal_distance_clip,
+                phase=dmp.phase,
+                k_alpha=dmp.config.K_alpha,
+                k_beta=dmp.config.K_beta,
             )
         )
-    return observations
+    return np.stack(rows).astype(np.float32)
 
 
 def _proposal_is_selectable(
