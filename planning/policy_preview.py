@@ -25,6 +25,14 @@ from Environment.frozen_sac_dmp_execution import (
 
 CLEARANCE_SOURCE = "frozen_lidar_surface_samples"
 OBSERVATION_MODEL = "frozen_visible_surface_approximation"
+BOUNDARY_CLEARANCE_SOURCE = "not_separately_available_from_untyped_lidar"
+PREVIEW_TERMINATION_COMPLETED = "completed_horizon"
+PREVIEW_FEATURE_NAMES = (
+    "task_progress",
+    "min_clearance",
+    "max_execution_deviation",
+    "terminal_speed",
+)
 
 
 def _vector3(value: Any, name: str) -> np.ndarray:
@@ -397,6 +405,13 @@ def preview_candidate(
     ]
     max_deviation = float(max(deviations))
     terminal_speed = float(np.linalg.norm(trajectory.velocities[-1]))
+    clearance_finite = bool(np.isfinite(min_clearance))
+    feature_valid_mask = {
+        "task_progress": bool(np.isfinite(task_progress)),
+        "min_clearance": clearance_finite,
+        "max_execution_deviation": bool(np.isfinite(max_deviation)),
+        "terminal_speed": bool(np.isfinite(terminal_speed)),
+    }
     total_ns = time.perf_counter_ns() - total_start
     performance = PreviewPerformance(
         observation_ms=observation_ns / 1.0e6,
@@ -415,6 +430,19 @@ def preview_candidate(
         "forcing_gate_distance_source": "terminal_task_goal",
         "boundary_constraint_added": False,
         "history_is_preview_local": True,
+        "requested_horizon_steps": horizon,
+        "effective_horizon_steps": trajectory.horizon,
+        "effective_horizon_ratio": float(trajectory.horizon / horizon),
+        "preview_completed": True,
+        "termination_reason": PREVIEW_TERMINATION_COMPLETED,
+        "feature_valid_mask": feature_valid_mask,
+        "feature_full_horizon_mask": feature_valid_mask.copy(),
+        "obstacle_clearance_source": local_context.clearance_source,
+        "obstacle_clearance_is_approximate": local_context.clearance_is_approximate,
+        "boundary_clearance_source": BOUNDARY_CLEARANCE_SOURCE,
+        "boundary_clearance_is_approximate": True,
+        "clearance_finite_mask": clearance_finite,
+        "open_space_flag": bool(local_context.visible_surface_points.shape[0] == 0),
     }
     if debug:
         print("features:")

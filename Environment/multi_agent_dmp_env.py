@@ -161,6 +161,36 @@ class MultiAgentEnvConfig(EnvConfig):
             raise ValueError("near-goal bonuses must be non-negative")
 
 
+@dataclass(frozen=True)
+class ObservableNeighborState:
+    """Physical neighbor state exposed by the existing ally observation rule.
+
+    The flat observation normalizes and clips these quantities and omits the
+    agent identifier.  This companion read-only interface preserves the same
+    nearest-neighbor membership and ordering while exposing the physical state
+    needed by the graph builder.  It is not part of the SAC observation.
+    """
+
+    agent_id: int
+    position: np.ndarray
+    velocity: np.ndarray
+
+    def __post_init__(self) -> None:
+        position = np.asarray(self.position, dtype=float)
+        velocity = np.asarray(self.velocity, dtype=float)
+        if position.shape != (3,) or velocity.shape != (3,):
+            raise ValueError("observable neighbor position and velocity must have shape (3,)")
+        if not np.all(np.isfinite(position)) or not np.all(np.isfinite(velocity)):
+            raise ValueError("observable neighbor state must be finite")
+        position = position.copy()
+        velocity = velocity.copy()
+        position.setflags(write=False)
+        velocity.setflags(write=False)
+        object.__setattr__(self, "agent_id", int(self.agent_id))
+        object.__setattr__(self, "position", position)
+        object.__setattr__(self, "velocity", velocity)
+
+
 @dataclass
 class _AgentAsDynamicObstacle:
     center: np.ndarray
@@ -338,6 +368,11 @@ class MultiAgentDMPEnv(gym.Env):
         ]
         self.stagnation_window_progress = np.zeros(self.num_agents, dtype=np.float32)
         self.stagnation_counters = np.zeros(self.num_agents, dtype=np.int32)
+        # At graph time t this stores v^{t-1}.  It is intentionally excluded
+        # from the existing observation construction.
+        self.previous_velocities = np.zeros(
+            (self.num_agents, self.state_dim), dtype=float
+        )
 
         self.action_space = self._build_action_space()
         self.observation_space = self._build_observation_space()
@@ -752,6 +787,46 @@ class MultiAgentDMPEnv(gym.Env):
             dtype=np.float32,
         )
 
+    def _observable_neighbor_indices(self, agent_index: int) -> tuple[int, ...]:
+        """Return exactly the neighbor membership used by the observation."""
+
+        agent_index = int(agent_index)
+        if not 0 <= agent_index < self.num_agents:
+            raise IndexError("agent_index is out of range")
+        nearest_count = self.nearest_agent_observation_count
+        if nearest_count <= 0:
+            return ()
+        position = self.dynamics[agent_index].p
+        entries: list[tuple[float, int]] = []
+        for other_index in range(self.num_agents):
+            if other_index == agent_index:
+                continue
+            distance = float(
+                np.linalg.norm(self.dynamics[other_index].p - position)
+            )
+            entries.append((distance, other_index))
+        entries.sort(key=lambda item: (item[0], item[1]))
+        return tuple(index for _, index in entries[:nearest_count])
+
+    def observable_neighbor_states(
+        self,
+        agent_index: int,
+    ) -> tuple[ObservableNeighborState, ...]:
+        """Expose physical states for the current observable neighbor set.
+
+        This accessor neither widens the neighbor set nor reads future state.
+        Its membership is shared with ``_compose_inter_agent_observation``.
+        """
+
+        return tuple(
+            ObservableNeighborState(
+                agent_id=other_index,
+                position=self.dynamics[other_index].p,
+                velocity=self.dynamics[other_index].v,
+            )
+            for other_index in self._observable_neighbor_indices(agent_index)
+        )
+
     def _compose_inter_agent_observation(self, agent_index: int) -> np.ndarray: # 组合智能体之间的观测
         nearest_count = self.nearest_agent_observation_count
         if nearest_count <= 0:
@@ -762,17 +837,8 @@ class MultiAgentDMPEnv(gym.Env):
         influence_distance = max(float(self.env_config.inter_agent_influence_distance), 1e-5)
         velocity_scale = max(float(np.max(np.abs(np.asarray(self.dynamics[agent_index].velocity_max, dtype=float)))), 1e-5)
 
-        neighbor_entries = []
-        for other_index in range(self.num_agents):
-            if other_index == agent_index:
-                continue
-            other_position = self.dynamics[other_index].p
-            distance = float(np.linalg.norm(other_position - position))
-            neighbor_entries.append((distance, other_index))
-        neighbor_entries.sort(key=lambda item: item[0])
-
         features = []
-        for _, other_index in neighbor_entries[:nearest_count]:
+        for other_index in self._observable_neighbor_indices(agent_index):
             other_position = self.dynamics[other_index].p
             other_velocity = self.dynamics[other_index].v
             relative_position = (other_position - position) / influence_distance
@@ -1397,6 +1463,9 @@ class MultiAgentDMPEnv(gym.Env):
                 "phase": float(self.dmps[agent_index].phase),
                 "tau": float(self.dmps[agent_index].config.tau),
             }
+        # Reset has no earlier executed state, so the established zero/current
+        # initialization is used for v^{-1}.
+        self.previous_velocities = self._velocities().astype(float, copy=True)
 
         for agent_index in range(self.num_agents):
             self.latest_sensor_packets[agent_index] = self.sensors[agent_index].sense(
@@ -1446,6 +1515,11 @@ class MultiAgentDMPEnv(gym.Env):
         
         action = np.clip(action, self.action_space.low, self.action_space.high) # 裁剪动作
         raw_action = action.copy()
+
+        # Save v^t before any agent is propagated.  After this real step has
+        # produced state t+1, graph construction reads these values as v^t,
+        # i.e. the previous real execution velocity required by the paper.
+        self.previous_velocities = self._velocities().astype(float, copy=True)
 
         previous_distances = np.array(
             [np.linalg.norm(self.goals[index] - self.dynamics[index].p) for index in range(self.num_agents)],

@@ -1,0 +1,44 @@
+{
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "scenario_types": [
+    "open",
+    "bounded",
+    "sparse_static",
+    "dense_static",
+    "dynamic_obstacle",
+    "multi_agent"
+  ],
+  "seeds": [0, 1, 2, 3, 4],
+  "number_of_scenarios": 30,
+  "agent_indices": [0],
+  "K": 10,
+  "H_values": [2, 4, 6, 8, 12, 16],
+  "validated_default_horizon": 4,
+  "evaluation_state_warmup_steps": 0,
+  "dt": 0.1,
+  "deterministic_policy": true,
+  "num_agents": 3,
+  "peer_radius": 0.3,
+  "max_steps": 50,
+  "score_weights": {
+    "progress": 1.0,
+    "clearance": 1.0,
+    "deviation": 1.0,
+    "terminal_speed": 0.0
+  },
+  "clearance_normalization_cap": 10.0,
+  "case_score_gap_threshold": 0.1,
+  "output_dir": "artifacts/fp_shep_validation",
+  "proposal_config": {
+    "top_k": 10
+  },
+  "semantics": {
+    "forcing_gate_distance_source": "terminal_task_goal",
+    "preview_observation_model": "frozen_visible_surface_approximation",
+    "preview_clearance_source": "frozen_lidar_surface_samples",
+    "real_clearance_source": "real_environment_sensor_packet",
+    "preview_future_information_access": false,
+    "real_sensor_refresh_each_step": true,
+    "candidate_generator_modified": false
+  }
+}

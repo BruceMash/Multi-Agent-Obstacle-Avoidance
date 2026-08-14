@@ -1,0 +1,63 @@
+{
+  "schema": "HeterogeneousCandidateGraph",
+  "schema_version": "heterogeneous_candidate_graph_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "num_agents": 3,
+  "seed": 20260813,
+  "evaluation_states": 3,
+  "H": 4,
+  "dt": 0.1,
+  "d_safe": 0.6,
+  "d_safe_source": "MultiAgentEnvConfig.inter_agent_safe_distance",
+  "d_safe_risk_inequality": "distance < d_safe",
+  "d_align": 1.2,
+  "d_align_source": "configurable_implementation_parameter_not_paper_constant",
+  "d_align_edge_inequality": "minimum_separation < d_align",
+  "synthetic_interaction_supplement": [
+    "current_far_future_cross",
+    "current_near_future_diverge",
+    "d_safe_below_d_min_below_d_align"
+  ],
+  "normalization_scales": {
+    "candidate_distance": 1.05,
+    "task_goal_distance": 9.0,
+    "velocity": 4.0,
+    "relative_velocity": 8.0,
+    "align_distance": 1.2,
+    "task_progress": 0.32,
+    "min_clearance": 4.5,
+    "max_execution_deviation": 1.05,
+    "terminal_speed": 1.2
+  },
+  "local_frame": {
+    "convention": "ego_centered_world_axis_aligned",
+    "translation": "point_world - ego_position_world",
+    "rotation_applied": false,
+    "reason": "current PartialDynamic point-mass model has no yaw or body-frame state"
+  },
+  "candidate_consumer": "reference_point_demo_top_k",
+  "consumer_top_k": 10,
+  "proposal_sector_safety": "Proposal.normalized_margin",
+  "geometric_progress": "Proposal.distance_progress",
+  "neighbor_source": "MultiAgentDMPEnv.observable_neighbor_states",
+  "neighbor_membership": "same nearest-distance sorting and truncation as current inter-agent observation",
+  "previous_velocity": {
+    "source": "MultiAgentDMPEnv.previous_velocities",
+    "semantics": "velocity immediately before the most recent real environment step",
+    "included_in_122d_observation": false
+  },
+  "edge_types": [
+    ["agent", "smooth", "proposal"],
+    ["align", "spatiotemporal", "proposal"]
+  ],
+  "forbidden_graph_extensions": [
+    "reverse_edges",
+    "self_loops",
+    "proposal_proposal_edges",
+    "agent_align_edges",
+    "GAT",
+    "attention",
+    "candidate_selector"
+  ],
+  "output_dir": "artifacts/fp_shep_heterogeneous_graph"
+}

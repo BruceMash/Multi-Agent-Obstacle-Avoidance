@@ -152,6 +152,18 @@ class Proposal:
     score: float
 
 
+@dataclass(frozen=True)
+class SectorSafetyField:
+    """Per-sector safety quantities shared by proposal and graph consumers."""
+
+    raw_obstacle_distance: np.ndarray
+    obstacle_distance: np.ndarray
+    effective_safe_radius: float
+    braking_distance: float
+    safety_margin: np.ndarray
+    normalized_margin: np.ndarray
+
+
 @dataclass
 class EpisodeResult:
     seed: int
@@ -251,7 +263,7 @@ def verify_environment_alignment(
     return actual
 
 
-def propose_reference_points(
+def compute_sector_safety_field(
     position: np.ndarray,
     goal: np.ndarray,
     velocity: np.ndarray,
@@ -259,25 +271,13 @@ def propose_reference_points(
     sensor: Any,
     config: ProposalConfig,
     goal_tolerance: float,
-) -> list[Proposal]:
-    """
-    使用当前训练传感器的射线方向与 current_scan 生成所有可行候选点。
-
-    current_scan 在环境中归一化到 [0, 1]，因此先乘 sensing_radius
-    恢复物理距离。射线展平顺序与 LocalObstacleSensor._scan_obstacles
-    的“方位角优先、俯仰角次之”组织方式保持一致。
-    """
+) -> SectorSafetyField:
+    """Compute the proposal generator's existing sector-safety semantics."""
 
     position = np.asarray(position, dtype=float)
     goal = np.asarray(goal, dtype=float)
     velocity = np.asarray(velocity, dtype=float)
-    goal_vector = goal - position
-    goal_distance = float(np.linalg.norm(goal_vector))
-    if goal_distance <= float(goal_tolerance):
-        return []
-
-    goal_direction = normalize(goal_vector)
-    velocity_direction = normalize(velocity)
+    goal_distance = float(np.linalg.norm(goal - position))
     speed = float(np.linalg.norm(velocity))
 
     scan = np.asarray(sensor_packet.current_scan, dtype=float)
@@ -285,7 +285,6 @@ def propose_reference_points(
         raise ValueError(
             f"current_scan shape {scan.shape} does not match sensor scan_shape {sensor.scan_shape}"
         )
-    directions = np.asarray(sensor.ray_directions, dtype=float)
     raw_obstacle_distances = (
         np.clip(scan, 0.0, 1.0) * float(sensor.sensing_radius)
     )
@@ -318,7 +317,6 @@ def propose_reference_points(
         0.0,
     )
 
-    proposals: list[Proposal] = []
     terminal_mode = goal_distance <= config.terminal_radius
     if terminal_mode:
         terminal_span = max(
@@ -342,6 +340,62 @@ def propose_reference_points(
         speed * speed / (2.0 * config.braking_deceleration)
         + config.reaction_time * speed
     )
+    safety_margin = (
+        obstacle_distances - effective_safe_radius - braking_distance
+    )
+    normalized_margin = np.clip(
+        safety_margin / config.h_max, 0.0, 1.0
+    )
+    return SectorSafetyField(
+        raw_obstacle_distance=raw_obstacle_distances.copy(),
+        obstacle_distance=obstacle_distances.copy(),
+        effective_safe_radius=float(effective_safe_radius),
+        braking_distance=float(braking_distance),
+        safety_margin=safety_margin.copy(),
+        normalized_margin=normalized_margin.copy(),
+    )
+
+
+def propose_reference_points(
+    position: np.ndarray,
+    goal: np.ndarray,
+    velocity: np.ndarray,
+    sensor_packet: Any,
+    sensor: Any,
+    config: ProposalConfig,
+    goal_tolerance: float,
+) -> list[Proposal]:
+    """
+    使用当前训练传感器的射线方向与 current_scan 生成所有可行候选点。
+
+    current_scan 在环境中归一化到 [0, 1]，因此先乘 sensing_radius
+    恢复物理距离。射线展平顺序与 LocalObstacleSensor._scan_obstacles
+    的“方位角优先、俯仰角次之”组织方式保持一致。
+    """
+
+    position = np.asarray(position, dtype=float)
+    goal = np.asarray(goal, dtype=float)
+    velocity = np.asarray(velocity, dtype=float)
+    goal_vector = goal - position
+    goal_distance = float(np.linalg.norm(goal_vector))
+    if goal_distance <= float(goal_tolerance):
+        return []
+
+    goal_direction = normalize(goal_vector)
+    velocity_direction = normalize(velocity)
+    directions = np.asarray(sensor.ray_directions, dtype=float)
+    sector_safety = compute_sector_safety_field(
+        position,
+        goal,
+        velocity,
+        sensor_packet,
+        sensor,
+        config,
+        goal_tolerance,
+    )
+
+    proposals: list[Proposal] = []
+    terminal_mode = goal_distance <= config.terminal_radius
     minimum_step = config.terminal_min_step if terminal_mode else config.s_min
     maximum_step = min(config.s_max, goal_distance)
     if terminal_mode:
@@ -357,15 +411,13 @@ def propose_reference_points(
                 continue
 
             raw_obstacle_distance = float(
-                raw_obstacle_distances[azimuth_index, elevation_index]
+                sector_safety.raw_obstacle_distance[azimuth_index, elevation_index]
             )
             obstacle_distance = float(
-                obstacle_distances[azimuth_index, elevation_index]
+                sector_safety.obstacle_distance[azimuth_index, elevation_index]
             )
-            safety_margin = (
-                obstacle_distance
-                - effective_safe_radius
-                - braking_distance
+            safety_margin = float(
+                sector_safety.safety_margin[azimuth_index, elevation_index]
             )
             if safety_margin <= 0.0:
                 continue
@@ -375,7 +427,7 @@ def propose_reference_points(
             )
             step = min(
                 desired_step,
-                obstacle_distance - effective_safe_radius,
+                obstacle_distance - sector_safety.effective_safe_radius,
                 float(sensor.sensing_radius),
                 maximum_step,
             )
@@ -385,7 +437,7 @@ def propose_reference_points(
                 continue
 
             normalized_margin = float(
-                np.clip(safety_margin / config.h_max, 0.0, 1.0)
+                sector_safety.normalized_margin[azimuth_index, elevation_index]
             )
             usable_length = float(np.clip(step / config.s_max, 0.0, 1.0))
             candidate_point = position + step * direction
@@ -414,8 +466,8 @@ def propose_reference_points(
                     distance=float(step),
                     raw_obstacle_distance=raw_obstacle_distance,
                     obstacle_distance=obstacle_distance,
-                    effective_safe_radius=float(effective_safe_radius),
-                    braking_distance=float(braking_distance),
+                    effective_safe_radius=sector_safety.effective_safe_radius,
+                    braking_distance=sector_safety.braking_distance,
                     safety_margin=float(safety_margin),
                     normalized_margin=normalized_margin,
                     distance_progress=float(distance_progress),

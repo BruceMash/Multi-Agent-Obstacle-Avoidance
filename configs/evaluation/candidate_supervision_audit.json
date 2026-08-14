@@ -1,0 +1,81 @@
+{
+  "schema_version": "candidate_supervision_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "output_dir": "artifacts/candidate_supervision",
+  "deterministic_policy": true,
+  "num_agents": 3,
+  "agent_indices": [0, 1, 2],
+  "scenario_types": [
+    "open",
+    "bounded",
+    "sparse_static",
+    "dense_static",
+    "dynamic_obstacle",
+    "multi_agent",
+    "narrow_head_on"
+  ],
+  "seeds": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "split_seeds": {
+    "train": [0, 1, 2, 3, 4, 5],
+    "validation": [6, 7],
+    "test": [8, 9]
+  },
+  "selection_scope": "train_validation_only",
+  "test_role": "held_out_no_selection_before_design_freeze",
+  "state_sample_timesteps": [0, 12, 24],
+  "sample_stride_constraint": "adjacent_gap_greater_than_or_equal_to_H_label_max",
+  "early_termination_state_policy": "do_not_fabricate_unreached_states",
+  "episode_index": 0,
+  "H_preview": 4,
+  "H_label": [4, 6, 8],
+  "diagnostic_preview_at_H_label": true,
+  "diagnostic_preview_role": "offline_equal_horizon_preview_real_divergence_only",
+  "diagnostic_preview_excluded_from_graph": true,
+  "diagnostic_preview_excluded_from_formal_J_preview": true,
+  "K": 10,
+  "peer_radius": 0.3,
+  "max_steps": 50,
+  "dt": 0.1,
+  "soft_target_temperatures": [0.1, 0.25, 0.5],
+  "default_temperature_for_distribution_plots_only": 0.25,
+  "near_optimal_gap_threshold": 0.1,
+  "proposal_better_than_null_gap_threshold": 0.25,
+  "quality": {
+    "primary_target_name": "provisional_primary_target",
+    "companion_target_name": "companion_target",
+    "final_target_frozen": false,
+    "progress_weight": 1.0,
+    "clearance_weight": 1.0,
+    "deviation_weight": 1.0,
+    "terminal_speed_weight": 1.0,
+    "failure_margin": 0.001,
+    "normalization": {
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2,
+      "version": "fp_shep_h4_v1"
+    }
+  },
+  "proposal_config": {
+    "top_k": 10
+  },
+  "graph_config": {
+    "horizon_steps": 4,
+    "d_align": 1.2,
+    "d_align_source": "configurable_implementation_parameter_not_paper_constant"
+  },
+  "semantics": {
+    "formal_graph_preview_horizon": 4,
+    "null_branch_active_goal": "terminal_task_goal",
+    "null_node_schema_changed": false,
+    "forcing_gate_distance_source": "terminal_task_goal",
+    "preview_observation_model": "frozen_visible_surface_approximation",
+    "preview_clearance_source": "frozen_lidar_surface_samples",
+    "real_clearance_source": "real_environment_sensor_packet",
+    "dynamic_entity_extrapolation": false,
+    "real_execution_semantics": "MultiAgentDMPEnv.step",
+    "candidate_generator_modified": false,
+    "gat_training_enabled": false
+  }
+}

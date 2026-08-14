@@ -1,0 +1,58 @@
+{
+  "schema": "policy_preview_edge_enhanced_gat_forward_v1",
+  "graph_config": "configs/evaluation/fp_shep_heterogeneous_graph.json",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "random_seed": 20260813,
+  "network": {
+    "hidden_dim": 64,
+    "node_encoder_hidden_dim": 64,
+    "edge_dim": 32,
+    "edge_encoder_hidden_dim": 32,
+    "num_heads": 4,
+    "num_layers": 2,
+    "head_aggregation": "concat",
+    "activation": "gelu",
+    "dropout": 0.0,
+    "negative_slope": 0.2,
+    "layer_norm": true
+  },
+  "input_semantics": {
+    "node_features": "finite HeteroData node x",
+    "smooth_edge_features": "edge_attr",
+    "spatiotemporal_edge_features": "edge_attr_normalized",
+    "raw_features": "debug_and_attribution_only"
+  },
+  "attention_semantics": {
+    "normalization": "joint_over_all_agent_and_align_incoming_edges_per_target_proposal",
+    "edge_enters_attention": true,
+    "edge_enters_message": true,
+    "self_loop": false,
+    "reverse_edges": false,
+    "proposal_self_information": "explicit_residual_plus_layer_norm"
+  },
+  "standard_layer_audit": {
+    "torch": "2.10.0+cu126",
+    "torch_geometric": "2.8.0.post1",
+    "GATConv_edge_enters_attention": true,
+    "GATv2Conv_edge_enters_attention": true,
+    "standard_message": "alpha_times_x_j",
+    "standard_edge_enters_message_content": false,
+    "decision": "custom_EdgeEnhancedGATLayer"
+  },
+  "runtime": {
+    "warmup_iterations": 20,
+    "measured_iterations": 200
+  },
+  "activation_statistics": {
+    "scenarios": ["D_permuted_peer_spheres", "E_head_on_narrow_peer_spheres"],
+    "scenario_source": "evaluate_single_policy_aligned_multi_agent.build_stage_scenario",
+    "seed_dependent_starts_goals": true,
+    "seeds": [0, 1, 2, 3, 4],
+    "states_per_seed": 20,
+    "state_stride": 3,
+    "d_align_values": [0.8, 1.0, 1.2, 1.5, 2.0],
+    "formal_d_align": 1.2,
+    "automatic_threshold_selection": false
+  },
+  "output_dir": "artifacts/edge_enhanced_gat_forward"
+}

@@ -1,0 +1,49 @@
+{
+  "schema": "GraphReadyCandidateExecution",
+  "schema_version": "fp_shep_execution_v1",
+  "validated_default_horizon": 4,
+  "dt": 0.1,
+  "raw_feature_order": [
+    "task_progress",
+    "min_clearance",
+    "max_execution_deviation",
+    "terminal_speed"
+  ],
+  "normalization": {
+    "version": "fp_shep_h4_v1",
+    "task_progress_scale": 0.32,
+    "min_clearance_scale": 4.5,
+    "max_execution_deviation_scale": 1.05,
+    "terminal_speed_scale": 1.2,
+    "task_progress_range": [-1.0, 1.0],
+    "nonnegative_feature_range": [0.0, 1.0],
+    "raw_features_are_preserved": true,
+    "invalid_numeric_placeholder": 0.0
+  },
+  "scale_provenance": {
+    "task_progress_scale": "proposal nominal speed 0.8 m/s * validated H=4 * dt=0.1 s",
+    "min_clearance_scale": "checkpoint-aligned SAC LiDAR sensing radius 4.5 m",
+    "max_execution_deviation_scale": "proposal maximum local step 1.05 m",
+    "terminal_speed_scale": "H=4 validation P99 1.103457 m/s rounded upward to 1.2 m/s"
+  },
+  "clearance_encoding": {
+    "raw_source": "frozen_lidar_surface_samples",
+    "raw_is_approximate": true,
+    "boundary_source": "not_separately_available_from_untyped_lidar",
+    "boundary_is_approximate": true,
+    "open_space_normalized_value": 1.0,
+    "preserve_clearance_finite_mask": true,
+    "preserve_open_space_flag": true,
+    "do_not_describe_as": [
+      "exact_global_clearance",
+      "signed_distance",
+      "global_obstacle_distance"
+    ]
+  },
+  "multi_agent_conflict_diagnostic": {
+    "model": "constant_neighbor_velocity",
+    "risk_separation_threshold": 0.6,
+    "risk_threshold_source": "MultiAgentEnvConfig.inter_agent_safe_distance",
+    "paper_step_indexing": "array index 0 corresponds to h=1"
+  }
+}

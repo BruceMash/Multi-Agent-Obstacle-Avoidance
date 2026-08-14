@@ -247,8 +247,28 @@ def test_history_is_rolled_locally_and_candidate_order_is_irrelevant():
             dmp_config=env.dmps[0].config,
             dynamics=env.dynamics[0],
         )
+        policy_b = ObservationDrivenPolicy()
+        b_only = preview_candidates(
+            initial_state=initial,
+            local_context=local,
+            candidates=[b],
+            policy=policy_b,
+            horizon=4,
+            dmp_config=env.dmps[0].config,
+            dynamics=env.dynamics[0],
+        )[0]
         np.testing.assert_allclose(ab[0].trajectory.positions, ba[1].trajectory.positions)
         np.testing.assert_allclose(ab[1].trajectory.positions, ba[0].trajectory.positions)
+        np.testing.assert_allclose(ab[1].trajectory.positions, b_only.trajectory.positions)
+        np.testing.assert_allclose(ab[1].trajectory.velocities, b_only.trajectory.velocities)
+        np.testing.assert_allclose(ab[1].trajectory.actions, b_only.trajectory.actions)
+        assert ab[1].task_progress == pytest.approx(b_only.task_progress)
+        assert ab[1].min_clearance == pytest.approx(b_only.min_clearance)
+        assert ab[1].max_execution_deviation == pytest.approx(
+            b_only.max_execution_deviation
+        )
+        assert ab[1].terminal_speed == pytest.approx(b_only.terminal_speed)
+        assert ab[1].metadata == ba[0].metadata == b_only.metadata
         np.testing.assert_array_equal(ab[0].trajectory.previous_scans[1], ab[0].trajectory.current_scans[0])
         np.testing.assert_array_equal(ab[1].trajectory.previous_scans[0], local.previous_scan)
         assert policy_ab.calls == 8
@@ -278,6 +298,20 @@ def test_preview_is_closed_loop_and_features_are_well_formed():
         assert result.max_execution_deviation >= 0.0
         assert result.terminal_speed == pytest.approx(np.linalg.norm(trajectory.velocities[-1]))
         assert result.performance.policy_calls == 5
+        assert result.metadata["requested_horizon_steps"] == 5
+        assert result.metadata["effective_horizon_steps"] == 5
+        assert result.metadata["effective_horizon_ratio"] == pytest.approx(1.0)
+        assert result.metadata["preview_completed"] is True
+        assert result.metadata["termination_reason"] == "completed_horizon"
+        assert result.metadata["feature_valid_mask"] == {
+            "task_progress": True,
+            "min_clearance": True,
+            "max_execution_deviation": True,
+            "terminal_speed": True,
+        }
+        assert result.metadata["feature_full_horizon_mask"] == result.metadata[
+            "feature_valid_mask"
+        ]
         assert result.metadata["forcing_gate_distance_source"] == "terminal_task_goal"
         assert result.metadata["boundary_constraint_added"] is False
     finally:
@@ -295,6 +329,15 @@ def test_local_context_records_lidar_limit_and_empty_scan_clearance():
         result = _preview(env, ObservationDrivenPolicy(), initial.position + [1.0, 0.0, 0.0], horizon=2)
         assert np.isinf(result.min_clearance)
         assert result.metadata["clearance_is_approximate"] is True
+        assert result.metadata["obstacle_clearance_source"] == CLEARANCE_SOURCE
+        assert result.metadata["obstacle_clearance_is_approximate"] is True
+        assert result.metadata["boundary_clearance_source"] == (
+            "not_separately_available_from_untyped_lidar"
+        )
+        assert result.metadata["boundary_clearance_is_approximate"] is True
+        assert result.metadata["clearance_finite_mask"] is False
+        assert result.metadata["open_space_flag"] is True
+        assert result.metadata["feature_valid_mask"]["min_clearance"] is False
     finally:
         env.close()
 
