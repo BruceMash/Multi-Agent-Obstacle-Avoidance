@@ -1,0 +1,105 @@
+{
+  "schema_version": "reference_transition_finetuning_smoke_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "output_dir": "artifacts/reference_transition_finetuning",
+  "training_steps": 100000,
+  "evaluation_steps": [0, 20000, 40000, 60000, 80000, 100000],
+  "checkpoint_steps": [20000, 40000, 60000, 80000, 100000],
+  "learning": {
+    "actor_lr": 0.0001,
+    "critic_lr": 0.0001,
+    "alpha_lr": 0.0001,
+    "gamma": 0.99,
+    "target_tau": 0.005,
+    "batch_size": 256,
+    "replay_capacity": 1000000,
+    "learning_starts": 5000,
+    "train_frequency": 1,
+    "gradient_steps": 1,
+    "automatic_entropy_tuning": true,
+    "target_entropy": -6,
+    "fresh_replay": true,
+    "fresh_optimizers": true
+  },
+  "episode": {
+    "max_steps": 220,
+    "dt": 0.1,
+    "terminal_goal_tolerance_m": 0.3,
+    "temporary_reference_tolerance_m": 0.25
+  },
+  "task_mixture": {
+    "unit": "episode",
+    "terminal_fraction": 0.6,
+    "reference_fraction": 0.4,
+    "implementation": "shuffled_blocks_of_10",
+    "terminal_per_block": 6,
+    "reference_per_block": 4
+  },
+  "proposal": {
+    "selector": "Proposal score top-1",
+    "consumer_top_k": 10,
+    "repeated_replanning": false,
+    "no_candidate_policy": "terminal_navigation_fallback",
+    "FP_SHEP_used": false,
+    "GAT_used": false,
+    "oracle_used": false
+  },
+  "curriculum": {
+    "fixed_level": 4,
+    "dense_scene_probability": 0.4,
+    "dense_dynamic_probability_conditional_on_dense": 0.5,
+    "curriculum_updates_enabled": false
+  },
+  "dmp": {
+    "K_alpha": 3.0,
+    "K_beta": 0.8,
+    "tau": 2.5,
+    "dt": 0.1,
+    "phase_mode": "classic_legacy_euler",
+    "FCEP_used": false,
+    "forcing_gate": "tanh(abs(active_goal + clip(goal_offset,-1,1) - position))"
+  },
+  "reward": {
+    "progress_weight": 8.0,
+    "obstacle_weight": 1.5,
+    "boundary_weight": 0.3,
+    "step_penalty": -0.01,
+    "collision_penalty": -20.0,
+    "timeout_penalty": -20.0,
+    "terminal_success_bonus": 300.0,
+    "temporary_reference_bonus": 0.0,
+    "handoff_progress_baseline_reset": true
+  },
+  "retention_evaluation": {
+    "seeds": [202405170, 202405171, 202405172, 202405173, 202405174, 202405175, 202405176, 202405177, 202405178, 202405179],
+    "task": "terminal_navigation",
+    "scene": "historical_fixed_base"
+  },
+  "adaptation_evaluation": {
+    "seeds": [0, 1, 2, 3, 4],
+    "scenes": ["open", "sparse_static", "historical_base"],
+    "task": "one_shot_reference_transition"
+  },
+  "selection": {
+    "retention_max_drop_percentage_points": 10.0,
+    "adaptation_signal_min_gain_percentage_points": 20.0,
+    "catastrophic_retention_drop_percentage_points": 20.0
+  },
+  "step0_adapter_gate": {
+    "historical_fixed_retention_success_reference": 1.0,
+    "minimum_retention_success_rate": 0.9,
+    "minimum_temporary_reference_reached_rate": 0.2,
+    "maximum_reached_then_terminal_success_rate": 0.1,
+    "historical_multi_agent_A_success_reference": 0.6666666666666666,
+    "historical_multi_agent_D_temporary_reached_reference": 0.6444444444444445,
+    "historical_multi_agent_CD_reached_then_terminal_success_reference": 0.0
+  },
+  "hard_boundary": {
+    "sensor": false,
+    "collision": false,
+    "termination": false,
+    "position_clipping": false,
+    "historical_soft_reward": true
+  }
+}

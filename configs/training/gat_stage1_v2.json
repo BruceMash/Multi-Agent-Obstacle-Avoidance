@@ -1,0 +1,131 @@
+{
+  "schema_version": "gat_stage1_v2_training",
+  "dataset_path": "artifacts/gat_supervision_v2/20260817_111210/supervision_v2_dataset.pt",
+  "branch_outcomes_path": "artifacts/gat_supervision_v2/20260817_111210/branch_raw_outcomes.parquet",
+  "v2_artifact_dir": "artifacts/gat_supervision_v2/20260817_111210",
+  "initial_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "v1_training_artifact_dir": "artifacts/gat_stage1_training/20260815_230509",
+  "output_root": "artifacts/gat_stage1_v2_training",
+  "frozen_sha256": {
+    "dataset": "a44b7f5a72a42ead81d0a2a78baaf70d715c466249403f4c9010488be3f5186c",
+    "branch_outcomes": "0d355b83980744a0fe34ea44144fdc1939b3994cb5505d28e6006f814db5a554",
+    "initial_checkpoint": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8"
+  },
+  "comparison_interpretation": {
+    "name": "deployment_aligned_input_plus_target_adaptation",
+    "target_only_claim_allowed": false,
+    "main_paired_comparison": "v1_checkpoint_on_v2_graph_vs_v2_trained_model_on_v2_graph",
+    "v1_native_metrics_role": "provenance_only_not_paired_comparison"
+  },
+  "dataset_split": {
+    "field": "effective_split",
+    "train_seeds": [0, 1, 2, 3, 4, 5, 6],
+    "validation_seeds": [7],
+    "test_seeds": [8, 9],
+    "source_split_role": "provenance_only",
+    "random_graph_split": false
+  },
+  "supervision": {
+    "input_graph": "historical_vector_gate_H4",
+    "H_preview": 4,
+    "target_name": "v2_long_horizon_soft_target",
+    "target_utility": "v2_long_horizon_utility",
+    "target_tier": "v2_long_horizon_tier",
+    "soft_target_temperature": 0.25,
+    "loss": "soft_target_cross_entropy",
+    "loss_scope": "per_graph_real_null_plus_K_proposals_only",
+    "batching": "ragged_concatenated_no_padding",
+    "padding_probability_mass_allowed": false,
+    "labels_regenerated": false,
+    "completion_loss_enabled": false,
+    "overlap_loss_enabled": false
+  },
+  "model": {
+    "hidden_dim": 64,
+    "node_encoder_hidden_dim": 64,
+    "edge_dim": 32,
+    "edge_encoder_hidden_dim": 32,
+    "num_heads": 4,
+    "num_layers": 2,
+    "head_aggregation": "concat",
+    "activation": "gelu",
+    "dropout": 0.0,
+    "negative_slope": 0.2,
+    "layer_norm": true,
+    "residual": true
+  },
+  "training": {
+    "initialization": "stage1_v1_best_model_state_dict",
+    "optimizer": "AdamW",
+    "optimizer_state_source": "fresh",
+    "inherit_optimizer_state": false,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "batch_size_semantics": "ego_graph_budget",
+    "max_epochs": 100,
+    "early_stopping_patience": 15,
+    "checkpoint_selection": "validation_loss_only",
+    "gradient_clip_norm": 5.0,
+    "optimization_seeds": [0, 1, 2],
+    "smoke_seed": 0,
+    "device": "auto",
+    "num_workers": 0,
+    "hyperparameter_sweep": false
+  },
+  "smoke_gate": {
+    "require_finite_train_loss": true,
+    "require_finite_validation_loss": true,
+    "require_finite_gradients": true,
+    "minimum_top1_gain_over_empirical_random": 0.0,
+    "maximum_null_prediction_rate": 0.95,
+    "maximum_fixed_proposal_rank_prediction_rate": 0.95,
+    "failure_action": "stop_without_automatic_adjustment"
+  },
+  "offline_metric_definitions": {
+    "reference_class": "argmax_soft_target",
+    "top1": "predicted_top1_equals_soft_target_argmax",
+    "top3": "reference_class_in_predicted_top_min_3_C",
+    "mrr": "reciprocal_rank_of_soft_target_argmax",
+    "spearman": "proposal_only_predicted_score_vs_target_utility",
+    "spearman_excludes_null": true,
+    "spearman_minimum_proposal_count": 2,
+    "null_precision_recall_positive_class": "null",
+    "proposal_selection_accuracy": "top1_accuracy_conditioned_on_reference_class_non_null",
+    "maximum_tier_prediction_rate": "tier_of_selected_class_equals_maximum_tier_in_graph",
+    "selected_proposal_reference_reach_rate": "reference_reached_among_predicted_proposal_classes",
+    "post_reference_signal_graph": "any_proposal_reference_reached_and_ego_terminal_not_reached",
+    "definitions_frozen_before_training": true
+  },
+  "decision_thresholds": {
+    "offline_top1_gain_yes": 0.05,
+    "offline_top1_gain_weak_exclusive": 0.0,
+    "target_spearman_gain_yes": 0.05,
+    "target_spearman_gain_weak_exclusive": 0.0,
+    "null_prediction_rate_change_yes": 0.05,
+    "maximum_tier_rate_non_degradation": 0.0,
+    "closed_loop_recommendation_requires_long_horizon_signal": ["YES", "WEAK"]
+  },
+  "cross_target_evaluation": [
+    "v1_scalar_h6",
+    "v1_historical_h6",
+    "v2_long_horizon"
+  ],
+  "strict_exclusions": {
+    "closed_loop": false,
+    "stress_test": false,
+    "overlap_loss": false,
+    "completion_loss": false,
+    "architecture_modification": false,
+    "graph_schema_modification": false,
+    "proposal_modification": false,
+    "fp_shep_modification": false,
+    "sac_dmp_modification": false,
+    "environment_modification": false,
+    "label_regeneration": false,
+    "test_metric_checkpoint_selection": false,
+    "diagnostic_checkpoint_selection": false,
+    "closed_loop_checkpoint_selection": false,
+    "automatic_hyperparameter_adjustment": false
+  }
+}

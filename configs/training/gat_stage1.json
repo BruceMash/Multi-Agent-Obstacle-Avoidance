@@ -1,0 +1,113 @@
+{
+  "schema_version": "gat_stage1_training_v1",
+  "dataset_dir": "artifacts/candidate_supervision/20260814_121319",
+  "completion_artifact_dir": "artifacts/pre_gat_220step_revalidation/20260815_151829",
+  "output_root": "artifacts/gat_stage1_training",
+  "dataset_split": {
+    "group_key": "state_group_id",
+    "train_seeds": [0, 1, 2, 3, 4, 5, 6],
+    "validation_seeds": [7],
+    "test_seeds": [8, 9],
+    "random_graph_split": false
+  },
+  "supervision": {
+    "H_label": 6,
+    "H_preview": 4,
+    "target_name": "provisional_primary_target",
+    "target_feature_count": 3,
+    "soft_target_temperature": 0.25,
+    "loss": "soft_target_cross_entropy",
+    "loss_scope": "per_graph_real_null_plus_K_proposals_only",
+    "batching": "ragged_concatenated_no_padding",
+    "padding_probability_mass_allowed": false,
+    "completion_loss_enabled": false,
+    "overlap_loss_enabled": false
+  },
+  "model": {
+    "hidden_dim": 64,
+    "node_encoder_hidden_dim": 64,
+    "edge_dim": 32,
+    "edge_encoder_hidden_dim": 32,
+    "num_heads": 4,
+    "num_layers": 2,
+    "head_aggregation": "concat",
+    "activation": "gelu",
+    "dropout": 0.0,
+    "negative_slope": 0.2,
+    "layer_norm": true
+  },
+  "training": {
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "max_epochs": 100,
+    "early_stopping_patience": 15,
+    "gradient_clip_norm": 5.0,
+    "optimization_seeds": [0, 1, 2],
+    "smoke_seed": 0,
+    "device": "auto",
+    "num_workers": 0,
+    "hyperparameter_sweep": false
+  },
+  "smoke_gate": {
+    "minimum_train_loss_improvement_fraction": 0.01,
+    "minimum_validation_loss_improvement_fraction": 0.01,
+    "minimum_top1_gain_over_empirical_random": 0.02,
+    "maximum_null_prediction_rate": 0.95,
+    "maximum_fixed_proposal_rank_prediction_rate": 0.95,
+    "require_finite_metrics": true
+  },
+  "offline_metric_definitions": {
+    "reference_class": "argmax_soft_target",
+    "top1": "predicted_top1_equals_soft_target_argmax",
+    "top3": "reference_class_in_predicted_top_min_3_C",
+    "mrr": "reciprocal_rank_of_soft_target_argmax",
+    "empirical_random_top1": "mean_over_graphs_1_over_C",
+    "empirical_random_top3": "mean_over_graphs_min_3_C_over_C",
+    "empirical_random_mrr": "mean_over_graphs_harmonic_C_over_C",
+    "spearman": "proposal_only_predicted_score_vs_J_target_3",
+    "spearman_excludes_null": true,
+    "spearman_minimum_proposal_count": 2,
+    "null_precision_recall_positive_class": "null",
+    "proposal_selection_accuracy": "top1_accuracy_conditioned_on_reference_class_non_null",
+    "definitions_frozen_before_training": true
+  },
+  "interaction_diagnostic": {
+    "used_for_checkpoint_selection": false,
+    "used_for_early_stopping": false,
+    "scenario_groups": {
+      "low-interaction": ["open", "bounded"],
+      "obstacle-pressure": ["sparse_static", "dense_static", "dynamic_obstacle"],
+      "interaction-rich": ["multi_agent", "narrow_head_on"]
+    },
+    "secondary_descriptor_rule": "any_existing_edge_with_d_min_lt_d_safe_or_T_risk_gt_0",
+    "d_safe_source": "graph_metadata",
+    "new_online_feature_added": false,
+    "select_label_interaction_aware_expected_scope": "PARTIAL",
+    "claim_scope_if_not_yes": "GAT_learns_candidate_ranking_only"
+  },
+  "decision_thresholds": {
+    "generalization_yes_top1_gain_over_random": 0.05,
+    "generalization_weak_top1_gain_over_random": 0.0,
+    "adds_over_fp_shep_yes_top1_gain": 0.05,
+    "interaction_gain_yes_top1_gain": 0.05,
+    "interaction_minimum_graph_count": 20
+  },
+  "strict_exclusions": {
+    "proposal_modification": false,
+    "fp_shep_modification": false,
+    "H_preview_modification": false,
+    "top_k_modification": false,
+    "supervision_target_redesign": false,
+    "graph_schema_modification": false,
+    "node_feature_modification": false,
+    "edge_feature_modification": false,
+    "sac_dmp_modification": false,
+    "environment_modification": false,
+    "gat_architecture_modification": false,
+    "new_dataset_generation": false,
+    "closed_loop_evaluation": false,
+    "completion_auxiliary_implementation": false
+  }
+}

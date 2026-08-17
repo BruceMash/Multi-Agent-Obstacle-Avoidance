@@ -1,0 +1,215 @@
+{
+  "schema_version": "gat_supervision_v2",
+  "source_dataset_dir": "artifacts/candidate_supervision/20260814_121319",
+  "source_failure_diagnosis_dir": "artifacts/gat_failure_diagnosis/20260816_132608",
+  "prohibited_stress_dir": "artifacts/gat_24_layout_stress/20260816_181616",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "output_root": "artifacts/gat_supervision_v2",
+  "deterministic_policy": true,
+  "num_agents": 3,
+  "agent_indices": [0, 1, 2],
+  "scenario_types": [
+    "open",
+    "bounded",
+    "sparse_static",
+    "dense_static",
+    "dynamic_obstacle",
+    "multi_agent",
+    "narrow_head_on"
+  ],
+  "seeds": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "source_split": {
+    "train": [0, 1, 2, 3, 4, 5],
+    "validation": [6, 7],
+    "test": [8, 9],
+    "role": "provenance_only_not_training_consumption"
+  },
+  "effective_split": {
+    "train": [0, 1, 2, 3, 4, 5, 6],
+    "validation": [7],
+    "test": [8, 9],
+    "role": "formal_v2_training_consumption"
+  },
+  "state_sample_timesteps": [0, 12, 24],
+  "source_state_reconstruction": {
+    "method": "deterministic_v1_scalar_gate_replay_only",
+    "scalar_gate_allowed_after_source_state": false,
+    "fingerprint_exact_match_required": true,
+    "unavailable_state_policy": "do_not_fabricate"
+  },
+  "K_requested": 10,
+  "peer_radius": 0.3,
+  "H_preview": 4,
+  "H_v1_diagnostic": 6,
+  "max_absolute_episode_steps": 220,
+  "branch_budget": "max_0_220_minus_source_env_steps",
+  "fixed_future_220_sensitivity_enabled": false,
+  "reference_reached_tolerance_m": 0.25,
+  "soft_target_temperature": 0.25,
+  "forcing_gate": {
+    "name": "historical_vector_goal_eff_gate",
+    "formula": "tanh(abs(goal_eff-position))",
+    "required_for_graph_preview": true,
+    "required_for_v1_historical_h6": true,
+    "required_for_v2_long_horizon": true,
+    "required_for_null_branch": true,
+    "required_for_proposal_branch": true,
+    "required_for_non_ego_background_selection": true,
+    "required_for_branch_execution": true
+  },
+  "proposal_config": {
+    "top_k": 10
+  },
+  "graph_config": {
+    "horizon_steps": 4,
+    "d_align": 1.2,
+    "d_align_source": "configurable_implementation_parameter_not_paper_constant"
+  },
+  "fp_shep_online_selector": {
+    "name": "fixed_physical_scale_three_feature_online_score",
+    "definition_status": "deployment_background_selector_only",
+    "H_preview": 4,
+    "weights": {
+      "progress": 1.0,
+      "clearance": 1.0,
+      "deviation": 1.0,
+      "terminal_speed": 0.0
+    },
+    "normalization": {
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    }
+  },
+  "non_ego_background": {
+    "formal_selector": "FP_SHEP_TOP1",
+    "formal_plan_computed_once_per_state_group_and_ego": true,
+    "formal_plan_immutable_across_ego_candidate_branches": true,
+    "candidate_specific_replanning": false,
+    "gat_participates": false,
+    "attribution_sensitivity_selector": "NULL_TERMINAL"
+  },
+  "tier_definition": {
+    "positive_terminal_progress_epsilon_m": 1e-6,
+    "tier_5": "collision_free_team_success",
+    "tier_4": "collision_free_ego_terminal_success_team_incomplete",
+    "tier_3": "collision_free_proposal_reference_reached_ego_terminal_incomplete",
+    "tier_2": "collision_free_positive_terminal_progress",
+    "tier_1": "collision_free_nonpositive_terminal_progress",
+    "tier_0": "any_collision",
+    "collision_precedence": true,
+    "continuous_tie_break_can_cross_tier": false,
+    "within_tier_scale": 0.49,
+    "within_tier_method": "lexicographic_dense_rank_percentile",
+    "float_comparison_round_decimals": 6,
+    "final_utility": "tier+0.49*within_tier_dense_rank_percentile"
+  },
+  "tie_break_priority": {
+    "completed": [
+      "earlier_completion_step",
+      "shorter_path_length",
+      "larger_min_obstacle_clearance",
+      "larger_min_inter_agent_distance"
+    ],
+    "post_reference_incomplete": [
+      "larger_reference_to_terminal_progress",
+      "smaller_final_terminal_distance",
+      "larger_min_obstacle_clearance",
+      "larger_min_inter_agent_distance",
+      "larger_handoff_direction_alignment",
+      "smaller_handoff_speed"
+    ],
+    "collision_free_not_completed": [
+      "larger_terminal_progress",
+      "smaller_final_terminal_distance",
+      "larger_min_obstacle_clearance",
+      "larger_min_inter_agent_distance",
+      "shorter_path_length"
+    ],
+    "collision": [
+      "later_collision_step",
+      "larger_min_obstacle_clearance",
+      "larger_min_inter_agent_distance",
+      "larger_terminal_progress"
+    ]
+  },
+  "reproduction_tolerance": {
+    "candidate_position_atol": 1e-10,
+    "candidate_position_rtol": 0.0,
+    "float_atol": 1e-10,
+    "float_rtol": 0.0,
+    "discrete_exact": true
+  },
+  "determinism_audit": {
+    "state_group_count": 10,
+    "selection": "scenario_stratified_sha256_before_outcomes",
+    "classes_per_ego": 4,
+    "repeat_count": 2,
+    "trajectory_atol": 1e-10,
+    "trajectory_rtol": 0.0
+  },
+  "attribution_stability_audit": {
+    "state_groups_per_scenario": 2,
+    "selection": "scenario_stratified_sha256_before_outcomes",
+    "weak_if_any_below": {
+      "top1_agreement": 0.6,
+      "spearman": 0.6,
+      "pairwise_agreement": 0.7,
+      "tier_agreement": 0.7
+    },
+    "strong_if_all_at_least": {
+      "top1_agreement": 0.8,
+      "spearman": 0.8,
+      "pairwise_agreement": 0.85,
+      "tier_agreement": 0.85
+    }
+  },
+  "information_density_gate": {
+    "strong": {
+      "minimum_unique_top1_rate": 0.8,
+      "maximum_all_same_tier_rate": 0.35,
+      "minimum_mean_distinct_tiers": 2.0
+    },
+    "adequate": {
+      "minimum_unique_top1_rate": 0.6,
+      "maximum_all_same_tier_rate": 0.6,
+      "minimum_mean_distinct_tiers": 1.5
+    },
+    "failed": {
+      "maximum_unique_top1_rate_exclusive": 0.25,
+      "minimum_all_same_tier_rate_exclusive": 0.9,
+      "invalid_probability_is_failure": true,
+      "single_class_collapse_is_failure": true
+    }
+  },
+  "stress_isolation": {
+    "status": "DIAGNOSTIC_ONLY_AFTER_OBSERVATION",
+    "artifact_may_be_read_by_generator": false,
+    "used_for_target_tuning": false,
+    "used_for_tier_tuning": false,
+    "used_for_threshold_tuning": false,
+    "used_for_tau_tuning": false,
+    "included_in_dataset": false,
+    "rerun_allowed": false
+  },
+  "strict_exclusions": {
+    "proposal_modification": false,
+    "fp_shep_modification": false,
+    "graph_schema_modification": false,
+    "gat_architecture_modification": false,
+    "stage1_loss_modification": false,
+    "sac_dmp_modification": false,
+    "environment_core_modification": false,
+    "overlap_loss": false,
+    "completion_auxiliary_loss": false,
+    "new_graph_feature": false,
+    "replanning": false,
+    "sac_training": false,
+    "gat_training": false,
+    "formal_closed_loop": false,
+    "stress_rerun": false,
+    "v1_dataset_overwrite": false
+  }
+}

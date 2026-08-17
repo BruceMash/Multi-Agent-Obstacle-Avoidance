@@ -1,0 +1,166 @@
+{
+  "schema_version": "fp_shep_preview_fidelity_control_v1",
+  "source_failure_audit": "artifacts/fp_shep_failure_mode_audit/20260815_190909",
+  "source_geometry_artifact": "artifacts/geometry_generalization_audit/20260815_175228",
+  "source_manifest_sha256_expected": "488098107fde63ac707aa7e173aa4471fc140c84e224293c03fd77b7dc0a501c",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "geometry_config": "configs/evaluation/geometry_generalization_audit.json",
+  "output_dir": "artifacts/fp_shep_preview_fidelity_control",
+  "layout_count": 24,
+  "selected_candidate_count": 72,
+  "num_agents": 3,
+  "peer_radius": 0.3,
+  "cells": {
+    "A": {
+      "horizon": 4,
+      "sensing_mode": "frozen_visible_surface",
+      "diagnostic_early_stop": false,
+      "role": "formal_h4_reproduction_anchor"
+    },
+    "B": {
+      "horizon": 4,
+      "sensing_mode": "refreshed_static_geometry",
+      "diagnostic_early_stop": false,
+      "role": "h4_static_sensing_control"
+    },
+    "C": {
+      "horizon": 20,
+      "sensing_mode": "frozen_visible_surface",
+      "diagnostic_early_stop": true,
+      "role": "horizon_only_control"
+    },
+    "D": {
+      "horizon": 20,
+      "sensing_mode": "refreshed_static_geometry",
+      "diagnostic_early_stop": true,
+      "role": "long_horizon_refreshed_static_control"
+    }
+  },
+  "factor_contract": {
+    "A_vs_C": "horizon_only_except_shared_H20_diagnostic_termination_beyond_formal_H4_anchor",
+    "A_vs_B": "static_sensing_reconstruction_only",
+    "C_vs_D": "static_sensing_reconstruction_only",
+    "H4_termination_rule": "record_only_no_early_stop_formal_h4_anchor",
+    "H20_termination_rule": "stop_on_static_collision_or_terminal_success",
+    "A_priority": "exact_formal_H4_per_candidate_numeric_reproduction"
+  },
+  "refreshed_sensing": {
+    "scope": "STATIC_GEOMETRY_ONLY",
+    "reuse_sensor_scan_obstacles": true,
+    "reuse_obstacle_ray_intersection": true,
+    "peer_visible_surface_assumption": "frozen_t0_visible_surface_samples",
+    "peer_hidden_surface_added": false,
+    "peer_future_motion_prediction": false,
+    "joint_multi_agent_rollout": false,
+    "initial_typed_scan_identity_atol": 2e-7,
+    "hit_epsilon": 1e-6,
+    "history_update": "previous(h+1)=current(h);current(h+1)=Sense(x_virtual(h+1))"
+  },
+  "clearance_contract": {
+    "feature_semantics": "SENSOR_DERIVED_MODELED_VISIBLE_SURFACE_ONLY",
+    "frozen_source": "frozen_lidar_surface_samples",
+    "refreshed_source": "refreshed_static_lidar_raycast_plus_frozen_peer_visible_surfaces",
+    "ground_truth_geometry_used_in_feature": false,
+    "sensor_range_outside_obstacles_added_to_feature": false,
+    "ground_truth_collision_field": "preview_ground_truth_collision",
+    "ground_truth_collision_step_field": "preview_collision_step"
+  },
+  "reproduction_tolerance": {
+    "rtol": 1e-7,
+    "atol": 1e-8
+  },
+  "warning_criteria": {
+    "frozen_before_run": true,
+    "binary_collision_warning": "preview_ground_truth_collision_exact_existing_static_collision_geometry",
+    "collision_threshold_m": 0.0,
+    "extra_posthoc_clearance_threshold": null,
+    "continuous_outputs": [
+      "sensor_derived_min_clearance_m",
+      "clearance_delta_from_A_m",
+      "first_minimum_clearance_step"
+    ]
+  },
+  "effect_classification": {
+    "status": "pre_registered_diagnostic_not_statistical_significance",
+    "directional_improvement_epsilon": 1e-9,
+    "strong_fraction": 0.5,
+    "moderate_fraction": 0.25,
+    "weak_fraction": 0.0,
+    "primary_obstacle_cases": 6,
+    "primary_reference_failure_agents": 11,
+    "interpret_with_raw_counts_and_continuous_deltas": true
+  },
+  "decision_logic": {
+    "source": "goal_case_A_to_E_predeclared_logic",
+    "major_failure_exposure_requires": "new_exact_preview_collision_or_improved_reference_failure_predictability",
+    "surface_visibility_change_alone_establishes_formal_redesign": false,
+    "case_D": "if_A_B_C_D_do_not_expose_major_failure_then_PRIMARY_PREVIEW_LIMITATION=NOT_RESOLVED_BY_HORIZON_OR_SENSING",
+    "case_E": "obstacle_and_reference_failure_mechanisms_must_be_reported_separately"
+  },
+  "cohorts": {
+    "success_layouts_expected": 6,
+    "reference_unreachable_layouts_expected": 8,
+    "obstacle_collision_agents_expected": 6,
+    "inter_agent_failure_layouts_expected": 4,
+    "reference_subcategories": [
+      "OBSTACLE_AVOIDANCE_DEADLOCK",
+      "STAGNATION",
+      "TIME_BUDGET_ONLY",
+      "INTER_AGENT_BLOCKING"
+    ]
+  },
+  "formal_selector_unchanged": {
+    "H_preview": 4,
+    "formula": "+progress +clearance -deviation",
+    "weights": {
+      "progress": 1.0,
+      "clearance": 1.0,
+      "deviation": 1.0,
+      "terminal_speed": 0.0
+    },
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    },
+    "diagnostic_score_label": "POST_HOC_SCORE_ONLY",
+    "used_for_candidate_selection": false
+  },
+  "execution_semantics": {
+    "deterministic_policy": true,
+    "actor_observation_dim": 122,
+    "historical_gate": "historical_vector_goal_eff_gate",
+    "phase": "classic_legacy_euler",
+    "boundary_free": true,
+    "real_env_step_used": false,
+    "formal_benchmark_rerun": false
+  },
+  "strict_exclusions": {
+    "formal_FP_SHEP_modification": false,
+    "formal_H_preview_modification": false,
+    "formal_score_modification": false,
+    "normalization_modification": false,
+    "Proposal_call": false,
+    "candidate_reselection": false,
+    "SAC_training": false,
+    "SAC_fine_tuning": false,
+    "DMP_modification": false,
+    "historical_gate_modification": false,
+    "reward_modification": false,
+    "observation_contract_modification": false,
+    "collision_or_success_modification": false,
+    "repeated_replanning": false,
+    "GAT": false,
+    "joint_multi_agent_rollout": false,
+    "peer_future_prediction": false,
+    "geometry_modification": false,
+    "scene_filtering": false,
+    "formal_benchmark_rerun": false,
+    "automatic_online_refreshed_sensing": false,
+    "horizon_search": false
+  }
+}

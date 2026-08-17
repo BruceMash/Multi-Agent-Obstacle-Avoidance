@@ -1,0 +1,159 @@
+{
+  "schema_version": "pre_gat_closed_loop_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "output_dir": "artifacts/pre_gat_closed_loop",
+  "paper_final_candidate_dir": "artifacts/paper_final_candidate/pre_gat_closed_loop",
+  "deterministic_policy": true,
+  "num_agents": 3,
+  "max_steps": 50,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "methods": [
+    "frozen_sac_dmp",
+    "proposal_sac_dmp",
+    "fp_shep_sac_dmp"
+  ],
+  "method_display_names": {
+    "frozen_sac_dmp": "Frozen SAC-DMP",
+    "proposal_sac_dmp": "Proposal + SAC-DMP",
+    "fp_shep_sac_dmp": "FP-SHEP + SAC-DMP"
+  },
+  "scenario_types": [
+    "open",
+    "bounded",
+    "sparse_static",
+    "dense_static",
+    "dynamic_obstacle",
+    "multi_agent",
+    "narrow_head_on"
+  ],
+  "scenario_display_names": {
+    "open": "Open Space",
+    "bounded": "Bounded Environment",
+    "sparse_static": "Sparse Static Obstacles",
+    "dense_static": "Dense Static Obstacles",
+    "dynamic_obstacle": "Dynamic Obstacles",
+    "multi_agent": "Multi-Agent Crossing",
+    "narrow_head_on": "Narrow Head-On Encounter"
+  },
+  "seeds": {
+    "smoke": [0],
+    "development": [0, 1, 2, 3, 4],
+    "formal": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+  },
+  "development_M_upper_values": [4, 8, 12],
+  "development_selection_rule": {
+    "type": "lexicographic_paired_multi_metric",
+    "criteria": [
+      "maximize_team_success_rate",
+      "minimize_collision_rate",
+      "minimize_goal_switch_rate",
+      "minimize_trajectory_smoothness",
+      "minimize_upper_replanning_runtime"
+    ],
+    "test_seeds_used": false,
+    "claim": "development_default_not_global_optimum"
+  },
+  "formal_M_upper": null,
+  "fixed_period_protocol": {
+    "replanning_rule": "timestep % M_upper == 0",
+    "waypoint_reached_triggers_replan": false,
+    "stagnation_triggers_replan": false,
+    "candidate_invalidation_triggers_replan": false,
+    "termination_interrupts_hold": true,
+    "goal_switch_epsilon": 1e-8,
+    "reference_reached_tolerance_source": "MultiAgentEnvConfig.goal_tolerance"
+  },
+  "candidate_semantics": {
+    "K_requested": 10,
+    "consumer": "reference_point_demo_top_k",
+    "variable_K_t": true,
+    "padding": false,
+    "null_candidate_included": false,
+    "K_t_zero_policy": "terminal_task_goal_fallback",
+    "K_t_zero_counted_as_null": false,
+    "K_t_zero_counted_as_proposal_selection": false,
+    "K_t_zero_counted_as_fp_shep_selection": false
+  },
+  "proposal_config": {
+    "top_k": 10
+  },
+  "fp_shep_online_selector": {
+    "name": "fixed_physical_scale_three_feature_online_score",
+    "definition_status": "goal_specific_baseline_not_global_fp_shep_definition",
+    "H_preview": 4,
+    "formula": "+progress +clearance -deviation",
+    "weights": {
+      "progress": 1.0,
+      "clearance": 1.0,
+      "deviation": 1.0,
+      "terminal_speed": 0.0
+    },
+    "used_for_online_ranking": {
+      "task_progress": true,
+      "min_clearance": true,
+      "max_execution_deviation": true,
+      "terminal_speed": false
+    },
+    "all_four_preview_features_recorded": true,
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    },
+    "uses_J_target": false,
+    "uses_supervision_label": false,
+    "uses_real_rollout": false,
+    "uses_diagnostic_preview_at_H_label": false
+  },
+  "safety": {
+    "d_safe": 0.6,
+    "d_safe_source": "MultiAgentEnvConfig.inter_agent_safe_distance",
+    "unsafe_step_inequality": "minimum_inter_agent_distance < d_safe",
+    "minimum_obstacle_clearance_source": "real_environment_sensor_packet",
+    "minimum_obstacle_clearance_is_exact_global_distance": false,
+    "additional_safety_override": false
+  },
+  "optional_oracle": {
+    "enabled": false,
+    "sampling_fraction": 0.0,
+    "deployment_selection_affected": false
+  },
+  "semantics": {
+    "terminal_task_goal_storage": "env.goals",
+    "temporary_execution_reference_storage": "dmp.goal",
+    "actor_observation_builder": "existing_active_goal_observation_builder",
+    "actor_observation_dim": 122,
+    "phase_reset_on_reference_switch": false,
+    "forcing_gate_distance_source": "terminal_task_goal",
+    "environment_step_semantics": "MultiAgentDMPEnv.step",
+    "candidate_sets_after_closed_loop_divergence": "regenerated_from_each_methods_own_real_state",
+    "GAT_used_for_selection": false,
+    "GAT_training_enabled": false,
+    "L_select_enabled": false,
+    "L_overlap_enabled": false,
+    "SDH_enabled": false,
+    "pending_goal_enabled": false,
+    "SAC_retraining_enabled": false
+  },
+  "paper_ready": {
+    "png_dpi": 600,
+    "minimum_png_dpi": 300,
+    "single_column_width_in": 3.5,
+    "double_column_width_in": 7.2,
+    "font_family_preference": ["Times New Roman", "DejaVu Serif"],
+    "success_collision_axis_percent_range": [0.0, 100.0],
+    "publication_language": "English",
+    "minimum_formal_seed_count": 20,
+    "latex_booktabs": true,
+    "bold_best_values": false,
+    "promote_after_validation": true,
+    "method_styles": {
+      "frozen_sac_dmp": {"color": "#4C4C4C", "marker": "o", "line_style": "-", "hatch": ""},
+      "proposal_sac_dmp": {"color": "#377EB8", "marker": "s", "line_style": "--", "hatch": "//"},
+      "fp_shep_sac_dmp": {"color": "#E41A1C", "marker": "^", "line_style": "-.", "hatch": "xx"}
+    }
+  }
+}

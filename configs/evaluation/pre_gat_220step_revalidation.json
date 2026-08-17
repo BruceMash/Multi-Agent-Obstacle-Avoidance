@@ -1,0 +1,111 @@
+{
+  "schema_version": "pre_gat_220step_revalidation_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "output_dir": "artifacts/pre_gat_220step_revalidation",
+  "deterministic_policy": true,
+  "num_agents": 3,
+  "max_steps": 220,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "scenarios": ["open", "sparse_static", "multi_agent"],
+  "stage_a_seeds": [0, 1, 2, 3, 4],
+  "stage_b_seeds": [5, 6, 7, 8, 9],
+  "methods": [
+    "terminal_goal_baseline",
+    "proposal_top1_one_shot",
+    "fp_shep_top1_one_shot"
+  ],
+  "temporary_reference": {
+    "K_requested": 10,
+    "reached_tolerance_m": 0.25,
+    "candidate_generation_per_agent_episode": 1,
+    "replanning_enabled": false,
+    "handoff_count_max": 1,
+    "K_t_zero_policy": "terminal_task_goal_fallback",
+    "K_t_zero_selector_pair_status": "NO_CANDIDATE_PAIR"
+  },
+  "proposal_config": {"top_k": 10},
+  "fp_shep_online_selector": {
+    "name": "fixed_physical_scale_three_feature_online_score",
+    "definition_status": "goal_specific_baseline_not_global_fp_shep_definition",
+    "H_preview": 4,
+    "formula": "+progress +clearance -deviation",
+    "weights": {
+      "progress": 1.0,
+      "clearance": 1.0,
+      "deviation": 1.0,
+      "terminal_speed": 0.0
+    },
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    },
+    "normalization_recalibrated": false,
+    "real_outcome_used_to_tune_score": false
+  },
+  "historical_transition": {
+    "name": "historical_vector_goal_eff_gate",
+    "goal_eff": "active_goal + clip(goal_offset,-1,1)",
+    "forcing_gate": "tanh(abs(goal_eff-position))",
+    "K_alpha": 3.0,
+    "K_beta": 0.8,
+    "tau": 2.5,
+    "dt": 0.1,
+    "phase": "classic legacy Euler",
+    "preview_and_execution_identity_required": true,
+    "routing_scope": "evaluation_only_exception_safe_mutex"
+  },
+  "environment": {
+    "include_boundaries_in_sensor": false,
+    "terminate_on_boundary_collision": false,
+    "terminal_success_semantics": "existing_environment",
+    "observation_dimension": 122,
+    "action_dimension": 6
+  },
+  "stage_a_gate": {
+    "candidate_hash_match": true,
+    "candidate_order_match": true,
+    "preview_execution_gate_identity": true,
+    "H_preview": 4,
+    "one_shot": true,
+    "max_steps": 220,
+    "historical_gate": true,
+    "no_training": true,
+    "no_repeated_replanning": true
+  },
+  "decision_thresholds": {
+    "material_rate_difference": 0.1,
+    "open_stable_success_rate": 0.8,
+    "statistical_significance_claimed": false
+  },
+  "graph_builder_post_hoc": {
+    "enabled": false,
+    "reason": "confirmed scope: selector-level closed-loop executability only"
+  },
+  "strict_exclusions": {
+    "SAC_training": false,
+    "Actor_update": false,
+    "Critic_update": false,
+    "replay_training": false,
+    "checkpoint_modification": false,
+    "DMP_default_modification": false,
+    "current_scalar_gate_modification": false,
+    "Proposal_modification": false,
+    "FP_SHEP_core_modification": false,
+    "FP_SHEP_score_recalibration": false,
+    "Graph_Builder_modification": false,
+    "GAT": false,
+    "GAT_optimizer": false,
+    "supervision_online": false,
+    "oracle": false,
+    "SDH": false,
+    "repeated_replanning": false,
+    "hard_boundary": false,
+    "horizon_search": false
+  }
+}

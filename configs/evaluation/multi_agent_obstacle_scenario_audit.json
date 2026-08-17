@@ -1,0 +1,103 @@
+{
+  "schema_version": "multi_agent_obstacle_scenario_audit_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "previous_three_scenario_artifact": "artifacts/pre_gat_220step_revalidation/20260815_151829",
+  "output_dir": "artifacts/multi_agent_obstacle_scenario_audit",
+  "scenario": "multi_agent_obstacle",
+  "scenario_role": "STATIC-OBSTACLE + MULTI-AGENT COUPLING DIAGNOSTIC",
+  "frozen_layout_hash_expected": "8deca19622f9578adfc68e167ba0e1dc4aacee5943333a502853a5cea78fb1e1",
+  "seed_set_role": "development_diagnostic_not_held_out_test",
+  "held_out_required_for_future_paper_comparison": true,
+  "stage_a_seeds": [0, 1, 2, 3, 4],
+  "stage_b_seeds": [5, 6, 7, 8, 9],
+  "methods": [
+    "terminal_goal_baseline",
+    "proposal_top1_one_shot",
+    "fp_shep_top1_one_shot"
+  ],
+  "num_agents": 3,
+  "max_steps": 220,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "temporary_reference": {
+    "K_requested": 10,
+    "reached_tolerance_m": 0.25,
+    "candidate_generation_per_agent_episode": 1,
+    "replanning_enabled": false,
+    "handoff_count_max": 1
+  },
+  "proposal_config": {"top_k": 10},
+  "fp_shep_online_selector": {
+    "name": "fixed_physical_scale_three_feature_online_score",
+    "definition_status": "goal_specific_baseline_not_global_fp_shep_definition",
+    "H_preview": 4,
+    "formula": "+progress +clearance -deviation",
+    "weights": {
+      "progress": 1.0,
+      "clearance": 1.0,
+      "deviation": 1.0,
+      "terminal_speed": 0.0
+    },
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    },
+    "normalization_recalibrated": false,
+    "real_outcome_used_to_tune_score": false
+  },
+  "geometry_gate": {
+    "required_static_obstacle_count": 2,
+    "required_dynamic_obstacle_count": 0,
+    "obstacle_pressure_distance_m": 1.5,
+    "predicted_inter_agent_risk_distance_m": 0.6,
+    "minimum_pressure_episode_rate": 0.7,
+    "minimum_conflict_episode_rate": 0.7
+  },
+  "combined_conflict": {
+    "obstacle_pressure_distance_m": 1.5,
+    "inter_agent_pressure_distance_m": 1.2,
+    "requires_both_collisions": false
+  },
+  "execution_semantics": {
+    "deterministic_policy": true,
+    "actor_observation_shape": [3, 122],
+    "native_observation_shape": [3, 138],
+    "historical_gate": "historical_vector_goal_eff_gate",
+    "phase": "classic_legacy_euler",
+    "K_alpha": 3.0,
+    "K_beta": 0.8,
+    "tau": 2.5,
+    "include_boundaries_in_sensor": false,
+    "terminate_on_boundary_collision": false,
+    "one_shot": true,
+    "repeated_replanning": false
+  },
+  "strict_exclusions": {
+    "SAC_training": false,
+    "Actor_update": false,
+    "Critic_update": false,
+    "checkpoint_modification": false,
+    "DMP_modification": false,
+    "historical_gate_modification": false,
+    "reward_modification": false,
+    "observation_modification": false,
+    "collision_rule_modification": false,
+    "success_rule_modification": false,
+    "Proposal_modification": false,
+    "FP_SHEP_modification": false,
+    "score_recalibration": false,
+    "H_preview_modification": false,
+    "GAT": false,
+    "GAT_optimizer": false,
+    "repeated_replanning": false,
+    "hard_boundary": false,
+    "dynamic_obstacles": false,
+    "parameter_sweep": false,
+    "layout_search_or_retuning": false
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "schema_version": "historical_gate_abcd_rerun_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "output_dir": "artifacts/historical_gate_abcd_rerun",
+  "current_scalar_reference_run": "artifacts/actor_dmp_goal_semantics_diagnosis/20260814_192624",
+  "deterministic_policy": true,
+  "num_agents": 3,
+  "max_steps": 50,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "scenarios": [
+    "open",
+    "sparse_static",
+    "multi_agent"
+  ],
+  "seeds": [0, 1, 2, 3, 4],
+  "variant_order": [
+    "A_terminal_actor_terminal_dmp",
+    "B_temporary_actor_terminal_dmp",
+    "C_terminal_actor_temporary_dmp",
+    "D_temporary_actor_temporary_dmp"
+  ],
+  "checkpoint_observation": {
+    "dimension": 122,
+    "environment_native_observation_dimension": 138,
+    "native_environment_observation_used_for_actor": false
+  },
+  "temporary_reference": {
+    "selector": "Proposal score top-1",
+    "candidate_created_at_most_once_per_agent_episode": true,
+    "reached_tolerance_m": 0.25,
+    "boundary_filter_enabled": false,
+    "replanning_enabled": false,
+    "K_requested": 10,
+    "K_t_is_variable": true,
+    "K_t_zero_policy": "terminal_task_goal_fallback",
+    "padding": false
+  },
+  "proposal_config": {
+    "top_k": 10
+  },
+  "action_saturation": {
+    "definition": "within_relative_fraction_of_per_dimension_action_bound",
+    "relative_tolerance": 0.01
+  },
+  "historical_transition": {
+    "K_alpha": 3.0,
+    "K_beta": 0.8,
+    "tau": 2.5,
+    "dt": 0.1,
+    "forcing_bounds": [-10.0, 10.0],
+    "goal_offset_bounds": [-1.0, 1.0],
+    "goal_eff": "goal_base + clip(goal_offset,-1,1)",
+    "forcing_gate": "tanh(abs(goal_eff-position))",
+    "forcing_gate_shape": [3],
+    "phase": "classic legacy Euler",
+    "scope": "evaluation-only scoped transition replacement",
+    "current_scalar_default_restored_after_scope": true
+  },
+  "gate_diagnostic": {
+    "state_advance": false,
+    "same_state_same_action": true,
+    "sample": "initial terminal-conditioned action for every scenario/seed/agent"
+  },
+  "waypoint_attenuation_diagnostic": {
+    "near_reference_radius_m": 0.25,
+    "low_speed_threshold_mps": 0.1,
+    "forcing_attenuation_ratio_threshold": 0.25,
+    "low_speed_rate_threshold": 0.5,
+    "terminal_completion_failure_rate_threshold": 0.9
+  },
+  "decision_thresholds": {
+    "material_absolute_rate_delta": 0.1,
+    "material_terminal_progress_delta_m": 0.25,
+    "material_smoothness_relative_delta": 0.25,
+    "near_zero_success_rate": 0.1,
+    "temporary_reference_recovered_success_rate": 0.2
+  },
+  "environment_constraints": {
+    "include_boundaries_in_sensor": false,
+    "terminate_on_boundary_collision": false,
+    "paired_initialization": true,
+    "same_temporary_reference_for_B_C_D": true
+  },
+  "strict_exclusions": {
+    "SAC_training": false,
+    "Actor_update": false,
+    "Critic_update": false,
+    "alpha_update": false,
+    "replay_buffer_training": false,
+    "checkpoint_modification": false,
+    "current_scalar_transition_modification": false,
+    "reward_modification": false,
+    "Proposal_modification": false,
+    "FP_SHEP_selector": false,
+    "GAT": false,
+    "SDH": false,
+    "new_handoff": false,
+    "hyperparameter_search": false,
+    "max_steps_sensitivity": false,
+    "formal_seeds": false,
+    "paper_ready_artifacts": false
+  }
+}

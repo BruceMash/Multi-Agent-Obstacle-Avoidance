@@ -1,0 +1,159 @@
+{
+  "schema_version": "gat_stage2_coordination_v1",
+  "stage1_config": "configs/training/gat_stage1.json",
+  "stage1_run_dir": "artifacts/gat_stage1_training/20260815_230509",
+  "stage1_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "output_root": "artifacts/gat_stage2_coordination",
+  "frozen_stage1": {
+    "H_preview": 4,
+    "H_label": 6,
+    "target_name": "provisional_primary_target",
+    "target_feature_count": 3,
+    "soft_target_temperature": 0.25,
+    "architecture_change_allowed": false,
+    "dataset_change_allowed": false,
+    "split_change_allowed": false
+  },
+  "overlap": {
+    "definition": "mean_h_relu(d_safe-l2(xhat_i_k_h-xhat_j_l_h))/d_safe",
+    "horizon_steps": 4,
+    "trajectory_source": "existing_graph_candidate_preview_positions",
+    "class_domain": "proposal_proposal_only",
+    "probability_source": "full_null_plus_K_softmax",
+    "proposal_probability_renormalization": false,
+    "null_trajectory_available": false,
+    "null_trajectory_synthesis_allowed": false,
+    "uav_pair_order": "unordered_i_lt_j",
+    "joint_state_pair_reduction": "mean",
+    "batch_joint_state_reduction": "mean",
+    "d_safe_source": "graph_metadata",
+    "risk_rule": "selected_H4_pair_d_min_lt_d_safe_or_T_risk_gt_0"
+  },
+  "lambda_validation": {
+    "existing_frozen_lambda_found": false,
+    "candidates": [0.05, 0.1, 0.2],
+    "selection_split": "validation",
+    "selection_seed": 0,
+    "maximum_validation_top1_regression": 0.05,
+    "yes_minimum_expected_overlap_relative_reduction": 0.05,
+    "yes_minimum_expected_overlap_absolute_reduction": 0.00001,
+    "weak_minimum_consistent_candidate_count": 2,
+    "numeric_improvement_tolerance": 1e-8,
+    "tie_break_order": [
+      "risky_selection_rate_ascending",
+      "expected_overlap_ascending",
+      "top1_descending",
+      "lambda_ascending"
+    ],
+    "test_used_for_selection": false,
+    "expanded_search_allowed": false
+  },
+  "batching": {
+    "stage1_graph_budget": 32,
+    "joint_state_size": 3,
+    "regular_joint_states_per_batch": 10,
+    "regular_ego_graphs_per_batch": 30,
+    "split_joint_state_allowed": false,
+    "selection_loss_reduction": "mean_over_real_ego_graphs",
+    "overlap_loss_reduction": "mean_over_pairs_then_mean_over_joint_states"
+  },
+  "initialization": {
+    "model": "stage1_best_validation_model_state_dict",
+    "optimizer": "fresh_AdamW_per_optimization_seed",
+    "stage1_optimizer_state_loaded": false
+  },
+  "training": {
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "max_epochs": 100,
+    "early_stopping_patience": 15,
+    "gradient_clip_norm": 5.0,
+    "optimization_seeds": [0, 1, 2],
+    "smoke_seed": 0,
+    "device": "auto",
+    "num_workers": 0,
+    "checkpoint_metric": "validation_total_loss"
+  },
+  "smoke_gate": {
+    "require_total_loss_finite": true,
+    "require_selection_loss_finite": true,
+    "require_overlap_loss_finite": true,
+    "require_overlap_gradient_nonzero": true,
+    "require_spatiotemporal_edge_encoder_gradient_nonzero": true,
+    "require_align_message_gradient_nonzero": true,
+    "minimum_nonzero_gradient_norm": 1e-12,
+    "maximum_validation_total_loss_increase_fraction": 0.10,
+    "maximum_null_prediction_rate": 0.95,
+    "maximum_fixed_proposal_rank_prediction_rate": 0.95
+  },
+  "null_escape_audit": {
+    "null_top1_increase_threshold": 0.05,
+    "mean_null_probability_increase_threshold": 0.05,
+    "mass_transfer_primary_fraction_threshold": 0.5,
+    "counterfactual": "stage2_proposal_mass_times_stage1_conditional_proposal_distribution",
+    "conditional_distribution_used_for_training": false
+  },
+  "gradient_scale_audit": {
+    "scope": "entire_train_split",
+    "parameter_scope": "all_shared_gat_parameters",
+    "separate_backward_passes": true,
+    "zero_grad_between_measurements": true,
+    "minimum_adequate_gradient_ratio": 0.01
+  },
+  "edge_ablation": {
+    "variants": ["full", "zero_st_edge", "remove_align_message"],
+    "zero_st_edge_fields": ["edge_attr", "edge_attr_normalized"],
+    "remove_align_message": "empty_spatiotemporal_edge_tensors_only",
+    "test_split_only": true,
+    "clear_minimum_top1_degradation": 0.05,
+    "numeric_logit_change_tolerance": 1e-6,
+    "minimum_decisive_subset_graph_count": 20
+  },
+  "interaction_metrics": {
+    "interaction_rich_scenarios": ["multi_agent", "narrow_head_on"],
+    "secondary_risk_rule": "existing_graph_any_d_min_lt_0.6_or_T_risk_gt_0",
+    "selected_pair_metrics_exclude_null_involved_pairs": true,
+    "null_involved_pair_rate_reported": true,
+    "selected_d_min_statistics": ["mean", "median", "p05"]
+  },
+  "coordination_decision": {
+    "expected_overlap_relative_reduction": 0.05,
+    "risky_selection_rate_absolute_reduction": 0.01,
+    "selected_d_min_p05_increase_m": 0.02,
+    "interaction_rich_top1_or_mrr_increase": 0.02,
+    "overall_top1_maximum_regression": 0.05,
+    "yes_minimum_metric_families": 3,
+    "yes_minimum_consistent_seed_count": 2,
+    "weak_minimum_metric_families": 1
+  },
+  "offline_metric_definitions": {
+    "reference_class": "argmax_soft_target",
+    "top1": "predicted_top1_equals_soft_target_argmax",
+    "top3": "reference_class_in_predicted_top_min_3_C",
+    "mrr": "reciprocal_rank_of_soft_target_argmax",
+    "empirical_random": "conditioned_on_each_graph_real_class_count",
+    "spearman": "proposal_only_predicted_score_vs_J_target_3",
+    "spearman_excludes_null": true,
+    "spearman_minimum_proposal_count": 2,
+    "definitions_frozen_before_training": true
+  },
+  "strict_exclusions": {
+    "completion_loss": false,
+    "reachability_loss": false,
+    "rl_loss": false,
+    "contrastive_loss": false,
+    "new_node_feature": false,
+    "new_edge_feature": false,
+    "new_dataset": false,
+    "new_scenario": false,
+    "closed_loop_evaluation": false,
+    "proposal_modification": false,
+    "fp_shep_modification": false,
+    "graph_builder_modification": false,
+    "gat_architecture_modification": false,
+    "sac_dmp_modification": false,
+    "environment_modification": false
+  }
+}

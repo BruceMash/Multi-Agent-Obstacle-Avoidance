@@ -1,0 +1,134 @@
+{
+  "schema_version": "geometry_generalization_audit_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "output_dir": "artifacts/geometry_generalization_audit",
+  "scenario": "multi_agent_obstacle_generalization",
+  "scenario_role": "NON-TRANSLATION-EQUIVALENT STATIC-OBSTACLE + MULTI-AGENT COUPLING AUDIT",
+  "layout_set_role": "held_out_geometry_generalization_not_used_for_tuning",
+  "frozen_layout_table_sha256_expected": "4567cd11511edb3bdeceaa8c79ec8109e6da996fc5545ed0b216c5d8f5a0c3c7",
+  "layout_count": 24,
+  "families": ["A", "B", "C", "D", "E", "F"],
+  "stage_2_integrity_layouts": [
+    "HOLDOUT_A_00",
+    "HOLDOUT_C_00",
+    "HOLDOUT_D_00",
+    "HOLDOUT_F_00"
+  ],
+  "methods": [
+    "terminal_goal_baseline",
+    "proposal_top1_one_shot",
+    "fp_shep_top1_one_shot"
+  ],
+  "num_agents": 3,
+  "max_steps": 220,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "static_obstacle": {
+    "count": 2,
+    "radius_m": 0.45,
+    "safety_margin_m": 0.1,
+    "effective_radius_m": 0.55
+  },
+  "dynamic_obstacle_count": 0,
+  "temporary_reference": {
+    "K_requested": 10,
+    "reached_tolerance_m": 0.25,
+    "candidate_generation_per_agent_episode": 1,
+    "replanning_enabled": false,
+    "handoff_count_max": 1
+  },
+  "proposal_config": {"top_k": 10},
+  "fp_shep_online_selector": {
+    "name": "fixed_physical_scale_three_feature_online_score",
+    "definition_status": "goal_specific_baseline_not_global_fp_shep_definition",
+    "H_preview": 4,
+    "formula": "+progress +clearance -deviation",
+    "weights": {
+      "progress": 1.0,
+      "clearance": 1.0,
+      "deviation": 1.0,
+      "terminal_speed": 0.0
+    },
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    },
+    "normalization_recalibrated": false,
+    "real_outcome_used_to_tune_score": false
+  },
+  "geometry_gate": {
+    "obstacle_influence_distance_m": 1.5,
+    "predicted_inter_agent_risk_distance_m": 0.6,
+    "near_orthogonal_3d_tolerance_deg": 15.0,
+    "near_orthogonal_time_difference_max_fraction": 0.08,
+    "solvability_check": "analytic_boundary_free_finite_sphere_free_space_only",
+    "method_outcome_allowed": false
+  },
+  "compatibility_diagnostic": {
+    "inter_agent_pressure_distance_m": 1.2,
+    "path_crossing_distance_m": 0.6,
+    "arrival_time_overlap_fraction": 0.08,
+    "online_selection_changed": false,
+    "scope": "POST_HOC_FAILURE_EXPLANATION_ONLY"
+  },
+  "gat_decision_thresholds": {
+    "strong_fp_success_rate": 0.9,
+    "coordination_support_lower_success_rate": 0.65,
+    "residual_failure_fraction": 0.5,
+    "minimum_residual_layout_count": 3,
+    "minimum_residual_family_count": 2,
+    "conditional_proceed_residual_layout_count": 3,
+    "minimum_individual_joint_gap_case_count": 2
+  },
+  "execution_semantics": {
+    "deterministic_policy": true,
+    "actor_observation_shape": [3, 122],
+    "native_observation_shape": [3, 138],
+    "historical_gate": "historical_vector_goal_eff_gate",
+    "phase": "classic_legacy_euler",
+    "K_alpha": 3.0,
+    "K_beta": 0.8,
+    "tau": 2.5,
+    "include_boundaries_in_sensor": false,
+    "terminate_on_boundary_collision": false,
+    "one_shot": true,
+    "repeated_replanning": false,
+    "temporary_reached_tolerance_m": 0.25
+  },
+  "manifest_freeze": {
+    "freeze_before_checkpoint_load": true,
+    "freeze_before_method_evaluation": true,
+    "hash_verified_after_stage_2": true,
+    "hash_verified_after_stage_3": true,
+    "outcome_based_geometry_modification": false
+  },
+  "strict_exclusions": {
+    "SAC_training": false,
+    "Actor_update": false,
+    "Critic_update": false,
+    "checkpoint_modification": false,
+    "DMP_modification": false,
+    "historical_gate_modification": false,
+    "reward_modification": false,
+    "observation_modification": false,
+    "collision_rule_modification": false,
+    "success_rule_modification": false,
+    "Proposal_modification": false,
+    "FP_SHEP_modification": false,
+    "score_recalibration": false,
+    "H_preview_modification": false,
+    "GAT": false,
+    "GAT_optimizer": false,
+    "repeated_replanning": false,
+    "hard_boundary": false,
+    "dynamic_obstacles": false,
+    "parameter_sweep": false,
+    "layout_search_or_retuning": false,
+    "outcome_based_layout_rejection": false
+  }
+}

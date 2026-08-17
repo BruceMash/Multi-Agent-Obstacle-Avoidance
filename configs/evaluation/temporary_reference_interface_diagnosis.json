@@ -1,0 +1,157 @@
+{
+  "schema_version": "temporary_reference_interface_diagnosis_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "output_dir": "artifacts/temporary_reference_interface_diagnosis",
+  "deterministic_policy": true,
+  "num_agents": 3,
+  "max_steps": 50,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "development_seeds": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "formal_seeds_excluded_during_interface_design": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+  "scenarios": [
+    "bounded",
+    "sparse_static",
+    "dense_static",
+    "multi_agent",
+    "narrow_head_on"
+  ],
+  "scenario_display_names": {
+    "bounded": "Bounded Environment",
+    "sparse_static": "Sparse Static Obstacles",
+    "dense_static": "Dense Static Obstacles",
+    "multi_agent": "Multi-Agent Crossing",
+    "narrow_head_on": "Narrow Head-On Encounter"
+  },
+  "stage_a_protocols": [
+    "terminal_goal_baseline",
+    "one_shot_temporary_reference",
+    "fixed_period_hard_switching"
+  ],
+  "stage_b_protocols": [
+    "existing_waypoint_handoff_boundary_free"
+  ],
+  "protocol_display_names": {
+    "terminal_goal_baseline": "Terminal-Goal Baseline",
+    "one_shot_temporary_reference": "One-Shot Temporary Reference",
+    "existing_waypoint_handoff_boundary_free": "Existing Waypoint Handoff, Boundary-Free",
+    "existing_full_waypoint_interface_legacy": "Existing Full Waypoint Interface (Legacy)",
+    "fixed_period_hard_switching": "Fixed-Period Hard Switching"
+  },
+  "protocol_metadata": {
+    "terminal_goal_baseline": {
+      "implementation": "Frozen SAC-DMP",
+      "temporary_reference_used": false
+    },
+    "one_shot_temporary_reference": {
+      "selector": "Proposal top-1",
+      "reached_tolerance_m": 0.25,
+      "reached_tolerance_source": "configs/evaluation/frozen_policy_waypoint_guidance.json",
+      "candidate_created_at_most_once": true,
+      "replanning_after_terminal_return": false
+    },
+    "existing_waypoint_handoff_boundary_free": {
+      "selector_family": "Proposal score with existing consumer filtering/lookahead",
+      "reached_tolerance_m": 0.25,
+      "reached_tolerance_source": "configs/evaluation/frozen_policy_waypoint_guidance.json",
+      "lookahead_depth": 3,
+      "priority_hold_enabled": true,
+      "workspace_boundary_filter_enabled": false,
+      "boundary_validity_diagnostic_only": true
+    },
+    "fixed_period_hard_switching": {
+      "selector": "Proposal top-1",
+      "M_upper": 8,
+      "replanning_rule": "timestep % M_upper == 0",
+      "reached_tolerance_m": 0.30,
+      "reached_tolerance_source": "MultiAgentEnvConfig.goal_tolerance",
+      "early_reach_triggers_replanning": false
+    }
+  },
+  "candidate_semantics": {
+    "K_requested": 10,
+    "variable_K_t": true,
+    "padding": false,
+    "K_t_zero_policy": "terminal_task_goal_fallback",
+    "fallback_counted_as_selection": false
+  },
+  "proposal_config": {
+    "top_k": 10
+  },
+  "existing_waypoint": {
+    "boundary_filter_enabled": false,
+    "run_legacy_full_consumer": false,
+    "legacy_status": "LEGACY_DIAGNOSTIC_ONLY",
+    "boundary_margin_m": 0.4,
+    "collision_clearance_m": 0.0,
+    "segment_samples": 16,
+    "reached_tolerance_m": 0.25,
+    "stagnation_steps": 10,
+    "stagnation_progress_epsilon_m": 0.01,
+    "lookahead_depth": 3,
+    "priority_hold": {
+      "priority_order": [0, 1, 2],
+      "nominal_speed": 0.8,
+      "prediction_horizon_s": 2.5,
+      "conflict_separation_m": 0.85,
+      "release_clear_steps": 3,
+      "deadlock_steps": 30,
+      "yield_distance_m": 0.9,
+      "retreat_distance_m": 0.45
+    }
+  },
+  "failure_attribution": {
+    "shortly_after_switch_low_level_steps": 3,
+    "pre_registered_before_development_evaluation": true
+  },
+  "stage_c_gate": {
+    "enabled": true,
+    "eligible_protocols": [
+      "one_shot_temporary_reference",
+      "existing_waypoint_handoff_boundary_free"
+    ],
+    "minimum_success_rate_exclusive": 0.0,
+    "minimum_absolute_success_improvement_over_fixed_period": 0.05,
+    "selection_data": "development seeds 0-9 only"
+  },
+  "fp_shep_stage_c": {
+    "H_preview": 4,
+    "score_formula": "+progress +clearance -deviation",
+    "weights": {
+      "progress": 1.0,
+      "clearance": 1.0,
+      "deviation": 1.0,
+      "terminal_speed": 0.0
+    },
+    "terminal_speed_recorded": true,
+    "terminal_speed_used_for_online_ranking": false,
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    }
+  },
+  "semantics": {
+    "terminal_task_goal_storage": "env.goals",
+    "temporary_reference_storage": "env.dmps[i].goal",
+    "actor_input": "existing active-goal 122-D observation builder",
+    "phase_reset_on_switch": false,
+    "spring_attractor_goal": "active_goal",
+    "forcing_gate_distance_source": "terminal_goal",
+    "reward_success_termination_goal": "terminal_goal",
+    "workspace_boundary_used_by_boundary_free_protocol": false,
+    "boundary_validity_recorded_as_diagnostic": true,
+    "GAT_training_enabled": false,
+    "SDH_enabled": false,
+    "SAC_retraining_enabled": false
+  },
+  "figures": {
+    "status": "DIAGNOSTIC_ONLY",
+    "language": "English",
+    "png_dpi": 600,
+    "font_family_preference": ["Times New Roman", "DejaVu Serif"],
+    "white_background": true
+  }
+}

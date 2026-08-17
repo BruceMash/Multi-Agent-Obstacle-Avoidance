@@ -1,0 +1,168 @@
+{
+  "schema_version": "gat_24_layout_stress_v1",
+  "output_root": "artifacts/gat_24_layout_stress",
+  "frozen_geometry_manifest": "artifacts/geometry_generalization_audit/20260815_175228/scenario_manifest.json",
+  "geometry_manifest_sha256_expected": "488098107fde63ac707aa7e173aa4471fc140c84e224293c03fd77b7dc0a501c",
+  "historical_artifact_dir": "artifacts/geometry_generalization_audit/20260815_175228",
+  "gat_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "gat_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+  "stage1_config": "configs/training/gat_stage1.json",
+  "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_execution_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "scenario": "multi_agent_obstacle_generalization",
+  "scenario_role": "NON-TRANSLATION-EQUIVALENT STATIC-OBSTACLE + MULTI-AGENT COUPLING AUDIT",
+  "layout_count": 24,
+  "families": ["A", "B", "C", "D", "E", "F"],
+  "layouts_per_family": 4,
+  "num_agents": 3,
+  "static_obstacle_count": 2,
+  "dynamic_obstacle_count": 0,
+  "peer_spheres": true,
+  "peer_radius_m": 0.3,
+  "boundary_mode": "boundary_free",
+  "top_k": 10,
+  "H_preview": 4,
+  "max_steps": 220,
+  "handoff_threshold_m": 0.25,
+  "forcing_gate": "historical_vector_goal_eff_gate",
+  "execution_protocol": "one_shot_temporary_reference_handoff",
+  "deterministic_inference": true,
+  "methods": ["terminal", "proposal", "fp_shep", "gat_stage1"],
+  "proposal_config": {
+    "top_k": 10
+  },
+  "fp_shep": {
+    "H_preview": 4,
+    "score_name": "fixed_physical_scale_three_feature_online_score",
+    "formula": "+progress +clearance -deviation",
+    "terminal_speed_used_for_ranking": false,
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    }
+  },
+  "graph": {
+    "horizon_steps": 4,
+    "d_align": 1.2,
+    "d_align_source": "configurable_implementation_parameter_not_paper_constant",
+    "null_class_index": 0,
+    "proposal_class_offset": 1,
+    "candidate_order_preserved": true
+  },
+  "compatibility_tolerances": {
+    "frozen_before_outcome_evaluation": true,
+    "discrete_match": "exact",
+    "candidate_atol": 1e-6,
+    "candidate_rtol": 0.0,
+    "preview_feature_atol": 1e-6,
+    "preview_feature_rtol": 0.0,
+    "fp_shep_score_atol": 1e-6,
+    "fp_shep_score_rtol": 0.0,
+    "execution_atol": 1e-7,
+    "execution_rtol": 0.0,
+    "trajectory_atol": 1e-7,
+    "trajectory_rtol": 0.0,
+    "threshold_adjustment_after_outcomes_allowed": false
+  },
+  "execution_equivalence_representatives": {
+    "A": "HOLDOUT_A_00",
+    "B": "HOLDOUT_B_00",
+    "C": "HOLDOUT_C_00",
+    "D": "HOLDOUT_D_02",
+    "E": "HOLDOUT_E_00",
+    "F": "HOLDOUT_F_01"
+  },
+  "execution_equivalence_required_methods": ["proposal", "fp_shep"],
+  "historical_reuse": {
+    "expected_success_counts": {
+      "terminal": 2,
+      "proposal": 2,
+      "fp_shep": 6
+    },
+    "required_episode_fields": [
+      "team_success",
+      "obstacle_collision",
+      "inter_agent_collision",
+      "collision",
+      "timeout",
+      "completion_time_s",
+      "path_length_team_sum_m",
+      "trajectory_smoothness",
+      "mean_speed_team_mps",
+      "peak_speed_team_mps",
+      "mean_applied_acceleration_mps2",
+      "max_applied_acceleration_mps2",
+      "minimum_obstacle_clearance_m",
+      "minimum_inter_agent_distance_m"
+    ],
+    "required_per_agent_fields": [
+      "agent_id",
+      "reference_reached",
+      "terminal_completed_after_reference",
+      "path_length_m"
+    ],
+    "missing_required_metric_forces_rerun": true,
+    "rerun_all_method_episode_count": 96
+  },
+  "failure_taxonomy_priority": [
+    "OBSTACLE_COLLISION",
+    "INTER_AGENT_COLLISION",
+    "TIMEOUT_BEFORE_REFERENCE",
+    "REFERENCE_UNREACHABLE_OR_STAGNATION",
+    "AFTER_REFERENCE_FAILURE",
+    "OTHER_SOFTWARE_OR_ENVIRONMENT_FAILURE"
+  ],
+  "effect_classification": {
+    "scope": "rate_metrics_only",
+    "yes_minimum_improvement": 0.10,
+    "weak_strict_minimum_improvement": 0.0,
+    "success_improvement": "gat_rate_minus_baseline_rate",
+    "collision_improvement": "baseline_rate_minus_gat_rate",
+    "timeout_improvement": "baseline_rate_minus_gat_rate",
+    "continuous_metrics_use_pp_classification": false
+  },
+  "family_generalization_rule": {
+    "yes_requires_overall_success_class": "YES",
+    "yes_minimum_positive_families": 3,
+    "yes_maximum_regressed_families": 1,
+    "weak_minimum_positive_families": 1,
+    "family_sample_size": 4,
+    "statistical_significance_claim_allowed": false
+  },
+  "spatiotemporal_claim_rule": {
+    "supported_requires_success_improvement": 0.10,
+    "supported_requires_inter_agent_collision_improvement": 0.10,
+    "supported_minimum_positive_families": 3,
+    "weak_if_any_required_signal_positive": true
+  },
+  "statistics": {
+    "mcnemar_exact_unit": "layout_team_episode",
+    "individual_uav_is_independent_sample": false,
+    "continuous_summary": ["mean", "std", "median"],
+    "failed_completion_time_fill_value": null
+  },
+  "artifact_policy": {
+    "historical_artifact_used_for_online_decision": false,
+    "current_preview_is_only_fp_shep_and_gat_input": true,
+    "automatic_large_image_generation": false
+  },
+  "strict_exclusions": {
+    "geometry_modification": false,
+    "layout_rejection": false,
+    "proposal_modification": false,
+    "fp_shep_modification": false,
+    "gat_modification": false,
+    "gat_training": false,
+    "sac_dmp_modification": false,
+    "sac_training": false,
+    "top_k_modification": false,
+    "horizon_modification": false,
+    "handoff_modification": false,
+    "max_steps_modification": false,
+    "outcome_driven_optimization": false
+  }
+}

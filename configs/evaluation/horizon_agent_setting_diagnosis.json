@@ -1,0 +1,76 @@
+{
+  "schema_version": "horizon_agent_setting_diagnosis_v1",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "output_dir": "artifacts/horizon_agent_setting_diagnosis",
+  "deterministic_policy": true,
+  "horizons": [50, 220],
+  "dt": 0.1,
+  "single_agent": {
+    "base_config": "configs/training/reference_transition_finetuning_smoke.json",
+    "scenarios": ["open", "sparse_static", "historical_base"],
+    "seeds": [0, 1, 2, 3, 4],
+    "task": "one_shot_reference_transition",
+    "proposal_selector": "Proposal score top-1",
+    "proposal_top_k": 10,
+    "temporary_reference_tolerance_m": 0.25
+  },
+  "multi_agent": {
+    "base_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+    "scenarios": ["open", "sparse_static", "multi_agent"],
+    "seeds": [0, 1, 2, 3, 4],
+    "num_agents": 3,
+    "variant": "D_temporary_actor_temporary_dmp",
+    "proposal_selector": "Proposal score top-1",
+    "temporary_reference_tolerance_m": 0.25,
+    "include_boundaries_in_sensor": false,
+    "terminate_on_boundary_collision": false
+  },
+  "agent_setting_comparison": {
+    "primary_shared_scenarios": ["open", "sparse_static"],
+    "supplementary_single_scenario": "historical_base",
+    "supplementary_multi_scenario": "multi_agent",
+    "claim": "shared scenarios only are used for MULTI_AGENT_EFFECT"
+  },
+  "effect_classification": {
+    "none_absolute_difference_pp_below": 10.0,
+    "weak_absolute_difference_pp_from": 10.0,
+    "strong_absolute_difference_pp_from": 30.0,
+    "statistical_significance_claimed": false
+  },
+  "counterfactual": {
+    "cutoff_step": 50,
+    "source": "observed 220-step trajectory task status",
+    "controller_rerun": false
+  },
+  "historical_transition": {
+    "K_alpha": 3.0,
+    "K_beta": 0.8,
+    "tau": 2.5,
+    "dt": 0.1,
+    "phase": "classic legacy Euler",
+    "goal_eff": "goal_base + clip(goal_offset,-1,1)",
+    "forcing_gate": "tanh(abs(goal_eff-position))",
+    "forcing_clip": [-10.0, 10.0],
+    "goal_offset_clip": [-1.0, 1.0]
+  },
+  "strict_exclusions": {
+    "SAC_fine_tuning": false,
+    "Actor_update": false,
+    "Critic_update": false,
+    "replay_training": false,
+    "checkpoint_modification": false,
+    "Proposal_modification": false,
+    "FP_SHEP": false,
+    "GAT": false,
+    "oracle": false,
+    "SDH": false,
+    "new_handoff": false,
+    "reward_modification": false,
+    "observation_modification": false,
+    "DMP_gain_modification": false,
+    "repeated_replanning": false,
+    "hard_boundary": false,
+    "horizon_search": false
+  }
+}

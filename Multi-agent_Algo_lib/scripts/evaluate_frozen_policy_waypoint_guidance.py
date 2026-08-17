@@ -39,6 +39,11 @@ from Environment.frozen_sac_dmp_execution import (  # noqa: E402
     build_historical_actor_observation,
     predict_frozen_actions,
 )
+from planning.temporary_reference_diagnosis import (  # noqa: E402
+    candidate_safety_diagnostic,
+    dmp_switch_diagnostic,
+    observation_switch_diagnostic,
+)
 from scripts.evaluate_single_policy_aligned_multi_agent import (  # noqa: E402
     STAGE_SPECS,
     build_single_distribution_multi_config,
@@ -143,17 +148,22 @@ def segment_is_clear(
     boundary_margin: float,
     collision_clearance: float,
     samples: int,
+    boundary_filter_enabled: bool = True,
 ) -> bool:
     """Check only whether a candidate active-goal segment is selectable."""
     if samples < 2:
         raise ValueError("samples must be at least 2")
-    if not point_inside_guidance_bounds(end, env.env_config.workspace_bounds, boundary_margin):
+    if bool(boundary_filter_enabled) and not point_inside_guidance_bounds(
+        end, env.env_config.workspace_bounds, boundary_margin
+    ):
         return False
     obstacles = list(env._sensor_static_obstacles())
     obstacles.extend(env._sensor_dynamic_obstacles(int(agent_index)))
     for ratio in np.linspace(0.0, 1.0, int(samples) + 1, dtype=float)[1:]:
         point = (1.0 - ratio) * np.asarray(start, dtype=float) + ratio * np.asarray(end, dtype=float)
-        if not point_inside_guidance_bounds(point, env.env_config.workspace_bounds, boundary_margin):
+        if bool(boundary_filter_enabled) and not point_inside_guidance_bounds(
+            point, env.env_config.workspace_bounds, boundary_margin
+        ):
             return False
         if any(float(obstacle.signed_distance(point)) <= float(collision_clearance) for obstacle in obstacles):
             return False
@@ -240,6 +250,7 @@ def choose_priority_wait_point(
     segment_samples: int,
     yield_distance: float,
     retreat_distance: float,
+    boundary_filter_enabled: bool = True,
 ) -> np.ndarray:
     """Choose a reachable waiting waypoint away from priority flight segments."""
 
@@ -274,6 +285,7 @@ def choose_priority_wait_point(
             boundary_margin=boundary_margin,
             collision_clearance=collision_clearance,
             samples=segment_samples,
+            boundary_filter_enabled=boundary_filter_enabled,
         ):
             continue
         priority_clearance = min(
@@ -300,7 +312,7 @@ def choose_priority_wait_point(
         score = (
             2.0 * min(priority_clearance, 5.0)
             + min(peer_clearance, 5.0)
-            + 0.25 * boundary_clearance
+            + (0.25 * boundary_clearance if bool(boundary_filter_enabled) else 0.0)
             - 0.10 * movement_cost
         )
         if score > best_score:
@@ -326,6 +338,7 @@ def update_priority_hold_targets(
     segment_samples: int,
     yield_distance: float,
     retreat_distance: float,
+    boundary_filter_enabled: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
     """Apply deterministic priority/hold decisions to candidate active goals."""
 
@@ -384,6 +397,7 @@ def update_priority_hold_targets(
                     segment_samples=segment_samples,
                     yield_distance=yield_distance,
                     retreat_distance=retreat_distance,
+                    boundary_filter_enabled=boundary_filter_enabled,
                 )
                 state.consecutive_steps = 0
                 state.deadlock_reported = False
@@ -469,8 +483,9 @@ def _proposal_is_selectable(
     *,
     boundary_margin: float,
     collision_clearance: float,
+    boundary_filter_enabled: bool = True,
 ) -> tuple[bool, str | None]:
-    if not point_inside_guidance_bounds(
+    if bool(boundary_filter_enabled) and not point_inside_guidance_bounds(
         proposal.point,
         env.env_config.workspace_bounds,
         boundary_margin,
@@ -490,6 +505,8 @@ def generate_waypoint_sequence(
     proposal_config: ProposalConfig,
     boundary_margin: float,
     collision_clearance: float,
+    boundary_filter_enabled: bool = True,
+    diagnostic_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[list[np.ndarray], dict[str, int]]:
     """Virtually roll out a frozen-obstacle Guidance prefix."""
     if depth <= 0:
@@ -502,7 +519,7 @@ def generate_waypoint_sequence(
     dynamic_obstacles = copy.deepcopy(env._sensor_dynamic_obstacles(agent_index))
     sequence: list[np.ndarray] = []
     counts = {"boundary": 0, "obstacle": 0}
-    for _ in range(int(depth)):
+    for depth_index in range(int(depth)):
         proposals = propose_reference_points(
             virtual_position,
             np.asarray(task_goal, dtype=float),
@@ -513,19 +530,51 @@ def generate_waypoint_sequence(
             float(env.env_config.goal_tolerance),
         )
         selected: Proposal | None = None
-        for proposal in proposals:
+        selected_rank: int | None = None
+        rejected_rows: list[dict[str, Any]] = []
+        for proposal_rank, proposal in enumerate(proposals):
             selectable, reason = _proposal_is_selectable(
                 env,
                 agent_index,
                 proposal,
                 boundary_margin=boundary_margin,
                 collision_clearance=collision_clearance,
+                boundary_filter_enabled=boundary_filter_enabled,
             )
             if selectable:
                 selected = proposal
+                selected_rank = int(proposal_rank)
                 break
             if reason is not None:
                 counts[reason] += 1
+                rejected_rows.append(
+                    {
+                        "proposal_rank": int(proposal_rank),
+                        "point": np.asarray(proposal.point, dtype=float).tolist(),
+                        "reason": str(reason),
+                    }
+                )
+        if diagnostic_sink is not None:
+            diagnostic_sink.append(
+                {
+                    "virtual_depth": int(depth_index + 1),
+                    "virtual_position": virtual_position.tolist(),
+                    "proposal_count": int(len(proposals)),
+                    "raw_top1_point": (
+                        np.asarray(proposals[0].point, dtype=float).tolist()
+                        if proposals
+                        else None
+                    ),
+                    "selected_proposal_rank": selected_rank,
+                    "selected_point": (
+                        np.asarray(selected.point, dtype=float).tolist()
+                        if selected is not None
+                        else None
+                    ),
+                    "rejected": rejected_rows,
+                    "boundary_filter_enabled": bool(boundary_filter_enabled),
+                }
+            )
         if selected is None:
             break
         sequence.append(np.asarray(selected.point, dtype=float).copy())
@@ -550,6 +599,7 @@ def select_safe_lookahead(
     boundary_margin: float,
     collision_clearance: float,
     segment_samples: int,
+    boundary_filter_enabled: bool = True,
 ) -> tuple[np.ndarray | None, int, int]:
     """Use the deepest point whose direct segment remains collision-free."""
     start = np.asarray(env.dynamics[agent_index].p, dtype=float)
@@ -565,6 +615,7 @@ def select_safe_lookahead(
             boundary_margin=boundary_margin,
             collision_clearance=collision_clearance,
             samples=segment_samples,
+            boundary_filter_enabled=boundary_filter_enabled,
         ):
             return point.copy(), depth, fallback_count
         fallback_count += 1
@@ -579,6 +630,7 @@ def active_waypoint_invalid(
     boundary_margin: float,
     collision_clearance: float,
     segment_samples: int,
+    boundary_filter_enabled: bool = True,
 ) -> bool:
     return not segment_is_clear(
         env,
@@ -588,6 +640,7 @@ def active_waypoint_invalid(
         boundary_margin=boundary_margin,
         collision_clearance=collision_clearance,
         samples=segment_samples,
+        boundary_filter_enabled=boundary_filter_enabled,
     )
 
 
@@ -638,6 +691,10 @@ def run_waypoint_episode(
     scheduler_deadlock_steps: int = 30,
     scheduler_yield_distance: float = 0.9,
     scheduler_retreat_distance: float = 0.45,
+    boundary_filter_enabled: bool = True,
+    diagnostic_step_sink: list[dict[str, Any]] | None = None,
+    diagnostic_reference_sink: list[dict[str, Any]] | None = None,
+    diagnostic_switch_sink: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     env = _build_environment(
         config,
@@ -703,14 +760,84 @@ def run_waypoint_episode(
         boundary_collision = False
         terminated = False
         truncated = False
+        last_applied_accelerations = np.zeros(
+            (int(env.num_agents), 3), dtype=float
+        )
+
+        def apply_active_goal(
+            agent_index: int,
+            goal: np.ndarray,
+            *,
+            timestep: int,
+            switch_reason: str,
+        ) -> None:
+            previous_goal = np.asarray(env.dmps[agent_index].goal, dtype=float).copy()
+            goal = np.asarray(goal, dtype=float).copy()
+            if (
+                diagnostic_switch_sink is not None
+                and float(np.linalg.norm(goal - previous_goal)) > 1.0e-8
+            ):
+                diagnostic = observation_switch_diagnostic(
+                    env,
+                    agent_index,
+                    previous_active_goal=previous_goal,
+                    new_active_goal=goal,
+                )
+                diagnostic.update(
+                    dmp_switch_diagnostic(
+                        env,
+                        agent_index,
+                        previous_active_goal=previous_goal,
+                        new_active_goal=goal,
+                        terminal_goal=task_goals[agent_index],
+                        policy=model,
+                    )
+                )
+                diagnostic.update(
+                    candidate_safety_diagnostic(
+                        env,
+                        agent_index,
+                        candidate=goal,
+                        boundary_margin=boundary_margin,
+                        collision_clearance=collision_clearance,
+                        segment_samples=segment_samples,
+                    )
+                )
+                diagnostic.update(
+                    {
+                        "scenario": scenario_name,
+                        "seed": int(seed),
+                        "episode": int(episode_index),
+                        "timestep": int(timestep),
+                        "agent_id": int(agent_index),
+                        "current_acceleration": last_applied_accelerations[
+                            agent_index
+                        ].tolist(),
+                        "switch_reason": str(switch_reason),
+                        "boundary_filter_enabled": bool(boundary_filter_enabled),
+                        "boundary_validity_used_for_selection": bool(
+                            boundary_filter_enabled
+                        ),
+                    }
+                )
+                diagnostic_switch_sink.append(diagnostic)
+            set_dmp_active_goal_preserve_phase(env.dmps[agent_index], goal)
 
         while not (terminated or truncated):
+            step_index = int(env.steps)
             active_mask = np.logical_not(env.success_rewarded_mask.copy())
             active_goals = task_goals.copy()
+            step_reasons: list[str | None] = [None] * int(env.num_agents)
+            step_generation_diagnostics: list[list[dict[str, Any]]] = [
+                [] for _ in range(int(env.num_agents))
+            ]
             for agent_index in range(int(env.num_agents)):
                 if not bool(active_mask[agent_index]):
-                    set_dmp_active_goal_preserve_phase(
-                        env.dmps[agent_index], task_goals[agent_index]
+                    apply_active_goal(
+                        agent_index,
+                        task_goals[agent_index],
+                        timestep=step_index,
+                        switch_reason="terminal_success_freeze",
                     )
                     continue
                 active_agent_steps += 1
@@ -742,6 +869,7 @@ def run_waypoint_episode(
                     boundary_margin=boundary_margin,
                     collision_clearance=collision_clearance,
                     segment_samples=segment_samples,
+                    boundary_filter_enabled=boundary_filter_enabled,
                 ):
                     reason = "invalid"
                 elif float(np.linalg.norm(state.point - positions[agent_index])) <= reached_tolerance:
@@ -750,6 +878,7 @@ def run_waypoint_episode(
                     reason = "stagnation"
 
                 if reason is not None:
+                    step_reasons[agent_index] = str(reason)
                     counters["request"] += 1
                     if reason in counters:
                         counters[reason] += 1
@@ -762,6 +891,8 @@ def run_waypoint_episode(
                         proposal_config=proposal_config,
                         boundary_margin=boundary_margin,
                         collision_clearance=collision_clearance,
+                        boundary_filter_enabled=boundary_filter_enabled,
+                        diagnostic_sink=step_generation_diagnostics[agent_index],
                     )
                     proposal_times_ms.append(
                         float(time.perf_counter_ns() - proposal_start) / 1_000_000.0
@@ -777,6 +908,7 @@ def run_waypoint_episode(
                         boundary_margin=boundary_margin,
                         collision_clearance=collision_clearance,
                         segment_samples=segment_samples,
+                        boundary_filter_enabled=boundary_filter_enabled,
                     )
                     counters["segment_fallback"] += int(segment_fallbacks)
                     if point is None:
@@ -789,6 +921,31 @@ def run_waypoint_episode(
                         state.selected_depth = int(selected_depth)
                         state.stagnation_steps = 0
                         selected_depths.append(float(selected_depth))
+                    if diagnostic_reference_sink is not None:
+                        diagnostic_reference_sink.append(
+                            {
+                                "timestep": step_index,
+                                "agent_id": int(agent_index),
+                                "reason": str(reason),
+                                "selected_point": (
+                                    np.asarray(point, dtype=float).tolist()
+                                    if point is not None
+                                    else None
+                                ),
+                                "selected_depth": int(selected_depth),
+                                "sequence": [
+                                    np.asarray(value, dtype=float).tolist()
+                                    for value in sequence
+                                ],
+                                "rejected_counts": dict(rejected),
+                                "generation_diagnostics": copy.deepcopy(
+                                    step_generation_diagnostics[agent_index]
+                                ),
+                                "boundary_filter_enabled": bool(
+                                    boundary_filter_enabled
+                                ),
+                            }
+                        )
 
                 if state.point is None:
                     fallback_agent_steps += 1
@@ -798,10 +955,20 @@ def run_waypoint_episode(
                     active_distances.append(
                         float(np.linalg.norm(state.point - positions[agent_index]))
                     )
-                set_dmp_active_goal_preserve_phase(
-                    env.dmps[agent_index], active_goals[agent_index]
+                apply_active_goal(
+                    agent_index,
+                    active_goals[agent_index],
+                    timestep=step_index,
+                    switch_reason=step_reasons[agent_index] or "retain",
                 )
 
+            hold_mask = np.zeros(int(env.num_agents), dtype=bool)
+            scheduler_diagnostics = {
+                "conflicts": 0,
+                "hold_events": 0,
+                "releases": 0,
+                "deadlock_events": 0,
+            }
             if bool(priority_hold_enabled):
                 active_goals, hold_mask, scheduler_diagnostics = update_priority_hold_targets(
                     env,
@@ -819,6 +986,7 @@ def run_waypoint_episode(
                     segment_samples=segment_samples,
                     yield_distance=scheduler_yield_distance,
                     retreat_distance=scheduler_retreat_distance,
+                    boundary_filter_enabled=boundary_filter_enabled,
                 )
                 coordination_counters["conflicts"] += int(
                     scheduler_diagnostics["conflicts"]
@@ -834,8 +1002,15 @@ def run_waypoint_episode(
                 )
                 coordination_counters["hold_agent_steps"] += int(np.sum(hold_mask))
                 for agent_index in range(int(env.num_agents)):
-                    set_dmp_active_goal_preserve_phase(
-                        env.dmps[agent_index], active_goals[agent_index]
+                    apply_active_goal(
+                        agent_index,
+                        active_goals[agent_index],
+                        timestep=step_index,
+                        switch_reason=(
+                            "priority_hold"
+                            if bool(hold_mask[agent_index])
+                            else "priority_release_or_retain"
+                        ),
                     )
 
             observations = build_active_goal_observations(env, active_goals)
@@ -863,9 +1038,87 @@ def run_waypoint_episode(
                 action_agent_count += int(active_actions.shape[0])
 
             previous_positions = positions.copy()
+            previous_velocities = env._velocities().copy()
+            previous_phases = np.asarray(
+                [float(dmp.phase) for dmp in env.dmps], dtype=float
+            )
             # Strict contract: the network action is passed to env.step unchanged.
             _, rewards, terminated, truncated, info = env.step(actions)
             positions = env._positions()
+            last_applied_accelerations = np.asarray(
+                info["applied_accelerations"], dtype=float
+            ).copy()
+            if diagnostic_step_sink is not None:
+                current_velocities = env._velocities().copy()
+                current_phases = np.asarray(
+                    [float(dmp.phase) for dmp in env.dmps], dtype=float
+                )
+                for agent_index in range(int(env.num_agents)):
+                    controller_info = env.latest_controller_infos[agent_index]
+                    diagnostic_step_sink.append(
+                        {
+                            "timestep": step_index,
+                            "completed_step": int(env.steps),
+                            "agent_id": int(agent_index),
+                            "position_before": previous_positions[agent_index].tolist(),
+                            "position_after": positions[agent_index].tolist(),
+                            "velocity_before": previous_velocities[agent_index].tolist(),
+                            "velocity_after": current_velocities[agent_index].tolist(),
+                            "terminal_goal": task_goals[agent_index].tolist(),
+                            "active_goal": active_goals[agent_index].tolist(),
+                            "waypoint_goal": (
+                                states[agent_index].point.tolist()
+                                if states[agent_index].point is not None
+                                else None
+                            ),
+                            "handoff_reason": step_reasons[agent_index],
+                            "priority_hold_active": bool(hold_mask[agent_index]),
+                            "phase_before": float(previous_phases[agent_index]),
+                            "phase_after": float(current_phases[agent_index]),
+                            "distance_to_active_goal_before": float(
+                                np.linalg.norm(
+                                    active_goals[agent_index]
+                                    - previous_positions[agent_index]
+                                )
+                            ),
+                            "distance_to_terminal_goal_before": float(
+                                np.linalg.norm(
+                                    task_goals[agent_index]
+                                    - previous_positions[agent_index]
+                                )
+                            ),
+                            "forcing_gate_value": float(
+                                controller_info.get("forcing_gate_scalar", 0.0)
+                            ),
+                            "commanded_acceleration": np.asarray(
+                                info["commanded_accelerations"][agent_index],
+                                dtype=float,
+                            ).tolist(),
+                            "applied_acceleration": np.asarray(
+                                info["applied_accelerations"][agent_index],
+                                dtype=float,
+                            ).tolist(),
+                            "min_clearance": float(
+                                info["min_clearances"][agent_index]
+                            ),
+                            "collision": bool(info["collision_mask"][agent_index]),
+                            "obstacle_collision": bool(
+                                info["obstacle_collision_mask"][agent_index]
+                            ),
+                            "inter_agent_collision": bool(
+                                info["inter_agent_collision_mask"][agent_index]
+                            ),
+                            "boundary_collision": bool(
+                                info["boundary_collision_mask"][agent_index]
+                            ),
+                            "boundary_filter_enabled": bool(
+                                boundary_filter_enabled
+                            ),
+                            "scheduler_diagnostics": dict(
+                                scheduler_diagnostics
+                            ),
+                        }
+                    )
             path_lengths += np.linalg.norm(positions - previous_positions, axis=1)
             total_reward += float(np.sum(rewards))
             ever_success |= np.asarray(info["success_mask"], dtype=bool)
@@ -965,6 +1218,7 @@ def run_waypoint_episode(
                 default=0,
             ),
             "coordination_deadlock_event_count": int(coordination_counters["deadlock_events"]),
+            "waypoint_boundary_filter_enabled": bool(boundary_filter_enabled),
         }
     finally:
         env.close()

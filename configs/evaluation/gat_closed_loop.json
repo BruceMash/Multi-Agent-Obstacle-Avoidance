@@ -1,0 +1,135 @@
+{
+  "schema_version": "gat_closed_loop_v1",
+  "output_root": "artifacts/gat_closed_loop",
+  "stage1_config": "configs/training/gat_stage1.json",
+  "gat_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "gat_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+  "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_execution_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "deterministic_inference": true,
+  "num_agents": 3,
+  "top_k": 10,
+  "H_preview": 4,
+  "max_steps": 220,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "handoff_threshold_m": 0.25,
+  "forcing_gate": "historical_vector_goal_eff_gate",
+  "execution_protocol": "one_shot_temporary_reference_handoff",
+  "boundary_mode": "boundary_free",
+  "formal_scenarios": [
+    "open",
+    "sparse_static",
+    "multi_agent"
+  ],
+  "interaction_rich_scenarios": [
+    "multi_agent"
+  ],
+  "smoke_seeds": [10, 11, 12],
+  "formal_seeds": [
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29
+  ],
+  "methods": [
+    "terminal",
+    "proposal",
+    "fp_shep",
+    "gat_stage1"
+  ],
+  "proposal_config": {
+    "top_k": 10
+  },
+  "fp_shep": {
+    "H_preview": 4,
+    "score_name": "fixed_physical_scale_three_feature_online_score",
+    "formula": "+progress +clearance -deviation",
+    "terminal_speed_used_for_ranking": false,
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    }
+  },
+  "graph": {
+    "horizon_steps": 4,
+    "d_align": 1.2,
+    "d_align_source": "configurable_implementation_parameter_not_paper_constant",
+    "candidate_order_preserved": true,
+    "null_class_index": 0,
+    "proposal_class_offset": 1
+  },
+  "selection_plan": {
+    "generated_once_per_scenario_seed": true,
+    "shared_by_proposal_fp_shep_gat": true,
+    "candidate_reordering_allowed": false,
+    "reconstruction_from_frozen_metadata_only": true,
+    "candidate_attribute_recomputation_allowed": false,
+    "preview_trajectory_recomputation_per_method": false,
+    "required_reconstruction_checks": [
+      "candidate_count",
+      "candidate_index_order",
+      "world_position",
+      "sector_id",
+      "coarse_score",
+      "graph_required_metadata",
+      "preview_trajectory"
+    ]
+  },
+  "smoke_gate": {
+    "expected_team_episode_count": 36,
+    "all_logits_finite": true,
+    "all_class_indices_valid": true,
+    "selected_proposal_in_actual_top_k": true,
+    "null_mapping_correct": true,
+    "candidate_bundle_hash_match": true,
+    "preview_bundle_hash_match": true,
+    "proposal_reconstruction_equivalent": true,
+    "handoff_count_per_agent_max": 1,
+    "replanning_count": 0,
+    "environment_exception_count": 0,
+    "nan_count": 0,
+    "checkpoint_match": true,
+    "graph_schema_match": true,
+    "smoke_reuse_requires_unchanged_execution_and_logging_hashes": true
+  },
+  "effect_classification": {
+    "scope": "rate_metrics_only",
+    "yes_minimum_improvement": 0.10,
+    "weak_strict_minimum_improvement": 0.0,
+    "success_improvement": "gat_rate_minus_baseline_rate",
+    "collision_improvement": "baseline_rate_minus_gat_rate",
+    "timeout_improvement": "baseline_rate_minus_gat_rate",
+    "continuous_metrics_use_pp_classification": false,
+    "thresholds_claim_statistical_significance": false
+  },
+  "statistics": {
+    "mcnemar_exact_unit": "scenario_seed_team_episode",
+    "individual_uav_is_independent_sample": false,
+    "continuous_summary": ["mean", "std", "median"],
+    "continuous_paired_subset": "semantically_comparable_episodes",
+    "failed_completion_time_fill_value": null
+  },
+  "stress_test_decision": {
+    "automatic_24_layout_run": false,
+    "recommend_yes_if_closed_loop_gain": ["YES", "WEAK"]
+  },
+  "strict_exclusions": {
+    "gat_training": false,
+    "sac_training": false,
+    "stage2_checkpoint": false,
+    "overlap_loss": false,
+    "completion_loss": false,
+    "candidate_reordering": false,
+    "proposal_modification": false,
+    "fp_shep_modification": false,
+    "graph_schema_modification": false,
+    "gat_architecture_modification": false,
+    "sac_dmp_modification": false,
+    "environment_modification": false,
+    "scenario_modification": false,
+    "automatic_stress_test": false
+  }
+}
