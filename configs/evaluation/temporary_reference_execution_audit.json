@@ -1,0 +1,116 @@
+{
+  "schema_version": "temporary_reference_execution_audit_v1",
+  "output_root": "artifacts/temporary_reference_execution_audit",
+  "checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "source_gat_closed_loop_dir": "artifacts/gat_closed_loop/20260816_161130",
+  "source_fp_shep_closed_loop_dir": "artifacts/pre_gat_220step_revalidation/20260815_151829",
+  "source_err_dir": "artifacts/gat_v1_event_triggered_reconstruction/20260817_065327",
+  "source_supervision_v2_dir": "artifacts/gat_supervision_v2/20260817_111210",
+  "prohibited_stress_dir": "artifacts/gat_24_layout_stress/20260816_181616",
+  "dataset_definition": "all actually selected non-null Stage-I GAT references in the formal GAT-V1 one-shot closed-loop artifact",
+  "formal_scenarios": [
+    "open",
+    "sparse_static",
+    "multi_agent"
+  ],
+  "formal_seeds": [
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29
+  ],
+  "num_agents": 3,
+  "max_steps": 220,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "deterministic_inference": true,
+  "observation_dimension": 122,
+  "action_dimension": 6,
+  "forcing_gate": "historical_vector_goal_eff_gate",
+  "dmp_phase_semantics": "legacy_classic",
+  "handoff_threshold_m": 0.25,
+  "capture_radius_diagnostic_m": [0.20, 0.25, 0.30, 0.40],
+  "contracts": {
+    "A": "ego direct terminal; non-ego GAT references and their phase-preserving handoffs remain frozen",
+    "B": "ego temporary reference only; stop the branch when ego reaches 0.25 m; non-ego background remains frozen",
+    "C": "ego temporary reference then immutable terminal via phase-preserving handoff; non-ego background remains frozen"
+  },
+  "reference_admissibility": {
+    "proposal_feasibility_source": "saved Proposal candidate metadata",
+    "top_k_survival_source": "saved K_t and selected_candidate_id",
+    "minimum_safety_margin_m": 0.0,
+    "minimum_distance_progress_m_exclusive": 0.0,
+    "accept_explicit_unbounded_clearance": true,
+    "require_finite_fp_shep_online_score": true,
+    "require_finite_applicable_fp_shep_descriptors": true,
+    "require_exact_candidate_reference_match_atol": 1e-10,
+    "outcome_fields_used": false
+  },
+  "stagnation_definition": {
+    "source": "Environment.multi_agent_dmp_env info.stagnation_mask, stagnation_counters, and stagnation_window_progress",
+    "window_and_thresholds": "unchanged environment configuration inherited from the frozen evaluation environment",
+    "post_outcome_redefinition": false
+  },
+  "classification": {
+    "gap_yes_minimum": 0.15,
+    "gap_weak_minimum": 0.05,
+    "direct_strong_minimum": 0.90,
+    "direct_moderate_minimum": 0.70,
+    "same_goal_failure_yes_minimum": 0.50,
+    "same_goal_failure_weak_minimum": 0.25,
+    "minimum_policy_execution_failure_share": 0.50,
+    "near_capture_yes_minimum_radius_gain": 0.15,
+    "near_capture_weak_minimum_radius_gain": 0.05,
+    "numeric_epsilon": 1e-09,
+    "orbit_cumulative_turning_angle_rad": 6.283185307179586
+  },
+  "single_agent_projection": {
+    "preserve": [
+      "ego position",
+      "ego velocity",
+      "ego DMP phase",
+      "terminal goal",
+      "temporary reference",
+      "static obstacles",
+      "dynamic obstacles",
+      "workspace and boundary semantics",
+      "SAC-DMP policy and dynamics"
+    ],
+    "remove": [
+      "other UAV dynamics",
+      "peer-sphere sensor returns",
+      "inter-agent collision termination"
+    ],
+    "validity": "exact deterministic projection at t=0 followed by exact A/B/C restoration within the projected environment"
+  },
+  "same_goal_subset": {
+    "source": "ERR saved replanning_events.csv",
+    "definition": "counts_as_reproposal=True and goal_changed=False",
+    "expected_event_count": 70
+  },
+  "external_context_only": {
+    "historical_single_terminal_episodes": 350,
+    "historical_single_terminal_successes": 341,
+    "historical_single_terminal_collisions": 9,
+    "historical_single_terminal_timeouts": 0,
+    "corridor_hold_episodes": 30,
+    "corridor_hold_successes": 10,
+    "corridor_hold_timeouts": 20,
+    "used_in_formal_contract_rates": false
+  },
+  "strict_exclusions": {
+    "sac_training": false,
+    "sac_fine_tuning": false,
+    "reward_modification": false,
+    "action_space_modification": false,
+    "observation_modification": false,
+    "dmp_parameter_change": false,
+    "forcing_gate_change": false,
+    "gat_modification": false,
+    "proposal_modification": false,
+    "fp_shep_modification": false,
+    "err_modification": false,
+    "handoff_threshold_tuning": false,
+    "scenario_tuning": false,
+    "stress_set_consumption": false
+  }
+}

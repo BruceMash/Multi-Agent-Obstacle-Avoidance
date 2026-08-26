@@ -15,9 +15,9 @@ import numpy as np
 
 from Controller.dmp_rl import compute_dmp_transition
 from Environment.frozen_sac_dmp_execution import (
-    HISTORICAL_CHECKPOINT_OBSERVATION_DIM,
-    build_historical_actor_observation,
-    predict_frozen_action,
+    actor_observation_dim,
+    build_actor_observation,
+    predict_policy_action,
 )
 from planning.temporary_reference_diagnosis import OBSERVATION_SLICES, angle_degrees
 
@@ -67,7 +67,7 @@ def checkpoint_observation_for_goal(
     agent_index: int,
     goal: np.ndarray,
 ) -> np.ndarray:
-    """Build the historical 122-D checkpoint input for an explicit goal.
+    """Build the active SAC-DMP checkpoint input for an explicit goal.
 
     This intentionally does not use ``env.get_observation()``: the current
     multi-agent environment exposes a 138-D native observation, whereas the
@@ -79,7 +79,7 @@ def checkpoint_observation_for_goal(
     if packet is None:
         raise RuntimeError("environment must be reset before building observations")
     dmp = env.dmps[agent_index]
-    observation = build_historical_actor_observation(
+    observation = build_actor_observation(
         velocity=env.dynamics[agent_index].v,
         active_goal=_vector3(goal, "goal"),
         position=env.dynamics[agent_index].p,
@@ -90,8 +90,9 @@ def checkpoint_observation_for_goal(
         k_alpha=dmp.config.K_alpha,
         k_beta=dmp.config.K_beta,
     )
-    if observation.shape != (HISTORICAL_CHECKPOINT_OBSERVATION_DIM,):
-        raise RuntimeError("checkpoint observation must remain 122-D")
+    expected_dim = actor_observation_dim(np.asarray(packet.current_scan).size)
+    if observation.shape != (expected_dim,):
+        raise RuntimeError("checkpoint observation does not match the active ray contract")
     return observation
 
 
@@ -121,6 +122,92 @@ def temporary_checkpoint_observations(
             for agent_index in range(int(env.num_agents))
         ]
     ).astype(np.float32)
+
+
+def task_aware_checkpoint_observations(
+    env: Any,
+    temporary_references: np.ndarray,
+    *,
+    switch_ages_s: np.ndarray,
+    previous_applied_accelerations: np.ndarray,
+    task_distance_scale_m: float = 100.0,
+    switch_age_scale_s: float = 5.0,
+    acceleration_scale_mps2: float = 4.0,
+) -> np.ndarray:
+    """Append the nine preregistered task/switch/control-history features.
+
+    The original sensor block and three DMP fields are left byte-for-byte in
+    their historical order.  The added context is:
+    final-goal direction (3), normalized final-goal distance (1), the existing
+    proposal safety quantity in that direction (1), normalized switch age (1),
+    and previous actually applied acceleration (3).
+    """
+
+    from Guidance.reference_point_proposal_demo import (  # local import avoids legacy import cycles
+        ProposalConfig,
+        compute_sector_safety_field,
+    )
+
+    references = np.asarray(temporary_references, dtype=float)
+    switch_ages = np.asarray(switch_ages_s, dtype=float)
+    previous_accelerations = np.asarray(previous_applied_accelerations, dtype=float)
+    expected_agents = int(env.num_agents)
+    if references.shape != (expected_agents, 3):
+        raise ValueError("temporary_references must have shape (num_agents, 3)")
+    if switch_ages.shape != (expected_agents,):
+        raise ValueError("switch_ages_s must have shape (num_agents,)")
+    if previous_accelerations.shape != (expected_agents, 3):
+        raise ValueError("previous_applied_accelerations must have shape (num_agents, 3)")
+    if min(task_distance_scale_m, switch_age_scale_s, acceleration_scale_mps2) <= 0.0:
+        raise ValueError("task/switch/acceleration normalization scales must be positive")
+
+    base = temporary_checkpoint_observations(env, references)
+    contexts: list[np.ndarray] = []
+    proposal_config = ProposalConfig()
+    goal_tolerance = float(env.env_config.goal_tolerance)
+    for agent_index in range(expected_agents):
+        position = np.asarray(env.dynamics[agent_index].p, dtype=float)
+        velocity = np.asarray(env.dynamics[agent_index].v, dtype=float)
+        terminal_goal = np.asarray(env.goals[agent_index], dtype=float)
+        delta = terminal_goal - position
+        distance = float(np.linalg.norm(delta))
+        task_direction = np.zeros(3, dtype=float) if distance < 1.0e-8 else delta / distance
+        safety = compute_sector_safety_field(
+            position,
+            terminal_goal,
+            velocity,
+            env.latest_sensor_packets[agent_index],
+            env.sensors[agent_index],
+            proposal_config,
+            goal_tolerance,
+        )
+        directions = np.asarray(env.sensors[agent_index].ray_directions, dtype=float).reshape(-1, 3)
+        direction_index = int(np.argmax(directions @ task_direction))
+        task_safety = float(safety.normalized_margin.reshape(-1)[direction_index])
+        contexts.append(
+            np.concatenate(
+                [
+                    task_direction.astype(np.float32),
+                    np.asarray(
+                        [
+                            np.clip(distance / task_distance_scale_m, 0.0, 1.0),
+                            task_safety,
+                            np.clip(switch_ages[agent_index] / switch_age_scale_s, 0.0, 1.0),
+                        ],
+                        dtype=np.float32,
+                    ),
+                    np.clip(
+                        previous_accelerations[agent_index] / acceleration_scale_mps2,
+                        -1.0,
+                        1.0,
+                    ).astype(np.float32),
+                ]
+            )
+        )
+    expanded = np.concatenate([base, np.stack(contexts).astype(np.float32)], axis=1)
+    if expanded.shape != (expected_agents, base.shape[1] + 9):
+        raise RuntimeError("task-aware checkpoint observation has an unexpected shape")
+    return expanded.astype(np.float32)
 
 
 def action_saturation_mask(
@@ -164,8 +251,8 @@ def actor_goal_shift_diagnostic(
     temporary_observation = checkpoint_observation_for_goal(
         env, agent_index, temporary_reference
     )
-    terminal_action = predict_frozen_action(policy, terminal_observation)
-    temporary_action = predict_frozen_action(policy, temporary_observation)
+    terminal_action = predict_policy_action(policy, terminal_observation)
+    temporary_action = predict_policy_action(policy, temporary_observation)
     observation_delta = temporary_observation.astype(float) - terminal_observation.astype(float)
     action_delta = temporary_action.astype(float) - terminal_action.astype(float)
     low = np.asarray(env.action_space.low[agent_index], dtype=float)

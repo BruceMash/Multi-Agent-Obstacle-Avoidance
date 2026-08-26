@@ -1,0 +1,50 @@
+{
+  "schema_version": "proposal_err_lite_development_v1",
+  "candidate_id": "C1_DWELL_PLUS_DIRECT_TERMINAL_GATE",
+  "output_root": "artifacts/proposal_err_lite_development",
+  "split": "development_only",
+  "methods": [
+    "proposal_one_shot",
+    "proposal_err_lite"
+  ],
+  "sources": {
+    "benchmark_config": "artifacts/final_four_stage_benchmark/20260818_202620/config.json",
+    "development_manifest": "artifacts/final_four_stage_benchmark/20260818_202620/development_scenario_manifest.json",
+    "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+    "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+    "base_execution_config": "configs/evaluation/historical_gate_abcd_rerun.json"
+  },
+  "execution": {
+    "num_agents": 3,
+    "top_k": 10,
+    "max_steps": 220,
+    "dt": 0.1,
+    "peer_radius": 0.3,
+    "handoff_threshold_m": 0.25,
+    "deterministic_policy": true,
+    "actor_observation_dim": 122,
+    "forcing_gate": "historical_vector_goal_eff_gate",
+    "boundary_mode": "boundary_free"
+  },
+  "proposal_config": {
+    "safe_radius": 1.15,
+    "obstacle_motion_allowance": 0.06,
+    "top_k": 10
+  },
+  "err_lite": {
+    "progress_window_steps": 30,
+    "minimum_progress_rate_mps": 0.02666666666666667,
+    "minimum_replan_interval_s": 1.0,
+    "terminal_retry_age_s": 5.0,
+    "reference_reached_distance_m": 0.25,
+    "goal_equality_tolerance_m": 1e-09,
+    "reference_reached_respects_dwell": true,
+    "direct_terminal_gate": "existing_proposal_sector_field_path_feasibility",
+    "safe_terminal_handoff_retries": false,
+    "emergency_trigger_enabled": false,
+    "safety_trigger_enabled": false,
+    "fp_shep_enabled": false,
+    "gat_enabled": false
+  },
+  "claim_boundary": "Development-only paired mechanism check; no formal 400-scenario result is read or modified."
+}

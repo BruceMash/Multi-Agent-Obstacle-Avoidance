@@ -1,0 +1,123 @@
+{
+  "schema_version": "gat_interaction_capacity_audit_v1",
+  "output_root": "artifacts/gat_interaction_capacity_audit",
+  "inference_device": "cpu",
+  "sources": {
+    "v1_training_dir": "artifacts/gat_stage1_training/20260815_230509",
+    "v1_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+    "v1_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+    "v1_closed_loop_dir": "artifacts/gat_stage1_v2_closed_loop/20260817_024059",
+    "supervision_v2_dir": "artifacts/gat_supervision_v2/20260817_111210",
+    "v2_training_dir": "artifacts/gat_stage1_v2_training/20260817_145155",
+    "temporary_reference_audit_dir": "artifacts/temporary_reference_execution_audit/20260817_075944",
+    "minimal_change_audit_dir": "artifacts/minimal_change_performance_audit/20260817_235130",
+    "stage1_config": "configs/training/gat_stage1.json"
+  },
+  "frozen_structure": {
+    "top_k": 10,
+    "H_preview": 4,
+    "node_types": ["null", "agent", "proposal", "align"],
+    "edge_types": ["agent__smooth__proposal", "align__spatiotemporal__proposal"],
+    "null_class_index": 0,
+    "architecture_change_allowed": false,
+    "graph_change_allowed": false
+  },
+  "data_scope": {
+    "allowed_seeds": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "probe_train_seeds": [0, 1, 2, 3, 4, 5, 6],
+    "probe_validation_seeds": [7],
+    "probe_test_seeds": [8, 9],
+    "formal_closed_loop_seeds_provenance_only": [30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49],
+    "formal_seeds_used_for_probe_or_feature_selection": false,
+    "layout_24_artifact_read_allowed": false
+  },
+  "interaction_subset": {
+    "primary_interaction_scenarios": ["multi_agent", "narrow_head_on"],
+    "primary_low_interaction_scenarios": ["open", "bounded"],
+    "secondary_descriptor": "any_spatiotemporal_edge_with_d_min_lt_d_safe_or_T_risk_gt_0",
+    "interaction_rich_rule": "primary_interaction_scenario OR secondary_descriptor",
+    "low_interaction_control_rule": "primary_low_interaction_scenario AND NOT secondary_descriptor",
+    "model_performance_used_for_subset_selection": false
+  },
+  "sensitivity": {
+    "ablations": ["FULL", "ZERO_ST_EDGE_ATTR", "ZERO_ALIGN_MESSAGE", "PERMUTE_ST_EDGE_ATTR", "CONTROL_PERMUTATION"],
+    "control_feature": "proposal.preview_terminal_speed_normalized",
+    "control_feature_column": 12,
+    "deterministic_permutation_seed": 20260818,
+    "usage_thresholds": {
+      "strong_top1_flip": 0.20,
+      "moderate_top1_flip": 0.10,
+      "weak_top1_flip": 0.03,
+      "minimum_excess_over_controls": 0.03
+    }
+  },
+  "feature_signal_thresholds": {
+    "strong_absolute_effect": 0.50,
+    "moderate_absolute_effect": 0.30,
+    "weak_absolute_effect": 0.10,
+    "minimum_branch_count": 30
+  },
+  "joint_instability_thresholds": {
+    "strong_top1_flip": 0.50,
+    "strong_pairwise_flip": 0.30,
+    "moderate_top1_flip": 0.25,
+    "moderate_pairwise_flip": 0.15,
+    "minimum_multi_agent_graphs_for_yes": 12
+  },
+  "matched_outcome_availability": {
+    "tier_and_utility_by_background": "AVAILABLE",
+    "team_completion_from_tier_5": "EXACT",
+    "any_collision_from_tier_0": "EXACT",
+    "reference_reach_by_alternative_background": "NOT_AVAILABLE",
+    "inter_agent_collision_by_alternative_background": "NOT_AVAILABLE",
+    "missing_outcomes_may_be_reconstructed": false
+  },
+  "pairwise_interaction_risk_rule": {
+    "risky_candidate": "T_risk_gt_0_OR_d_min_lt_graph_d_safe",
+    "model_performance_used_for_definition": false,
+    "posthoc_threshold_tuning": false
+  },
+  "diagnostic_probe": {
+    "status": "DIAGNOSTIC_ONLY",
+    "model": "LogisticRegression",
+    "C": 1.0,
+    "class_weight": "balanced",
+    "max_iter": 2000,
+    "solver": "lbfgs",
+    "decision_threshold": 0.5,
+    "hyperparameter_tuning": false,
+    "target": "inter_agent_collision_free",
+    "deployment_allowed": false,
+    "checkpoint_output_allowed": false,
+    "signal_yes_minimum_auroc": 0.65,
+    "signal_yes_minimum_gain_over_local": 0.05,
+    "signal_weak_minimum_auroc": 0.58,
+    "signal_weak_minimum_gain_over_local": 0.02
+  },
+  "supervision_signal_thresholds": {
+    "strong_minimum_abs_point_biserial": 0.30,
+    "strong_maximum_conflict_rate": 0.25,
+    "moderate_minimum_abs_point_biserial": 0.20,
+    "moderate_maximum_conflict_rate": 0.35,
+    "weak_minimum_abs_point_biserial": 0.05,
+    "weak_maximum_conflict_rate": 0.50
+  },
+  "strict_exclusions": {
+    "formal_gat_training": false,
+    "v1_or_v2_finetuning": false,
+    "loss_or_target_modification": false,
+    "new_checkpoint": false,
+    "new_graph_feature": false,
+    "new_node_or_edge": false,
+    "new_attention_layer": false,
+    "new_auxiliary_head": false,
+    "joint_decoder": false,
+    "conflict_repair": false,
+    "priority_masking": false,
+    "orca_rvo_cbf": false,
+    "closed_loop_benchmark": false,
+    "layout_24_use": false,
+    "formal_seed_training_or_tuning": false,
+    "automatic_redesign": false
+  }
+}

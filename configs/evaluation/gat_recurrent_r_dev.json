@@ -1,0 +1,33 @@
+{
+  "schema_version": "gat_recurrent_r_development_v1",
+  "artifact_root": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244",
+  "development_manifest": "07_development/GAT_RS_DEV_SCENE_MANIFEST.json",
+  "split_reconciliation": "02_recurrent_dataset/independent_split_reconciliation.json",
+  "base_method_config": "artifacts/semi_structured_long_range_main_benchmark/20260820_193228/10_final_freeze/method_configs/M8_RERR_FP_SHEP_SAC_DMP.json",
+  "gat_r_training_config": "configs/training/gat_recurrent_r.json",
+  "gat_r_checkpoint": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244/05_gat_r_training/checkpoints/best_validation.pt",
+  "gat_r_checkpoint_sha256_expected": "6afaa28da9ec3a19c3fbc37fc06a3764da783dd002f1bdf0e36073d1915f7c43",
+  "selectors": {
+    "fp_shep": {
+      "runtime_method": "fp_shep_rerr",
+      "display_name": "R-ERR + FP-SHEP + SAC-DMP",
+      "output_subdir": "07_development/FP_SHEP_RERR_DEV400"
+    },
+    "gat_r": {
+      "runtime_method": "gat_v1_rerr",
+      "display_name": "R-ERR + GAT-R + SAC-DMP",
+      "output_subdir": "07_development/GAT_R_RERR_DEV400"
+    }
+  },
+  "goal_distance_normalization": {
+    "gat_v1_scale_m": 9.0,
+    "gat_r_scale_m": 100.0,
+    "gat_r_source": "frozen pretraining feature-alignment audit",
+    "schema_changed": false
+  },
+  "expected_scenario_count": 400,
+  "shard_count": 4,
+  "formal_v1_used": false,
+  "holdout_opened": false,
+  "formal_v2_generated": false
+}

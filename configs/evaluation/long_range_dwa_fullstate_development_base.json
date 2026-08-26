@@ -1,0 +1,8 @@
+{
+  "base_config": "configs/evaluation/long_range_dwa_development_base.json",
+  "configuration_id": "UNSET_FULLSTATE",
+  "output_subdir": "09_baseline_tuning/UNSET_FULLSTATE",
+  "planner": {
+    "method": "dwa_fullstate"
+  }
+}

@@ -1,0 +1,115 @@
+{
+  "schema_version": "gat_v1_err_development_v1",
+  "output_root": "artifacts/gat_v1_event_triggered_reconstruction",
+  "stage1_config": "configs/training/gat_stage1.json",
+  "gat_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "gat_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+  "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_execution_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "methods": [
+    "gat_v1_one_shot",
+    "gat_v1_err"
+  ],
+  "development_scenarios": [
+    "open",
+    "sparse_static",
+    "multi_agent"
+  ],
+  "development_seeds": [50, 51, 52, 53, 54],
+  "sanity_seed": 50,
+  "deterministic_inference": true,
+  "num_agents": 3,
+  "top_k": 10,
+  "H_preview": 4,
+  "max_steps": 220,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "handoff_threshold_m": 0.25,
+  "forcing_gate": "historical_vector_goal_eff_gate",
+  "actor_observation_dim": 122,
+  "sac_dmp": "frozen_deterministic_checkpoint",
+  "phase": "legacy/classic",
+  "boundary_mode": "boundary_free",
+  "proposal_config": {
+    "top_k": 10
+  },
+  "fp_shep": {
+    "H_preview": 4,
+    "score_name": "fixed_physical_scale_three_feature_online_score",
+    "formula": "+progress +clearance -deviation",
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    }
+  },
+  "graph": {
+    "horizon_steps": 4,
+    "d_align": 1.2,
+    "d_align_source": "configurable_implementation_parameter_not_paper_constant",
+    "candidate_order_preserved": true,
+    "null_class_index": 0,
+    "proposal_class_offset": 1
+  },
+  "err": {
+    "W_p": 30,
+    "T_rep_s": 5.0,
+    "T_dwell_s": 1.0,
+    "p_min_mps": 0.02666666666666667,
+    "p_scale_mps": 0.8,
+    "h_rep_m": 0.35,
+    "h_scale_m": 2.5,
+    "h_emg_m": 0.0,
+    "d_hand_m": 0.25,
+    "goal_equality_tolerance_m": 1e-09
+  },
+  "err_parameter_provenance": {
+    "W_p": "existing stagnation_window_steps=30",
+    "T_rep_s": "frozen development reference-age scale, selected before outcomes from prior ~6.3 s completion scale",
+    "T_dwell_s": "positive anti-chattering dwell fixed before outcomes",
+    "p_min_mps": "existing 0.08 m stagnation progress threshold divided by W_p*dt=3.0 s",
+    "p_scale_mps": "ProposalConfig nominal_speed=0.8 m/s",
+    "h_rep_m": "ProposalConfig s_min=0.35 m",
+    "h_scale_m": "ProposalConfig h_max=2.5 m",
+    "h_emg_m": "Proposal feasible safety-margin boundary=0 m",
+    "d_hand_m": "existing one-shot reference handoff threshold=0.25 m"
+  },
+  "sanity_gate": {
+    "clearly_always_trigger_event_rate": 0.9,
+    "clearly_never_trigger_event_rate": 0.01,
+    "maximum_sanity_corrections": 1,
+    "parameter_search_allowed": false
+  },
+  "expected_core_hashes": {
+    "Guidance/reference_point_proposal_demo.py": "b0fb7197ecf2a0a2ad75e8f7c512791451e96c5302d289ace98ca2e4eb2bc881",
+    "planning/policy_preview.py": "074f39cd166c34ca026069dd372dccdc01f56800a6aec3dd0394444614e00991",
+    "planning/heterogeneous_candidate_graph.py": "31cd1a74ace7a88742825bc814f22917f2c1eac7db8a68d93f21f6419fcca066",
+    "planning/gat/candidate_selector.py": "f3acf70754fb9dbfdcdb44bbd9548092a25c979706608f86e6ac66661ac36257",
+    "planning/gat/edge_enhanced_gat.py": "016c88e39c7442fa126bab1ce2cc23d395162713a7e85263b3149f1aa82bc524",
+    "baseline/sac/net.py": "72e27601b0d74fb3271460eef82d5209351cdb62c1c864f3bf204995af141d7a",
+    "Controller/dmp_rl.py": "2905a1065a3eb37da3ce6a4a908c3686765faaed6bfb3b3565ebcc1d35e3bd7d",
+    "Environment/multi_agent_dmp_env.py": "6acc42bb2821cde5fb359fa97eac42a9cf5ab34fef96a81ac53a282fda6f680c",
+    "Environment/frozen_sac_dmp_execution.py": "84fdb0d2e403d11833e0c8a17ec99cd0bc91cebadd3ff0ba0ec75560266ca51d"
+  },
+  "strict_exclusions": {
+    "retraining": false,
+    "proposal_modification": false,
+    "fp_shep_modification": false,
+    "gat_architecture_modification": false,
+    "gat_checkpoint_modification": false,
+    "sac_dmp_modification": false,
+    "reward_modification": false,
+    "environment_modification": false,
+    "phase_reset": false,
+    "velocity_reset": false,
+    "lidar_history_reset": false,
+    "fixed_period_replanning": false,
+    "candidate_cache": false,
+    "pending_reference_state": false,
+    "hyperparameter_search": false,
+    "formal_evaluation_claim": false
+  }
+}

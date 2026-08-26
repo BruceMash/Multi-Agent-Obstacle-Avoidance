@@ -13,6 +13,7 @@ def propagate_point_mass(
     acceleration_max,
     velocity_min,
     velocity_max,
+    maximum_speed_norm=None,
 ):
     """按 ``PartialDynamic.step`` 的原始顺序执行无副作用质点传播。"""
     position = np.asarray(position, dtype=float)
@@ -32,13 +33,28 @@ def propagate_point_mass(
     applied_acceleration = np.clip(acceleration, acceleration_min, acceleration_max)
     next_velocity_unclipped = velocity + applied_acceleration * dt
     next_velocity = np.clip(next_velocity_unclipped, velocity_min, velocity_max)
-    next_position = position + velocity * dt + 0.5 * applied_acceleration * (dt ** 2)
+    speed_norm_clipped = False
+    if maximum_speed_norm is not None:
+        maximum_speed_norm = float(maximum_speed_norm)
+        if not np.isfinite(maximum_speed_norm) or maximum_speed_norm <= 0.0:
+            raise ValueError("maximum_speed_norm must be a positive finite scalar or None")
+        speed = float(np.linalg.norm(next_velocity))
+        if speed > maximum_speed_norm:
+            next_velocity = next_velocity * (maximum_speed_norm / speed)
+            speed_norm_clipped = True
+        # Under the optional operational norm cap, integrate the bounded
+        # velocity with the trapezoidal rule.  The legacy component-only path
+        # below remains bit-for-bit unchanged when the cap is disabled.
+        next_position = position + 0.5 * (velocity + next_velocity) * dt
+    else:
+        next_position = position + velocity * dt + 0.5 * applied_acceleration * (dt ** 2)
     return {
         "position": next_position,
         "velocity": next_velocity,
         "state": np.concatenate([next_position, next_velocity]),
         "applied_acceleration": applied_acceleration,
         "unclipped_next_velocity": next_velocity_unclipped,
+        "speed_norm_clipped": speed_norm_clipped,
     }
 
 '''
@@ -177,9 +193,14 @@ class PartialDynamic:
         self.accelerate_min = init_config['accelerate_clip'][0]
         self.accelerate_max = init_config['accelerate_clip'][1]
         self.dt = init_config.get('time_step', init_config.get('timestep'))
+        self.maximum_speed_norm = init_config.get('maximum_speed_norm')
 
         if self.dt is None:
             raise ValueError("init_config must contain 'time_step' or 'timestep'")
+        if self.maximum_speed_norm is not None:
+            self.maximum_speed_norm = float(self.maximum_speed_norm)
+            if not np.isfinite(self.maximum_speed_norm) or self.maximum_speed_norm <= 0.0:
+                raise ValueError("maximum_speed_norm must be a positive finite scalar or None")
 
         self.state = self._compose_state()
 
@@ -200,6 +221,7 @@ class PartialDynamic:
             acceleration_max=self.accelerate_max,
             velocity_min=self.velocity_min,
             velocity_max=self.velocity_max,
+            maximum_speed_norm=self.maximum_speed_norm,
         )
         self.v = transition["velocity"]
         self.p = transition["position"]
@@ -227,4 +249,3 @@ class PartialDynamic:
         return self.state.copy()
 
         
-

@@ -11,14 +11,16 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Iterable, Sequence
 
 import numpy as np
 
 from Controller.dmp_rl import DMPConfig
 from Environment.frozen_sac_dmp_execution import (
-    build_historical_actor_observation,
-    predict_frozen_action,
+    build_actor_observation,
+    predict_policy_action,
+    predict_frozen_actions,
     propagate_sac_dmp_action,
 )
 
@@ -273,6 +275,96 @@ def point_to_segment_distance(point: np.ndarray, start: np.ndarray, end: np.ndar
     return float(np.linalg.norm(point - projection))
 
 
+def _append_task_aware_context(
+    observation: np.ndarray,
+    *,
+    position: np.ndarray,
+    velocity: np.ndarray,
+    task_goal: np.ndarray,
+    current_scan: np.ndarray,
+    local_context: PreviewLocalContext,
+    switch_age_s: float,
+    previous_applied_acceleration: np.ndarray,
+    extension: dict[str, Any] | None,
+) -> np.ndarray:
+    """Append the same nine legal features used by task-aware SAC execution.
+
+    The helper is opt-in.  Existing FP-SHEP callers therefore retain their
+    byte-for-byte 522-D observation contract.  For an expanded SAC checkpoint,
+    the preview branch treats the candidate as newly accepted (age starts at
+    zero) and rolls previous acceleration forward from the cloned live state.
+    """
+
+    if extension is None:
+        return np.asarray(observation, dtype=np.float32)
+    from Guidance.reference_point_proposal_demo import (
+        ProposalConfig,
+        compute_sector_safety_field,
+    )
+
+    task_delta = np.asarray(task_goal, dtype=float) - np.asarray(position, dtype=float)
+    task_distance = float(np.linalg.norm(task_delta))
+    task_direction = (
+        np.zeros(3, dtype=float)
+        if task_distance < 1.0e-8
+        else task_delta / task_distance
+    )
+    scan = np.asarray(current_scan, dtype=np.float32)
+    sensor = SimpleNamespace(
+        ray_directions=np.asarray(local_context.ray_directions, dtype=float),
+        scan_shape=scan.shape,
+        azimuth_bins=int(scan.shape[0]),
+        elevation_bins=int(scan.shape[1]),
+        sensing_radius=float(local_context.sensing_radius),
+    )
+    packet = SimpleNamespace(current_scan=scan)
+    safety = compute_sector_safety_field(
+        position,
+        task_goal,
+        velocity,
+        packet,
+        sensor,
+        ProposalConfig(),
+        float(extension.get("goal_tolerance_m", 0.25)),
+    )
+    directions = np.asarray(local_context.ray_directions, dtype=float).reshape(-1, 3)
+    direction_index = int(np.argmax(directions @ task_direction))
+    task_safety = float(safety.normalized_margin.reshape(-1)[direction_index])
+    context = np.concatenate(
+        [
+            task_direction.astype(np.float32),
+            np.asarray(
+                [
+                    np.clip(
+                        task_distance
+                        / float(extension.get("task_distance_scale_m", 100.0)),
+                        0.0,
+                        1.0,
+                    ),
+                    task_safety,
+                    np.clip(
+                        float(switch_age_s)
+                        / float(extension.get("switch_age_scale_s", 5.0)),
+                        0.0,
+                        1.0,
+                    ),
+                ],
+                dtype=np.float32,
+            ),
+            np.clip(
+                np.asarray(previous_applied_acceleration, dtype=float)
+                / float(extension.get("acceleration_scale_mps2", 4.0)),
+                -1.0,
+                1.0,
+            ).astype(np.float32),
+        ]
+    )
+    expanded = np.concatenate([np.asarray(observation, dtype=np.float32), context])
+    if expanded.shape != (531,):
+        raise RuntimeError(f"task-aware preview observation must be 531-D, got {expanded.shape}")
+    return expanded.astype(np.float32)
+
+
 def preview_candidate(
     *,
     initial_state: PreviewInitialState,
@@ -283,6 +375,7 @@ def preview_candidate(
     dmp_config: DMPConfig,
     dynamics: Any,
     debug: bool = False,
+    observation_extension: dict[str, Any] | None = None,
 ) -> CandidatePreview:
     """Execute one independent H-step closed-loop candidate branch."""
     horizon = int(horizon)
@@ -294,6 +387,7 @@ def preview_candidate(
     phase = float(initial_state.phase)
     current_scan = local_context.current_scan.copy()
     previous_scan = local_context.previous_scan.copy()
+    previous_applied_acceleration = initial_state.acceleration.copy()
 
     positions = [position.copy()]
     velocities = [velocity.copy()]
@@ -319,7 +413,7 @@ def preview_candidate(
 
     for step in range(horizon):
         started = time.perf_counter_ns()
-        observation = build_historical_actor_observation(
+        observation = build_actor_observation(
             velocity=velocity,
             active_goal=candidate_goal,
             position=position,
@@ -330,10 +424,21 @@ def preview_candidate(
             k_alpha=dmp_config.K_alpha,
             k_beta=dmp_config.K_beta,
         )
+        observation = _append_task_aware_context(
+            observation,
+            position=position,
+            velocity=velocity,
+            task_goal=initial_state.task_goal,
+            current_scan=current_scan,
+            local_context=local_context,
+            switch_age_s=float(step) * float(dynamics.dt),
+            previous_applied_acceleration=previous_applied_acceleration,
+            extension=observation_extension,
+        )
         observation_ns += time.perf_counter_ns() - started
 
         started = time.perf_counter_ns()
-        action = predict_frozen_action(policy, observation)
+        action = predict_policy_action(policy, observation)
         policy_ns += time.perf_counter_ns() - started
 
         started = time.perf_counter_ns()
@@ -356,6 +461,7 @@ def preview_candidate(
         accelerations.append(transition.applied_acceleration.copy())
         commanded_accelerations.append(transition.commanded_acceleration.copy())
         controller_infos.append(transition.controller_info)
+        previous_applied_acceleration = transition.applied_acceleration.copy()
         position = transition.position.copy()
         velocity = transition.velocity.copy()
         phase = transition.phase
@@ -471,6 +577,7 @@ def preview_candidates(
     dmp_config: DMPConfig,
     dynamics: Any,
     debug_candidate_index: int | None = None,
+    observation_extension: dict[str, Any] | None = None,
 ) -> list[CandidatePreview]:
     """Preview K_t candidates; each call receives an independent history copy."""
     results: list[CandidatePreview] = []
@@ -486,6 +593,271 @@ def preview_candidates(
                 dmp_config=dmp_config,
                 dynamics=dynamics,
                 debug=debug_candidate_index == index,
+                observation_extension=observation_extension,
             )
+        )
+    return results
+
+
+def preview_candidates_batched(
+    *,
+    initial_state: PreviewInitialState,
+    local_context: PreviewLocalContext,
+    candidates: Sequence[Any],
+    policy: Any,
+    horizon: int,
+    dmp_config: DMPConfig,
+    dynamics: Any,
+    timing_sink: dict[str, float] | None = None,
+    observation_extension: dict[str, Any] | None = None,
+) -> list[CandidatePreview]:
+    """Preview one agent's candidate branches with one actor batch per step.
+
+    This is an exact-semantics engineering path: every branch keeps independent
+    position, velocity, phase, scan history, DMP transition, and clearance
+    history.  Only the frozen actor calls are grouped along the batch dimension.
+    Candidate order and the serial H-step dependency within each branch are
+    unchanged.
+    """
+
+    horizon = int(horizon)
+    if horizon <= 0:
+        raise ValueError("horizon must be positive")
+    goals = [
+        _vector3(getattr(candidate, "point", candidate), f"candidate_goal[{index}]")
+        for index, candidate in enumerate(candidates)
+    ]
+    branch_count = len(goals)
+    if branch_count == 0:
+        if timing_sink is not None:
+            timing_sink.update(
+                {
+                    "observation_ms": 0.0,
+                    "actor_forward_ms": 0.0,
+                    "dmp_rollout_ms": 0.0,
+                    "sensor_reconstruction_ms": 0.0,
+                    "geometry_metric_ms": 0.0,
+                    "total_ms": 0.0,
+                    "actor_batch_calls": 0.0,
+                    "preview_branch_count": 0.0,
+                }
+            )
+        return []
+
+    total_started = time.perf_counter_ns()
+    positions = [initial_state.position.copy() for _ in goals]
+    velocities = [initial_state.velocity.copy() for _ in goals]
+    phases = [float(initial_state.phase) for _ in goals]
+    current_scans = [local_context.current_scan.copy() for _ in goals]
+    previous_scans = [local_context.previous_scan.copy() for _ in goals]
+    previous_applied_accelerations = [initial_state.acceleration.copy() for _ in goals]
+
+    position_rows = [[value.copy()] for value in positions]
+    velocity_rows = [[value.copy()] for value in velocities]
+    phase_rows = [[value] for value in phases]
+    acceleration_rows: list[list[np.ndarray]] = [[] for _ in goals]
+    commanded_rows: list[list[np.ndarray]] = [[] for _ in goals]
+    observation_rows: list[list[np.ndarray]] = [[] for _ in goals]
+    action_rows: list[list[np.ndarray]] = [[] for _ in goals]
+    current_scan_rows: list[list[np.ndarray]] = [[] for _ in goals]
+    previous_scan_rows: list[list[np.ndarray]] = [[] for _ in goals]
+    clearance_rows: list[list[float]] = [[] for _ in goals]
+    controller_rows: list[list[dict[str, Any]]] = [[] for _ in goals]
+
+    observation_ns = actor_ns = transition_ns = sensor_ns = 0
+    for _ in range(horizon):
+        started = time.perf_counter_ns()
+        observations = np.stack(
+            [
+                _append_task_aware_context(
+                    build_actor_observation(
+                    velocity=velocities[index],
+                    active_goal=goals[index],
+                    position=positions[index],
+                    current_scan=current_scans[index],
+                    previous_scan=previous_scans[index],
+                    goal_distance_clip=local_context.goal_distance_clip,
+                    phase=phases[index],
+                    k_alpha=dmp_config.K_alpha,
+                    k_beta=dmp_config.K_beta,
+                    ),
+                    position=positions[index],
+                    velocity=velocities[index],
+                    task_goal=initial_state.task_goal,
+                    current_scan=current_scans[index],
+                    local_context=local_context,
+                    switch_age_s=float(len(acceleration_rows[index])) * float(dynamics.dt),
+                    previous_applied_acceleration=previous_applied_accelerations[index],
+                    extension=observation_extension,
+                )
+                for index in range(branch_count)
+            ]
+        ).astype(np.float32, copy=False)
+        observation_ns += time.perf_counter_ns() - started
+
+        started = time.perf_counter_ns()
+        actions = predict_frozen_actions(
+            policy,
+            observations,
+            expected_shape=(branch_count, 6),
+        )
+        actor_ns += time.perf_counter_ns() - started
+
+        for index in range(branch_count):
+            started = time.perf_counter_ns()
+            transition = propagate_sac_dmp_action(
+                position=positions[index],
+                velocity=velocities[index],
+                phase=phases[index],
+                active_goal=goals[index],
+                terminal_goal=initial_state.task_goal,
+                action=actions[index],
+                dmp_config=dmp_config,
+                dynamics=dynamics,
+            )
+            transition_ns += time.perf_counter_ns() - started
+
+            observation_rows[index].append(observations[index].copy())
+            action_rows[index].append(np.asarray(actions[index], dtype=np.float32).copy())
+            current_scan_rows[index].append(current_scans[index].copy())
+            previous_scan_rows[index].append(previous_scans[index].copy())
+            acceleration_rows[index].append(transition.applied_acceleration.copy())
+            commanded_rows[index].append(transition.commanded_acceleration.copy())
+            controller_rows[index].append(transition.controller_info)
+            previous_applied_accelerations[index] = transition.applied_acceleration.copy()
+            positions[index] = transition.position.copy()
+            velocities[index] = transition.velocity.copy()
+            phases[index] = float(transition.phase)
+            position_rows[index].append(positions[index].copy())
+            velocity_rows[index].append(velocities[index].copy())
+            phase_rows[index].append(phases[index])
+            clearance_rows[index].append(_known_clearance(positions[index], local_context))
+
+            started = time.perf_counter_ns()
+            next_scan = _reconstruct_scan_from_frozen_surfaces(
+                positions[index], local_context
+            )
+            sensor_ns += time.perf_counter_ns() - started
+            previous_scans[index], current_scans[index] = (
+                current_scans[index].copy(),
+                next_scan,
+            )
+
+    geometry_started = time.perf_counter_ns()
+    results: list[CandidatePreview] = []
+    for index, goal in enumerate(goals):
+        trajectory = PreviewTrajectory(
+            candidate_goal=goal,
+            positions=np.stack(position_rows[index]),
+            velocities=np.stack(velocity_rows[index]),
+            accelerations=np.stack(acceleration_rows[index]),
+            commanded_accelerations=np.stack(commanded_rows[index]),
+            phases=np.asarray(phase_rows[index], dtype=float),
+            observations=np.stack(observation_rows[index]).astype(np.float32),
+            actions=np.stack(action_rows[index]).astype(np.float32),
+            current_scans=np.stack(current_scan_rows[index]).astype(np.float32),
+            previous_scans=np.stack(previous_scan_rows[index]).astype(np.float32),
+            clearances=np.asarray(clearance_rows[index], dtype=float),
+            controller_infos=tuple(controller_rows[index]),
+        )
+        initial_task_distance = float(
+            np.linalg.norm(initial_state.task_goal - initial_state.position)
+        )
+        terminal_task_distance = float(
+            np.linalg.norm(initial_state.task_goal - trajectory.positions[-1])
+        )
+        task_progress = initial_task_distance - terminal_task_distance
+        min_clearance = float(np.min(trajectory.clearances))
+        deviations = [
+            point_to_segment_distance(point, initial_state.position, goal)
+            for point in trajectory.positions[1:]
+        ]
+        max_deviation = float(max(deviations))
+        terminal_speed = float(np.linalg.norm(trajectory.velocities[-1]))
+        clearance_finite = bool(np.isfinite(min_clearance))
+        feature_valid_mask = {
+            "task_progress": bool(np.isfinite(task_progress)),
+            "min_clearance": clearance_finite,
+            "max_execution_deviation": bool(np.isfinite(max_deviation)),
+            "terminal_speed": bool(np.isfinite(terminal_speed)),
+        }
+        per_branch = 1.0 / float(branch_count)
+        performance = PreviewPerformance(
+            observation_ms=observation_ns / 1.0e6 * per_branch,
+            policy_ms=actor_ns / 1.0e6 * per_branch,
+            transition_ms=transition_ns / 1.0e6 * per_branch,
+            sensor_reconstruction_ms=sensor_ns / 1.0e6 * per_branch,
+            total_ms=0.0,
+            policy_calls=horizon,
+        )
+        metadata = {
+            "clearance_source": local_context.clearance_source,
+            "clearance_is_approximate": local_context.clearance_is_approximate,
+            "observation_model": local_context.observation_model,
+            "lidar_hit_source_available": local_context.lidar_hit_source_available,
+            "dynamic_entity_extrapolation": local_context.dynamic_entity_extrapolation,
+            "forcing_gate_distance_source": "terminal_task_goal",
+            "boundary_constraint_added": False,
+            "history_is_preview_local": True,
+            "requested_horizon_steps": horizon,
+            "effective_horizon_steps": trajectory.horizon,
+            "effective_horizon_ratio": float(trajectory.horizon / horizon),
+            "preview_completed": True,
+            "termination_reason": PREVIEW_TERMINATION_COMPLETED,
+            "feature_valid_mask": feature_valid_mask,
+            "feature_full_horizon_mask": feature_valid_mask.copy(),
+            "obstacle_clearance_source": local_context.clearance_source,
+            "obstacle_clearance_is_approximate": local_context.clearance_is_approximate,
+            "boundary_clearance_source": BOUNDARY_CLEARANCE_SOURCE,
+            "boundary_clearance_is_approximate": True,
+            "clearance_finite_mask": clearance_finite,
+            "open_space_flag": bool(local_context.visible_surface_points.shape[0] == 0),
+            "actor_batching": "candidate_dimension_only",
+        }
+        results.append(
+            CandidatePreview(
+                trajectory=trajectory,
+                task_progress=task_progress,
+                min_clearance=min_clearance,
+                max_execution_deviation=max_deviation,
+                terminal_speed=terminal_speed,
+                performance=performance,
+                metadata=metadata,
+            )
+        )
+    geometry_ns = time.perf_counter_ns() - geometry_started
+    total_ns = time.perf_counter_ns() - total_started
+    per_branch_total_ms = total_ns / 1.0e6 / float(branch_count)
+    results = [
+        CandidatePreview(
+            trajectory=result.trajectory,
+            task_progress=result.task_progress,
+            min_clearance=result.min_clearance,
+            max_execution_deviation=result.max_execution_deviation,
+            terminal_speed=result.terminal_speed,
+            performance=PreviewPerformance(
+                observation_ms=result.performance.observation_ms,
+                policy_ms=result.performance.policy_ms,
+                transition_ms=result.performance.transition_ms,
+                sensor_reconstruction_ms=result.performance.sensor_reconstruction_ms,
+                total_ms=per_branch_total_ms,
+                policy_calls=horizon,
+            ),
+            metadata=result.metadata,
+        )
+        for result in results
+    ]
+    if timing_sink is not None:
+        timing_sink.update(
+            {
+                "observation_ms": observation_ns / 1.0e6,
+                "actor_forward_ms": actor_ns / 1.0e6,
+                "dmp_rollout_ms": transition_ns / 1.0e6,
+                "sensor_reconstruction_ms": sensor_ns / 1.0e6,
+                "geometry_metric_ms": geometry_ns / 1.0e6,
+                "total_ms": total_ns / 1.0e6,
+                "actor_batch_calls": float(horizon),
+                "preview_branch_count": float(branch_count),
+            }
         )
     return results

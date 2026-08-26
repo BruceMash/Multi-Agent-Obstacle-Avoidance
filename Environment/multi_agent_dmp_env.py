@@ -54,6 +54,12 @@ class MultiAgentEnvConfig(EnvConfig):
     # None means observing all other agents; a non-negative integer limits the
     # number of nearest allies kept in the explicit ally observation block.
     nearest_agent_observation_count: int | None = None
+    # Historical experiments used exact all-peer state at upper events.  The
+    # long-range paper benchmark instead selects ``local_anonymous_ally_block``:
+    # only finite-range current relative state already encoded in the native
+    # ally block may reach GAT, and peer IDs become event-local slot indices.
+    peer_state_observation_mode: str = "legacy_global_exact"
+    peer_state_observation_range: float | None = None
     acceleration_penalty_weight: float = 0.01
     acceleration_clip_penalty_weight: float = 0.05
     randomize_start_goal: bool = True
@@ -100,6 +106,9 @@ class MultiAgentEnvConfig(EnvConfig):
         self.stagnation_penalty_max = float(self.stagnation_penalty_max)
         if self.nearest_agent_observation_count is not None:
             self.nearest_agent_observation_count = int(self.nearest_agent_observation_count)
+        self.peer_state_observation_mode = str(self.peer_state_observation_mode)
+        if self.peer_state_observation_range is not None:
+            self.peer_state_observation_range = float(self.peer_state_observation_range)
         self.acceleration_penalty_weight = float(self.acceleration_penalty_weight)
         self.acceleration_clip_penalty_weight = float(self.acceleration_clip_penalty_weight)
         self.randomize_start_goal = bool(self.randomize_start_goal)
@@ -143,6 +152,16 @@ class MultiAgentEnvConfig(EnvConfig):
             and self.nearest_agent_observation_count < 0
         ):
             raise ValueError("nearest_agent_observation_count must be non-negative")
+        peer_modes = {"legacy_global_exact", "local_anonymous_ally_block"}
+        if self.peer_state_observation_mode not in peer_modes:
+            raise ValueError(f"peer_state_observation_mode must be one of {sorted(peer_modes)}")
+        if self.peer_state_observation_mode == "local_anonymous_ally_block":
+            if self.peer_state_observation_range is None or self.peer_state_observation_range <= 0.0:
+                raise ValueError("local anonymous peer observation requires a positive finite range")
+            if self.peer_state_observation_range > self.inter_agent_influence_distance + 1.0e-12:
+                raise ValueError(
+                    "peer_state_observation_range cannot exceed the native ally-block position scale"
+                )
         if self.acceleration_penalty_weight < 0.0:
             raise ValueError("acceleration_penalty_weight must be non-negative")
         if self.acceleration_clip_penalty_weight < 0.0:
@@ -163,12 +182,13 @@ class MultiAgentEnvConfig(EnvConfig):
 
 @dataclass(frozen=True)
 class ObservableNeighborState:
-    """Physical neighbor state exposed by the existing ally observation rule.
+    """Neighbor state exposed to an event-time upper graph.
 
-    The flat observation normalizes and clips these quantities and omits the
-    agent identifier.  This companion read-only interface preserves the same
-    nearest-neighbor membership and ordering while exposing the physical state
-    needed by the graph builder.  It is not part of the SAC observation.
+    Legacy configurations reproduce exact all-peer event-time behavior.  The
+    long-range local mode reconstructs these values from the normalized and
+    clipped ally block, limits membership by range, and replaces simulator
+    identity with an event-local slot.  This interface is not consumed by the
+    historical 122-D SAC actor.
     """
 
     agent_id: int
@@ -355,6 +375,9 @@ class MultiAgentDMPEnv(gym.Env):
         self.steps = 0
         self.action_guidance_step = 0
         self.render_mode = render_mode
+        # Optional execution-only hook.  The default remains None so every
+        # historical caller retains the exact original SAC-DMP transition.
+        self.execution_acceleration_limiter = None
 
         # 缓存最新的传感器数据、控制器信息、观测值、碰撞信息等，供观察构建、奖励计算和信息输出使用
         self.latest_sensor_packets = [None for _ in range(self.num_agents)]
@@ -797,63 +820,108 @@ class MultiAgentDMPEnv(gym.Env):
         if nearest_count <= 0:
             return ()
         position = self.dynamics[agent_index].p
-        entries: list[tuple[float, int]] = []
+        velocity = self.dynamics[agent_index].v
+        local_mode = self.env_config.peer_state_observation_mode == "local_anonymous_ally_block"
+        observation_range = self.env_config.peer_state_observation_range
+        entries: list[tuple[tuple[float, ...], int]] = []
         for other_index in range(self.num_agents):
             if other_index == agent_index:
                 continue
-            distance = float(
-                np.linalg.norm(self.dynamics[other_index].p - position)
-            )
-            entries.append((distance, other_index))
-        entries.sort(key=lambda item: (item[0], item[1]))
+            relative_position = np.asarray(self.dynamics[other_index].p - position, dtype=float)
+            relative_velocity = np.asarray(self.dynamics[other_index].v - velocity, dtype=float)
+            distance = float(np.linalg.norm(relative_position))
+            if local_mode and distance > float(observation_range) + 1.0e-12:
+                continue
+            if local_mode:
+                # Geometry, not simulator identity, resolves event-local slots.
+                sort_key = (
+                    distance,
+                    *relative_position.tolist(),
+                    *relative_velocity.tolist(),
+                    float(other_index),  # only resolves physically identical records
+                )
+            else:
+                sort_key = (distance, float(other_index))
+            entries.append((sort_key, other_index))
+        entries.sort(key=lambda item: item[0])
         return tuple(index for _, index in entries[:nearest_count])
+
+    def _encoded_inter_agent_pair(self, agent_index: int, other_index: int) -> np.ndarray:
+        """Encode one current ally using exactly the native flat-block contract."""
+
+        position = self.dynamics[agent_index].p
+        velocity = self.dynamics[agent_index].v
+        other_position = self.dynamics[other_index].p
+        other_velocity = self.dynamics[other_index].v
+        influence_distance = max(float(self.env_config.inter_agent_influence_distance), 1e-5)
+        velocity_scale = max(
+            float(np.max(np.abs(np.asarray(self.dynamics[agent_index].velocity_max, dtype=float)))),
+            1e-5,
+        )
+        relative_position = (other_position - position) / influence_distance
+        relative_velocity = (other_velocity - velocity) / velocity_scale
+        distance = np.linalg.norm(other_position - position) / influence_distance
+        return np.concatenate(
+            [
+                np.clip(relative_position, -1.0, 1.0),
+                np.clip(relative_velocity, -1.0, 1.0),
+                np.array([np.clip(distance, 0.0, 1.0)], dtype=float),
+            ],
+            axis=0,
+        ).astype(np.float32)
 
     def observable_neighbor_states(
         self,
         agent_index: int,
     ) -> tuple[ObservableNeighborState, ...]:
-        """Expose physical states for the current observable neighbor set.
+        """Expose the current event-time observable neighbor set.
 
-        This accessor neither widens the neighbor set nor reads future state.
-        Its membership is shared with ``_compose_inter_agent_observation``.
+        The local mode neither widens the encoded ally set nor reads future,
+        range-external, or stable-identity state. Its membership and numerical
+        values are shared with ``_compose_inter_agent_observation``.
         """
 
-        return tuple(
-            ObservableNeighborState(
-                agent_id=other_index,
-                position=self.dynamics[other_index].p,
-                velocity=self.dynamics[other_index].v,
+        indices = self._observable_neighbor_indices(agent_index)
+        if self.env_config.peer_state_observation_mode == "legacy_global_exact":
+            return tuple(
+                ObservableNeighborState(
+                    agent_id=other_index,
+                    position=self.dynamics[other_index].p,
+                    velocity=self.dynamics[other_index].v,
+                )
+                for other_index in indices
             )
-            for other_index in self._observable_neighbor_indices(agent_index)
+
+        ego_position = np.asarray(self.dynamics[agent_index].p, dtype=float)
+        ego_velocity = np.asarray(self.dynamics[agent_index].v, dtype=float)
+        position_scale = float(self.env_config.inter_agent_influence_distance)
+        velocity_scale = max(
+            float(np.max(np.abs(np.asarray(self.dynamics[agent_index].velocity_max, dtype=float)))),
+            1e-5,
         )
+        rows = []
+        for slot_id, other_index in enumerate(indices):
+            encoded = self._encoded_inter_agent_pair(agent_index, other_index).astype(float)
+            rows.append(
+                ObservableNeighborState(
+                    agent_id=slot_id,
+                    position=ego_position + encoded[:3] * position_scale,
+                    velocity=ego_velocity + encoded[3:6] * velocity_scale,
+                )
+            )
+        return tuple(rows)
 
     def _compose_inter_agent_observation(self, agent_index: int) -> np.ndarray: # 组合智能体之间的观测
         nearest_count = self.nearest_agent_observation_count
         if nearest_count <= 0:
             return np.zeros(0, dtype=np.float32)
 
-        position = self.dynamics[agent_index].p
-        velocity = self.dynamics[agent_index].v
-        influence_distance = max(float(self.env_config.inter_agent_influence_distance), 1e-5)
-        velocity_scale = max(float(np.max(np.abs(np.asarray(self.dynamics[agent_index].velocity_max, dtype=float)))), 1e-5)
-
-        features = []
-        for other_index in self._observable_neighbor_indices(agent_index):
-            other_position = self.dynamics[other_index].p
-            other_velocity = self.dynamics[other_index].v
-            relative_position = (other_position - position) / influence_distance
-            relative_velocity = (other_velocity - velocity) / velocity_scale
-            distance = np.linalg.norm(other_position - position) / influence_distance
-            features.append(
-                np.concatenate(
-                    [
-                        np.clip(relative_position, -1.0, 1.0),
-                        np.clip(relative_velocity, -1.0, 1.0),
-                        np.array([np.clip(distance, 0.0, 1.0)], dtype=float),
-                    ],
-                    axis=0,
-                )
-            )
+        features = [
+            self._encoded_inter_agent_pair(agent_index, other_index)
+            for other_index in self._observable_neighbor_indices(agent_index)
+        ]
+        while len(features) < nearest_count:
+            features.append(np.zeros(self.single_pair_observation_dim, dtype=np.float32))
         return np.concatenate(features, axis=0).astype(np.float32)
 
     def get_observation(self) -> np.ndarray:    # 获取观测
@@ -1556,6 +1624,8 @@ class MultiAgentDMPEnv(gym.Env):
                 action=action[agent_index],
                 dmp_config=self.dmps[agent_index].config,
                 dynamics=self.dynamics[agent_index],
+                acceleration_limiter=self.execution_acceleration_limiter,
+                acceleration_limiter_agent_id=agent_index,
             )
             acceleration = transition.commanded_acceleration
             applied_acceleration = transition.applied_acceleration

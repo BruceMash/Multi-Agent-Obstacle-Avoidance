@@ -95,6 +95,10 @@ class ProposalConfig:
     w_v: float = 0.20
     w_l: float = 0.85
     nominal_speed: float = 0.80
+    distance_mode: str = "original"
+    adaptive_r_min: float = 0.35
+    adaptive_r_max: float = 4.50
+    goal_alignment_gamma: float = 2.0
 
     def __post_init__(self) -> None:
         positive_fields = (
@@ -107,6 +111,9 @@ class ProposalConfig:
             self.s_max,
             self.h_max,
             self.nominal_speed,
+            self.adaptive_r_min,
+            self.adaptive_r_max,
+            self.goal_alignment_gamma,
             self.terminal_radius,
             self.terminal_step_ratio,
             self.terminal_min_step,
@@ -129,6 +136,12 @@ class ProposalConfig:
             raise ValueError("obstacle_motion_allowance must be non-negative")
         if self.top_k <= 0:
             raise ValueError("top_k must be positive")
+        if self.distance_mode not in {"original", "goal_aligned_adaptive"}:
+            raise ValueError("distance_mode must be original or goal_aligned_adaptive")
+        if self.adaptive_r_min > self.adaptive_r_max:
+            raise ValueError("adaptive_r_min must not exceed adaptive_r_max")
+        if self.adaptive_r_min < self.s_min:
+            raise ValueError("adaptive_r_min must respect the original minimum step")
 
 
 @dataclass(frozen=True)
@@ -364,6 +377,8 @@ def propose_reference_points(
     sensor: Any,
     config: ProposalConfig,
     goal_tolerance: float,
+    *,
+    timing_sink: dict[str, float] | None = None,
 ) -> list[Proposal]:
     """
     使用当前训练传感器的射线方向与 current_scan 生成所有可行候选点。
@@ -379,6 +394,8 @@ def propose_reference_points(
     goal_vector = goal - position
     goal_distance = float(np.linalg.norm(goal_vector))
     if goal_distance <= float(goal_tolerance):
+        if timing_sink is not None:
+            timing_sink["coarse_ranking_ms"] = 0.0
         return []
 
     goal_direction = normalize(goal_vector)
@@ -397,7 +414,12 @@ def propose_reference_points(
     proposals: list[Proposal] = []
     terminal_mode = goal_distance <= config.terminal_radius
     minimum_step = config.terminal_min_step if terminal_mode else config.s_min
-    maximum_step = min(config.s_max, goal_distance)
+    distance_limit = (
+        config.adaptive_r_max
+        if config.distance_mode == "goal_aligned_adaptive" and not terminal_mode
+        else config.s_max
+    )
+    maximum_step = min(distance_limit, goal_distance)
     if terminal_mode:
         maximum_step = min(
             maximum_step,
@@ -422,9 +444,25 @@ def propose_reference_points(
             if safety_margin <= 0.0:
                 continue
 
-            desired_step = float(
-                np.clip(config.eta * safety_margin, minimum_step, maximum_step)
-            )
+            if config.distance_mode == "goal_aligned_adaptive" and not terminal_mode:
+                q_safe = float(
+                    sector_safety.normalized_margin[azimuth_index, elevation_index]
+                )
+                q_goal = 0.5 * (1.0 + float(np.clip(alignment, -1.0, 1.0)))
+                desired_step = float(
+                    np.clip(
+                        config.adaptive_r_min
+                        + (config.adaptive_r_max - config.adaptive_r_min)
+                        * q_safe
+                        * q_goal ** config.goal_alignment_gamma,
+                        minimum_step,
+                        maximum_step,
+                    )
+                )
+            else:
+                desired_step = float(
+                    np.clip(config.eta * safety_margin, minimum_step, maximum_step)
+                )
             step = min(
                 desired_step,
                 obstacle_distance - sector_safety.effective_safe_radius,
@@ -439,7 +477,7 @@ def propose_reference_points(
             normalized_margin = float(
                 sector_safety.normalized_margin[azimuth_index, elevation_index]
             )
-            usable_length = float(np.clip(step / config.s_max, 0.0, 1.0))
+            usable_length = float(np.clip(step / distance_limit, 0.0, 1.0))
             candidate_point = position + step * direction
             candidate_goal_distance = float(np.linalg.norm(goal - candidate_point))
             distance_progress = goal_distance - candidate_goal_distance
@@ -479,6 +517,7 @@ def propose_reference_points(
                 )
             )
 
+    coarse_started = time.perf_counter_ns()
     positive_proposals = [
         proposal
         for proposal in proposals
@@ -487,6 +526,10 @@ def propose_reference_points(
     if positive_proposals:
         proposals = positive_proposals
     proposals.sort(key=lambda proposal: proposal.score, reverse=True)
+    if timing_sink is not None:
+        timing_sink["coarse_ranking_ms"] = (
+            time.perf_counter_ns() - coarse_started
+        ) / 1.0e6
     return proposals
 
 

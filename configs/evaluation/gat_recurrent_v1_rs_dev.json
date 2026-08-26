@@ -1,0 +1,33 @@
+{
+  "schema_version": "gat_recurrent_v1_rs_development_v1",
+  "artifact_root": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244",
+  "development_manifest": "07_development/GAT_RS_DEV_SCENE_MANIFEST.json",
+  "base_method_config": "artifacts/semi_structured_long_range_main_benchmark/20260820_193228/10_final_freeze/method_configs/M9_Proposed_RERR_GAT_SAC_DMP.json",
+  "selectors": {
+    "gat_v1": {
+      "display_name": "R-ERR + GAT-V1 + SAC-DMP",
+      "stage1_config": "configs/training/gat_stage1.json",
+      "checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+      "checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+      "goal_distance_scale_m": 9.0,
+      "output_subdir": "07_development/GAT_V1_RERR_DEV400"
+    },
+    "gat_rs": {
+      "display_name": "R-ERR + GAT-RS + SAC-DMP",
+      "stage1_config": "configs/training/gat_recurrent_rs.json",
+      "checkpoint": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244/06_gat_rs_training/checkpoints/best_validation.pt",
+      "checkpoint_sha256_expected": "c2c35a20a6113489f86a520873bf237f407f5c7e5a6cb268bc8ea6519946ef25",
+      "goal_distance_scale_m": 100.0,
+      "output_subdir": "07_development/GAT_RS_RERR_DEV400"
+    }
+  },
+  "completed_arms": {
+    "fp_shep": "07_development/FP_SHEP_RERR_DEV400/development_reconciliation.json",
+    "gat_r": "07_development/GAT_R_RERR_DEV400/development_reconciliation.json"
+  },
+  "expected_scenario_count": 400,
+  "shard_count": 4,
+  "formal_v1_used": false,
+  "holdout_opened": false,
+  "formal_v2_generated": false
+}

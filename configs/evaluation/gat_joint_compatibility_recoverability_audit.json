@@ -1,0 +1,171 @@
+{
+  "schema_version": "gat_joint_compatibility_recoverability_audit_v1",
+  "output_root": "artifacts/gat_joint_compatibility_recoverability_audit",
+  "sources": {
+    "formal_v1_ia_dir": "artifacts/gat_v1_ia_formal_closed_loop/20260818_161930",
+    "formal_episode_results": "artifacts/gat_v1_ia_formal_closed_loop/20260818_161930/episode_results.csv",
+    "formal_agent_results": "artifacts/gat_v1_ia_formal_closed_loop/20260818_161930/agent_results.csv",
+    "formal_config": "artifacts/gat_v1_ia_formal_closed_loop/20260818_161930/config.json",
+    "v1_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+    "v1_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+    "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+    "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+    "stage1_config": "configs/training/gat_stage1.json",
+    "interaction_capacity_audit_dir": "artifacts/gat_interaction_capacity_audit/20260818_012704",
+    "minimal_change_audit_dir": "artifacts/minimal_change_performance_audit/20260817_235130",
+    "temporary_reference_audit_dir": "artifacts/temporary_reference_execution_audit/20260817_075944"
+  },
+  "formal_scope": {
+    "method": "gat_v1",
+    "scenarios": [
+      "open",
+      "sparse_static",
+      "multi_agent"
+    ],
+    "seeds": [
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79
+    ],
+    "expected_episode_count": 60,
+    "expected_agent_count": 180,
+    "expected_success_count": 45,
+    "expected_failure_count": 15,
+    "expected_inter_agent_collision_count": 9,
+    "expected_obstacle_collision_count": 1,
+    "expected_timeout_count": 5,
+    "seed_status": "DIAGNOSTIC_ONLY_AFTER_OBSERVATION"
+  },
+  "frozen_semantics": {
+    "num_agents": 3,
+    "top_k": 10,
+    "null_class_index": 0,
+    "proposal_class_offset": 1,
+    "H_preview": 4,
+    "dt": 0.1,
+    "d_safe": 0.6,
+    "forcing_gate": "historical_vector_goal_eff_gate",
+    "null_active_goal": "terminal_goal",
+    "pair_compatible_rule": "d_min_ge_d_safe_AND_T_risk_eq_0",
+    "team_compatible_rule": "all_three_pairs_compatible",
+    "candidate_reordering_allowed": false,
+    "new_candidate_generation_allowed": false,
+    "long_horizon_branch_allowed": false
+  },
+  "minimum_deviation_ranking": [
+    "changed_agent_count",
+    "sum_gat_rank_displacement",
+    "negative_sum_frozen_v1_logits",
+    "lexicographic_class_tuple"
+  ],
+  "metric_definitions": {
+    "local_alternative_requires_distinct_combination": true,
+    "N_LOCAL_ALT_FAILURES_requires_baseline_conflict": false,
+    "triggerable_local_alternative_reported_separately": true,
+    "successful_false_veto_denominator": "all_v1_successful_team_episodes",
+    "joint_runtime_excludes_all_h4_preview_runtime": true,
+    "joint_search_overhead_ratio": "mean_joint_search_total_ms_div_mean_existing_proposal_preview_runtime_ms",
+    "timeout_coordination_yes_rule": "H4_CONFLICT_FLAG_or_explicit_existing_peer_blocking_log",
+    "timeout_without_explicit_evidence": "NOT_ESTABLISHED",
+    "obstacle_collision_default": "NON_JOINT_FAILURE",
+    "cuda_float32_logit_probability_atol": 1e-6,
+    "cuda_float32_logit_probability_rtol": 1e-6,
+    "class_ranking_must_be_exact": true,
+    "selected_class_must_be_exact": true
+  },
+  "pre_enumeration_reconciliation": {
+    "failed_gate_artifacts": [
+      "artifacts/gat_joint_compatibility_recoverability_audit/20260818_174016",
+      "artifacts/gat_joint_compatibility_recoverability_audit/20260818_174249",
+      "artifacts/gat_joint_compatibility_recoverability_audit/20260818_174519"
+    ],
+    "enumeration_rows_produced_before_reconciliation": 0,
+    "difference_field": "fp_shep_candidate_records[*].preview_runtime_ms",
+    "semantic_candidate_preview_graph_and_logits_exact": true,
+    "raw_selection_plan_hash_includes_wall_clock_preview_runtime": true,
+    "selection_reproduction_excludes_wall_clock_runtime_only": true,
+    "cuda_float32_reproduction_uses_atol_rtol_1e_6": true,
+    "observed_representative_logit_max_abs_difference": 1.1920928955078125e-7,
+    "selected_class_and_complete_ranking_remain_exact": true,
+    "top_k_is_upper_bound_not_exact_candidate_count": true,
+    "integrity_expected_rows_derived_from_frozen_per_agent_K_t": true,
+    "decision_threshold_changed": false,
+    "h4_compatibility_definition_changed": false
+  },
+  "h4_signal_gate": {
+    "strong_minimum_recall": 0.7,
+    "strong_maximum_success_false_veto_rate": 0.15,
+    "moderate_minimum_recall": 0.5,
+    "moderate_maximum_success_false_veto_rate": 0.25,
+    "weak_requires_true_positive_count": 1,
+    "no_requires_true_positive_count": 0,
+    "thresholds_frozen_before_reproduction": true
+  },
+  "minimal_repair_promise_gate": {
+    "high_h4_signal": [
+      "STRONG",
+      "MODERATE"
+    ],
+    "high_minimum_local_alternative_failures": 9,
+    "high_maximum_success_false_veto_rate": 0.15,
+    "high_minimum_majority_fraction_collision_alternatives_one_agent": 0.5,
+    "moderate_h4_signal": [
+      "STRONG",
+      "MODERATE"
+    ],
+    "moderate_minimum_collision_alternative_count": 1,
+    "moderate_maximum_success_false_veto_rate": 0.25,
+    "low_h4_signal": "WEAK",
+    "no_h4_signal": "NO",
+    "thresholds_frozen_before_reproduction": true
+  },
+  "structural_gap_gate": {
+    "yes_requires_theory_extension_gate": true,
+    "yes_minimum_inter_collision_local_alternative_fraction": 0.5,
+    "partial_requires_any_local_alternative_evidence": true,
+    "prior_joint_decision_dependence": "PARTIAL",
+    "thresholds_frozen_before_reproduction": true
+  },
+  "theory_extension_gate": {
+    "allowed_h4_signals": [
+      "STRONG",
+      "MODERATE"
+    ],
+    "minimum_local_alternative_failures": 6,
+    "maximum_success_false_veto_rate": 0.25,
+    "allowed_promises": [
+      "HIGH",
+      "MODERATE"
+    ],
+    "thresholds_frozen_before_reproduction": true
+  },
+  "strict_exclusions": {
+    "modify_gat_graph_or_supervision": false,
+    "modify_proposal_fp_shep_or_top_k": false,
+    "modify_h_preview_d_safe_or_risk_definition": false,
+    "modify_sac_dmp_handoff_or_max_steps": false,
+    "implement_joint_decoder_or_conflict_repair": false,
+    "implement_orca_rvo_cbf_or_priority_rule": false,
+    "enable_replanning": false,
+    "train_or_finetune": false,
+    "run_new_closed_loop": false,
+    "read_or_rerun_24_layout": false
+  }
+}

@@ -1,0 +1,189 @@
+{
+  "schema_version": "gat_stage1_v2_closed_loop_v1",
+  "output_root": "artifacts/gat_stage1_v2_closed_loop",
+  "context_sources": {
+    "v1_training_dir": "artifacts/gat_stage1_training/20260815_230509",
+    "v1_closed_loop_dir": "artifacts/gat_closed_loop/20260816_161130",
+    "stress_diagnostic_dir": "artifacts/gat_24_layout_stress/20260816_181616",
+    "failure_diagnosis_dir": "artifacts/gat_failure_diagnosis/20260816_132608",
+    "v2_supervision_dir": "artifacts/gat_supervision_v2/20260817_111210",
+    "v2_training_dir": "artifacts/gat_stage1_v2_training/20260817_145155",
+    "stress_set_status": "DIAGNOSTIC_ONLY_AFTER_OBSERVATION",
+    "stress_used_for_tuning": false,
+    "stress_rerun": false
+  },
+  "interpretation": {
+    "name": "deployment_aligned_H4_graph_input_plus_V2_long_horizon_target_adaptation",
+    "label_only_ablation_claim_allowed": false,
+    "closed_loop_control_variable": "checkpoint_parameters_only",
+    "same_online_graph_input": true,
+    "same_candidate_bundle": true,
+    "same_environment_and_executor": true
+  },
+  "stage1_config": "configs/training/gat_stage1.json",
+  "v1_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "v1_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+  "v2_checkpoint": "artifacts/gat_stage1_v2_training/20260817_145155/checkpoint/best_validation.pt",
+  "v2_checkpoint_sha256_expected": "a4cc7088fe4e9d87b2cd316882a6a238cf2ccf7e9a8938be4172b872d7289edd",
+  "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_execution_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "deterministic_inference": true,
+  "num_agents": 3,
+  "top_k": 10,
+  "H_preview": 4,
+  "max_steps": 220,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "handoff_threshold_m": 0.25,
+  "forcing_gate": "historical_vector_goal_eff_gate",
+  "actor_observation_dim": 122,
+  "sac_dmp": "frozen_deterministic_checkpoint",
+  "phase": "legacy/classic",
+  "execution_protocol": "one_shot_temporary_reference_handoff",
+  "boundary_mode": "boundary_free",
+  "formal_scenarios": [
+    "open",
+    "sparse_static",
+    "multi_agent"
+  ],
+  "smoke_seeds": [
+    30,
+    31,
+    32
+  ],
+  "formal_seeds": [
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49
+  ],
+  "seed_audit": {
+    "scope": "all_existing_artifact_JSON_seed_fields_and_CSV_seed_columns",
+    "audited_at": "2026-08-17T02:30:31-07:00",
+    "training_supervision_seeds": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "prior_main_closed_loop_seeds": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+    "formal_seed_hits_before_freeze": [],
+    "final_test_seed_overlap": 0,
+    "result_dependent_seed_replacement_allowed": false
+  },
+  "methods": [
+    "terminal",
+    "proposal",
+    "fp_shep",
+    "gat_stage1_v1",
+    "gat_stage1_v2"
+  ],
+  "proposal_config": {
+    "top_k": 10
+  },
+  "fp_shep": {
+    "H_preview": 4,
+    "score_name": "fixed_physical_scale_three_feature_online_score",
+    "formula": "+progress +clearance -deviation",
+    "terminal_speed_used_for_ranking": false,
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    }
+  },
+  "graph": {
+    "horizon_steps": 4,
+    "d_align": 1.2,
+    "d_align_source": "configurable_implementation_parameter_not_paper_constant",
+    "candidate_order_preserved": true,
+    "null_class_index": 0,
+    "proposal_class_offset": 1,
+    "v1_v2_graph_hash_match_required": true
+  },
+  "selection_plan": {
+    "generated_once_per_scenario_seed": true,
+    "shared_by_proposal_fp_shep_v1_v2": true,
+    "preview_computed_once_per_agent_candidate": true,
+    "candidate_reordering_allowed": false,
+    "candidate_attribute_recomputation_allowed": false,
+    "preview_trajectory_recomputation_per_method": false
+  },
+  "smoke_gate": {
+    "expected_team_episode_count": 45,
+    "require_strict_checkpoint_load": true,
+    "require_finite_logits": true,
+    "require_class_and_null_mapping": true,
+    "require_candidate_fairness": true,
+    "require_preview_fairness": true,
+    "require_graph_equality": true,
+    "require_one_shot_no_replanning": true,
+    "require_no_nan_or_exception": true,
+    "require_core_hash_unchanged": true,
+    "outcome_tuning_allowed": false
+  },
+  "effect_classification": {
+    "yes_minimum_improvement": 0.1,
+    "weak_strict_minimum_improvement": 0.0,
+    "maximum_timeout_worsening_for_collision_yes": 0.05,
+    "large_null_rate_increase": 0.1,
+    "material_null_outcome_change": 0.05,
+    "continuous_metrics_use_pp_classification": false
+  },
+  "statistics": {
+    "mcnemar_exact_unit": "scenario_seed_team_episode",
+    "individual_uav_is_independent_sample": false,
+    "failed_completion_time_fill_value": null,
+    "continuous_completion_subset": "both_success",
+    "continuous_distance_subset": "all_paired_episodes"
+  },
+  "expected_core_hashes": {
+    "Guidance/reference_point_proposal_demo.py": "b0fb7197ecf2a0a2ad75e8f7c512791451e96c5302d289ace98ca2e4eb2bc881",
+    "planning/policy_preview.py": "074f39cd166c34ca026069dd372dccdc01f56800a6aec3dd0394444614e00991",
+    "planning/heterogeneous_candidate_graph.py": "31cd1a74ace7a88742825bc814f22917f2c1eac7db8a68d93f21f6419fcca066",
+    "planning/gat/candidate_selector.py": "f3acf70754fb9dbfdcdb44bbd9548092a25c979706608f86e6ac66661ac36257",
+    "planning/gat/edge_enhanced_gat.py": "016c88e39c7442fa126bab1ce2cc23d395162713a7e85263b3149f1aa82bc524",
+    "baseline/sac/net.py": "72e27601b0d74fb3271460eef82d5209351cdb62c1c864f3bf204995af141d7a",
+    "Controller/dmp_rl.py": "2905a1065a3eb37da3ce6a4a908c3686765faaed6bfb3b3565ebcc1d35e3bd7d",
+    "Environment/multi_agent_dmp_env.py": "6acc42bb2821cde5fb359fa97eac42a9cf5ab34fef96a81ac53a282fda6f680c",
+    "Environment/frozen_sac_dmp_execution.py": "84fdb0d2e403d11833e0c8a17ec99cd0bc91cebadd3ff0ba0ec75560266ca51d"
+  },
+  "strict_exclusions": {
+    "retraining": false,
+    "supervision_modification": false,
+    "null_threshold_calibration": false,
+    "tau_modification": false,
+    "tier_modification": false,
+    "top_k_modification": false,
+    "H_preview_modification": false,
+    "overlap_loss": false,
+    "completion_loss": false,
+    "graph_modification": false,
+    "sac_dmp_modification": false,
+    "fp_shep_modification": false,
+    "environment_modification": false,
+    "stress_tuning": false,
+    "stress_rerun": false,
+    "new_geometry": false,
+    "replanning": false,
+    "fixed_period_switching": false,
+    "sdh": false,
+    "phase_reset": false,
+    "velocity_reset": false,
+    "lidar_history_reset": false
+  }
+}

@@ -14,6 +14,14 @@ from Entity.KinematicModel import propagate_point_mass
 HISTORICAL_CHECKPOINT_OBSERVATION_DIM = 122
 
 
+def actor_observation_dim(ray_count: int) -> int:
+    """Return 3 velocity + 3 direction + 1 distance + two scans + 3 DMP fields."""
+    ray_count = int(ray_count)
+    if ray_count <= 0:
+        raise ValueError("ray_count must be positive")
+    return 10 + 2 * ray_count
+
+
 @dataclass(frozen=True)
 class SACDMPTransition:
     position: np.ndarray
@@ -30,7 +38,7 @@ class SACDMPTransition:
         return np.concatenate([self.position, self.velocity])
 
 
-def build_historical_actor_observation(
+def build_actor_observation(
     *,
     velocity: np.ndarray,
     active_goal: np.ndarray,
@@ -42,7 +50,7 @@ def build_historical_actor_observation(
     k_alpha: float,
     k_beta: float,
 ) -> np.ndarray:
-    """Build the exact 119 + 3 input used by the historical checkpoint."""
+    """Build the SAC-DMP actor vector for any frozen spatial-ray contract."""
     position = np.asarray(position, dtype=float)
     velocity = np.asarray(velocity, dtype=float)
     active_goal = np.asarray(active_goal, dtype=float)
@@ -52,8 +60,8 @@ def build_historical_actor_observation(
         raise ValueError("position, velocity and active_goal must have shape (3,)")
     if current_scan.shape != previous_scan.shape:
         raise ValueError("current_scan and previous_scan must have identical shapes")
-    if current_scan.size != 56:
-        raise ValueError(f"historical checkpoint requires 56 rays, got {current_scan.size}")
+    if current_scan.size <= 0:
+        raise ValueError("actor observation requires at least one spatial ray")
     goal_distance_clip = float(goal_distance_clip)
     if not np.isfinite(goal_distance_clip) or goal_distance_clip <= 0.0:
         raise ValueError("goal_distance_clip must be positive and finite")
@@ -70,11 +78,35 @@ def build_historical_actor_observation(
             np.asarray([phase, k_alpha, k_beta], dtype=np.float32),
         ]
     ).astype(np.float32)
-    if observation.shape != (HISTORICAL_CHECKPOINT_OBSERVATION_DIM,):
-        raise ValueError(f"historical actor observation must have shape (122,), got {observation.shape}")
+    expected_dim = actor_observation_dim(current_scan.size)
+    if observation.shape != (expected_dim,):
+        raise ValueError(f"actor observation must have shape ({expected_dim},), got {observation.shape}")
     if not np.all(np.isfinite(observation)):
         raise ValueError("actor observation must be finite")
     return observation
+
+
+def build_historical_actor_observation(**kwargs: Any) -> np.ndarray:
+    """Build the exact 122-D, 56-direction input for the historical checkpoint."""
+    observation = build_actor_observation(**kwargs)
+    if observation.shape != (HISTORICAL_CHECKPOINT_OBSERVATION_DIM,):
+        ray_count = (observation.size - 10) // 2
+        raise ValueError(f"historical checkpoint requires 56 rays, got {ray_count}")
+    return observation
+
+
+def predict_policy_action(policy: Any, observation: np.ndarray) -> np.ndarray:
+    """Run one deterministic SAC-DMP inference for the policy's frozen input width."""
+    observation = np.asarray(observation, dtype=np.float32)
+    if observation.ndim != 1 or observation.size < 12:
+        raise ValueError("observation must be a one-dimensional SAC-DMP feature vector")
+    action, _ = policy.predict(observation, deterministic=True)
+    action = np.asarray(action, dtype=np.float32)
+    if action.shape != (6,):
+        raise ValueError(f"SAC-DMP action must have shape (6,), got {action.shape}")
+    if not np.all(np.isfinite(action)):
+        raise ValueError("policy action must be finite")
+    return action
 
 
 def predict_frozen_action(policy: Any, observation: np.ndarray) -> np.ndarray:
@@ -82,13 +114,7 @@ def predict_frozen_action(policy: Any, observation: np.ndarray) -> np.ndarray:
     observation = np.asarray(observation, dtype=np.float32)
     if observation.shape != (HISTORICAL_CHECKPOINT_OBSERVATION_DIM,):
         raise ValueError("observation must have shape (122,)")
-    action, _ = policy.predict(observation, deterministic=True)
-    action = np.asarray(action, dtype=np.float32)
-    if action.shape != (6,):
-        raise ValueError(f"historical checkpoint action must have shape (6,), got {action.shape}")
-    if not np.all(np.isfinite(action)):
-        raise ValueError("policy action must be finite")
-    return action
+    return predict_policy_action(policy, observation)
 
 
 def predict_frozen_actions(
@@ -130,6 +156,8 @@ def propagate_sac_dmp_action(
     action: np.ndarray,
     dmp_config: DMPConfig,
     dynamics: Any,
+    acceleration_limiter: Any | None = None,
+    acceleration_limiter_agent_id: int | None = None,
 ) -> SACDMPTransition:
     """Shared DMP + point-mass transition used by real and preview execution."""
     action = np.asarray(action, dtype=np.float32)
@@ -142,16 +170,31 @@ def propagate_sac_dmp_action(
         terminal_goal=terminal_goal,
         phase=phase,
     )
+    acceleration_for_dynamics = np.asarray(acceleration, dtype=float)
+    if acceleration_limiter is not None:
+        if acceleration_limiter_agent_id is None:
+            raise ValueError("acceleration_limiter_agent_id is required with a limiter")
+        acceleration_for_dynamics = np.asarray(
+            acceleration_limiter.limit(
+                int(acceleration_limiter_agent_id), acceleration_for_dynamics
+            ),
+            dtype=float,
+        )
     motion = propagate_point_mass(
         position=position,
         velocity=velocity,
-        acceleration=acceleration,
+        acceleration=acceleration_for_dynamics,
         dt=dynamics.dt,
         acceleration_min=dynamics.accelerate_min,
         acceleration_max=dynamics.accelerate_max,
         velocity_min=dynamics.velocity_min,
         velocity_max=dynamics.velocity_max,
+        maximum_speed_norm=getattr(dynamics, "maximum_speed_norm", None),
     )
+    if acceleration_limiter is not None:
+        acceleration_limiter.observe_executed(
+            int(acceleration_limiter_agent_id), motion["applied_acceleration"]
+        )
     return SACDMPTransition(
         position=motion["position"].copy(),
         velocity=motion["velocity"].copy(),

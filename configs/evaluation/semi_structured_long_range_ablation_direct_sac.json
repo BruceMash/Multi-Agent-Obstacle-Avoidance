@@ -1,0 +1,8 @@
+{
+  "schema_version": "semi_structured_long_range_ablation_development_v1",
+  "base_config": "configs/evaluation/semi_structured_long_range_development_d05.json",
+  "output_subdir": "08_development/ABL_M4_Direct_SAC_DMP_full200",
+  "method": "direct_sac",
+  "configuration_id": "ABL_M4_DIRECT_FULL200",
+  "development_scenario_ids": null
+}

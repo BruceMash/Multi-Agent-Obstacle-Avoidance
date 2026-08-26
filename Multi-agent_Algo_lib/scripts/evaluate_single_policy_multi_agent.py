@@ -214,8 +214,12 @@ class SinglePolicyMultiAgentEnv(MultiAgentDMPEnv):
         return obstacles
 
 
-def build_policy_observations(env: MultiAgentDMPEnv) -> np.ndarray:
-    """Reconstruct only the observation fields present during SAC training."""
+def build_policy_observations(
+    env: MultiAgentDMPEnv,
+    *,
+    expected_observation_dim: int | None = None,
+) -> np.ndarray:
+    """Reconstruct the local SAC-DMP observation under the active ray contract."""
     rows: list[np.ndarray] = []
     for agent_index in range(env.num_agents):
         packet = env.latest_sensor_packets[agent_index]
@@ -233,9 +237,9 @@ def build_policy_observations(env: MultiAgentDMPEnv) -> np.ndarray:
             )
         )
     observations = np.stack(rows, axis=0).astype(np.float32)
-    if observations.shape[1] != 122:
+    if expected_observation_dim is not None and observations.shape[1] != int(expected_observation_dim):
         raise ValueError(
-            f"single-agent checkpoint requires 122 features, got {observations.shape[1]}"
+            f"policy requires {expected_observation_dim} features, got {observations.shape[1]}"
         )
     return observations
 

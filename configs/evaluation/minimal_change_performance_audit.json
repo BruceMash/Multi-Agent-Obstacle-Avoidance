@@ -1,0 +1,42 @@
+{
+  "schema_version": "minimal_change_performance_audit_v1",
+  "output_root": "artifacts/minimal_change_performance_audit",
+  "formal_source_dir": "artifacts/gat_stage1_v2_closed_loop/20260817_024059",
+  "formal_config": "configs/evaluation/gat_stage1_v2_closed_loop.json",
+  "v1_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "v1_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+  "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "method": "gat_stage1_v1",
+  "formal_scenarios": ["open", "sparse_static", "multi_agent"],
+  "formal_seeds": [30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49],
+  "num_agents": 3,
+  "max_steps": 220,
+  "actor_observation_dim": 122,
+  "baseline_handoff_threshold_m": 0.25,
+  "candidate_handoff_threshold_m": 0.30,
+  "threshold_sweep_performed": false,
+  "ordering_counterfactual": "post_transition_reference_capture_is_recorded_even_when_the_environment_terminates_but_terminal_precedence_is_not_removed",
+  "semantic_safety_gate": {
+    "high_speed_threshold_mps": 1.2,
+    "high_speed_threshold_source": "frozen_FP_SHEP_terminal_speed_physical_scale",
+    "large_direction_jump_deg": 90.0,
+    "collision_precursor_window_steps": 5,
+    "require_candidate_not_above_terminal_goal_tolerance": true
+  },
+  "strict_exclusions": {
+    "core_source_modification": false,
+    "checkpoint_modification": false,
+    "retraining": false,
+    "sac_tuning": false,
+    "reward_modification": false,
+    "dmp_modification": false,
+    "forcing_gate_modification": false,
+    "replanning": false,
+    "scenario_modification": false,
+    "max_steps_modification": false,
+    "architecture_or_graph_modification": false,
+    "candidate_or_inference_sweep": false,
+    "automatic_fix_implementation": false
+  }
+}

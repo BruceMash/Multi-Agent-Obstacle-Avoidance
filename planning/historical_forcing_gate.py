@@ -154,6 +154,8 @@ def propagate_historical_sac_dmp_action(
     action: np.ndarray,
     dmp_config: DMPConfig,
     dynamics: Any,
+    acceleration_limiter: Any | None = None,
+    acceleration_limiter_agent_id: int | None = None,
 ) -> SACDMPTransition:
     """Apply the historical DMP command through the existing point-mass model."""
 
@@ -169,16 +171,31 @@ def propagate_historical_sac_dmp_action(
             phase=phase,
         )
     )
+    acceleration_for_dynamics = np.asarray(acceleration, dtype=float)
+    if acceleration_limiter is not None:
+        if acceleration_limiter_agent_id is None:
+            raise ValueError("acceleration_limiter_agent_id is required with a limiter")
+        acceleration_for_dynamics = np.asarray(
+            acceleration_limiter.limit(
+                int(acceleration_limiter_agent_id), acceleration_for_dynamics
+            ),
+            dtype=float,
+        )
     motion = propagate_point_mass(
         position=position,
         velocity=velocity,
-        acceleration=acceleration,
+        acceleration=acceleration_for_dynamics,
         dt=dynamics.dt,
         acceleration_min=dynamics.accelerate_min,
         acceleration_max=dynamics.accelerate_max,
         velocity_min=dynamics.velocity_min,
         velocity_max=dynamics.velocity_max,
+        maximum_speed_norm=getattr(dynamics, "maximum_speed_norm", None),
     )
+    if acceleration_limiter is not None:
+        acceleration_limiter.observe_executed(
+            int(acceleration_limiter_agent_id), motion["applied_acceleration"]
+        )
     return SACDMPTransition(
         position=motion["position"].copy(),
         velocity=motion["velocity"].copy(),

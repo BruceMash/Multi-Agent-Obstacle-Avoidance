@@ -110,6 +110,7 @@ class SingleAgentDMPEnv(gym.Env):
         static_obstacle_generator=None,
         dynamic_obstacles=None,
         dynamic_obstacle_generator=None,
+        transition_function: Callable[..., object] | None = None,
         render_mode=None,
     ):
         # 当前这个 Demo 只支持最小的 human 渲染占位接口。
@@ -136,6 +137,9 @@ class SingleAgentDMPEnv(gym.Env):
         self._initial_dynamic_obstacles = copy.deepcopy(dynamic_obstacles or [])
         self._dynamic_obstacle_generator = dynamic_obstacle_generator
         self._start_goal_generator = start_goal_generator
+        # Optional same-action-space transition injection for checkpoint
+        # adaptation. Historical callers retain the original path by default.
+        self._transition_function = transition_function
         self._default_start = np.zeros(self.state_dim, dtype=float)
         self._default_goal = np.zeros(self.state_dim, dtype=float)
         self._default_goal[0] = 8.0
@@ -426,24 +430,49 @@ class SingleAgentDMPEnv(gym.Env):
         action, action_guidance_weight = self._apply_action_guidance(action, previous_distance)
 
         # 让 DMP 控制器根据当前状态和 RL 动作计算期望加速度
-        acceleration, controller_info = self.dmp.compute_acceleration(
-            self.dynamics.p,
-            self.dynamics.v,
-            action,
-            sensor_packet=self.latest_sensor_packet,
-            terminal_goal=self.goal,
-        )
+        if self._transition_function is None:
+            acceleration, controller_info = self.dmp.compute_acceleration(
+                self.dynamics.p,
+                self.dynamics.v,
+                action,
+                sensor_packet=self.latest_sensor_packet,
+                terminal_goal=self.goal,
+            )
+        else:
+            transition = self._transition_function(
+                position=self.dynamics.p,
+                velocity=self.dynamics.v,
+                phase=self.dmp.phase,
+                active_goal=self.goal,
+                terminal_goal=self.goal,
+                action=action,
+                dmp_config=self.dmp.config,
+                dynamics=self.dynamics,
+            )
+            acceleration = np.asarray(transition.commanded_acceleration, dtype=float)
+            controller_info = dict(transition.controller_info)
 
         # 再用动力学模型允许的加速度范围做一次裁剪
-        applied_acceleration = np.clip(
-            acceleration,
-            self.dynamics.accelerate_min,
-            self.dynamics.accelerate_max,
+        applied_acceleration = (
+            np.clip(
+                acceleration,
+                self.dynamics.accelerate_min,
+                self.dynamics.accelerate_max,
+            )
+            if self._transition_function is None
+            else np.asarray(transition.applied_acceleration, dtype=float)
         )
 
         # 推进无人机动力学
         self.latest_controller_info = controller_info
-        next_state = self.dynamics.step(applied_acceleration)
+        if self._transition_function is None:
+            next_state = self.dynamics.step(applied_acceleration)
+        else:
+            self.dmp.phase = float(transition.phase)
+            self.dynamics.p = np.asarray(transition.position, dtype=float).copy()
+            self.dynamics.v = np.asarray(transition.velocity, dtype=float).copy()
+            self.dynamics.state = np.asarray(transition.state, dtype=float).copy()
+            next_state = self.dynamics.state.copy()
 
         # 推进所有动态障碍物
         for obstacle in self.dynamic_obstacles:

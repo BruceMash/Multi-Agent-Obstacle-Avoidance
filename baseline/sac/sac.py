@@ -460,6 +460,7 @@ class SAC(OffPolicyAlgorithm):
         # 记录训练过程中的统计量，最后写入 logger
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
+        safety_teacher_anchor_losses = []
 
         for gradient_step in range(gradient_steps):
             # 从 replay buffer 取一个 batch
@@ -526,6 +527,43 @@ class SAC(OffPolicyAlgorithm):
             q_values_pi = th.cat(self._critic_forward(replay_data.observations, actions_pi), dim=1)
             min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
+            safety_teacher = getattr(self, "safety_teacher_actor", None)
+            if safety_teacher is not None:
+                old_extra_dim = int(getattr(self, "safety_teacher_old_extra_dim", 3))
+                ray_count = int(getattr(self, "safety_teacher_ray_count", 0))
+                anchor_lambda = float(getattr(self, "safety_teacher_anchor_lambda", 0.0))
+                if ray_count <= 0 or anchor_lambda < 0.0:
+                    raise RuntimeError("invalid safety-teacher configuration")
+                sensor_observation, expanded_extra = self._split_observations(
+                    replay_data.observations
+                )
+                old_extra = expanded_extra[..., :old_extra_dim]
+                with th.no_grad():
+                    teacher_parts = safety_teacher(
+                        sensor_observation,
+                        old_extra,
+                        deterministic=True,
+                    )
+                    teacher_actions = th.cat([teacher_parts[0], teacher_parts[1]], dim=-1)
+                    current_scan = sensor_observation[..., 7 : 7 + ray_count]
+                    minimum_scan = th.min(current_scan, dim=-1, keepdim=True).values
+                    critical_low = float(
+                        getattr(self, "safety_teacher_critical_scan_low", 0.25)
+                    )
+                    critical_high = float(
+                        getattr(self, "safety_teacher_critical_scan_high", 0.45)
+                    )
+                    critical_weight = th.clamp(
+                        (critical_high - minimum_scan)
+                        / max(critical_high - critical_low, 1.0e-8),
+                        0.0,
+                        1.0,
+                    )
+                anchor_loss = anchor_lambda * (
+                    critical_weight * th.sum((actions_pi - teacher_actions) ** 2, dim=-1, keepdim=True)
+                ).mean()
+                actor_loss = actor_loss + anchor_loss
+                safety_teacher_anchor_losses.append(float(anchor_loss.detach().cpu().item()))
             actor_losses.append(actor_loss.item())
 
             # 更新 actor
@@ -547,6 +585,11 @@ class SAC(OffPolicyAlgorithm):
         self.logger.record("train/ent_coef", np.mean(ent_coefs))
         self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
+        if safety_teacher_anchor_losses:
+            self.logger.record(
+                "train/safety_teacher_anchor_loss",
+                np.mean(safety_teacher_anchor_losses),
+            )
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
@@ -579,5 +622,4 @@ class SAC(OffPolicyAlgorithm):
         else:
             saved_pytorch_variables = ["ent_coef_tensor"]
         return state_dicts, saved_pytorch_variables
-
 

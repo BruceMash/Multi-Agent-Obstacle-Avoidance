@@ -1,0 +1,106 @@
+{
+  "schema_version": "gat_v1_interaction_aware_supervision_v1",
+  "output_root": "artifacts/gat_v1_interaction_aware_supervision",
+  "sources": {
+    "stage1_config": "configs/training/gat_stage1.json",
+    "dataset_dir": "artifacts/candidate_supervision/20260814_121319",
+    "v1_training_dir": "artifacts/gat_stage1_training/20260815_230509",
+    "v1_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+    "v1_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+    "interaction_capacity_audit": "artifacts/gat_interaction_capacity_audit/20260818_012704",
+    "closed_loop_config": "configs/evaluation/gat_stage1_v2_closed_loop.json"
+  },
+  "projection": {
+    "source_target": "original_v1_provisional_primary_target_tau_0.25",
+    "null_class_index": 0,
+    "proposal_conditioning": true,
+    "objective": "minimum_squared_l2_distance_to_original_proposal_conditional_distribution",
+    "constraint": "every_SAFE_probability_greater_than_or_equal_to_every_RISKY_probability",
+    "safe_rule": "d_min_greater_than_or_equal_to_d_safe_AND_T_risk_equal_to_0",
+    "risky_rule": "d_min_less_than_d_safe_OR_T_risk_greater_than_0",
+    "neutral_rule": "missing_or_invalid_descriptor",
+    "candidate_descriptor_aggregation": "minimum_d_min_and_maximum_T_risk_over_existing_spatiotemporal_edges",
+    "d_safe_source": "graph_metadata",
+    "active_margin": 0.0,
+    "hyperparameters": [],
+    "candidate_canonical_order": "ascending_candidate_id",
+    "no_safe_and_risky_behavior": "return_entire_target_bit_exact",
+    "zero_proposal_mass_behavior": "return_entire_target_bit_exact",
+    "t_min_used_in_target": false
+  },
+  "dataset_split": {
+    "group_key": "state_group_id",
+    "train_seeds": [0, 1, 2, 3, 4, 5, 6],
+    "validation_seeds": [7],
+    "test_seeds": [8, 9],
+    "random_graph_split": false
+  },
+  "interaction_subset": {
+    "interaction_scenarios": ["multi_agent", "narrow_head_on"],
+    "low_interaction_scenarios": ["open", "bounded"],
+    "interaction_rich_rule": "interaction_scenario_OR_any_RISKY_proposal",
+    "low_interaction_rule": "low_interaction_scenario_AND_no_RISKY_proposal"
+  },
+  "validity_thresholds": {
+    "maximum_absolute_null_target_mass_error": 1e-15,
+    "maximum_null_top1_rate_change": 0.02,
+    "minimum_low_interaction_exact_agreement": 0.95,
+    "minimum_interaction_conflict_reduction": 0.05,
+    "minimum_changed_interaction_rich_graph_count": 10,
+    "maximum_changed_single_class_share": 0.95,
+    "minimum_changed_class_effective_count": 2.0,
+    "order_invariance_absolute_tolerance": 1e-12
+  },
+  "model_gain_thresholds": {
+    "interaction_rich_top1_gain_yes": 0.05,
+    "safe_risky_pair_accuracy_gain_yes": 0.10,
+    "maximum_low_interaction_top1_decline": 0.05,
+    "maximum_null_selection_rate_change": 0.10,
+    "maximum_overall_top1_decline": 0.05,
+    "weak_minimum_primary_gain": 0.0
+  },
+  "development": {
+    "seeds": [55, 56, 57, 58, 59],
+    "scenarios": ["open", "sparse_static", "multi_agent"],
+    "methods": ["gat_stage1", "gat_v1_ia"],
+    "episodes_per_seed_scenario_method": 1,
+    "expected_team_episode_count": 30,
+    "forbidden_training_seeds": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "forbidden_formal_seeds": [30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49],
+    "known_err_development_seeds": [50, 51, 52, 53, 54],
+    "overall_team_success_gain_yes": 0.10,
+    "multi_agent_team_success_gain_yes": 0.20,
+    "maximum_overall_collision_worsening": 0.05
+  },
+  "frozen_training_contract": {
+    "architecture": "exact_gat_stage1_v1",
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "max_epochs": 100,
+    "early_stopping_patience": 15,
+    "gradient_clip_norm": 5.0,
+    "optimization_seeds": [0, 1, 2],
+    "checkpoint_selection": "minimum_validation_loss_before_test",
+    "loss": "unchanged_soft_target_cross_entropy",
+    "initialization": "fresh_same_random_initialization_no_v1_or_v2_checkpoint_initialization"
+  },
+  "strict_exclusions": {
+    "graph_schema_change": false,
+    "node_or_edge_change": false,
+    "gat_architecture_change": false,
+    "loss_change": false,
+    "null_semantics_change": false,
+    "inference_change": false,
+    "sac_dmp_change": false,
+    "environment_change": false,
+    "joint_decoder": false,
+    "conflict_repair": false,
+    "priority_rule": false,
+    "orca_rvo_cbf": false,
+    "formal_seed_use": false,
+    "layout_24_use": false,
+    "second_target_variant": false
+  }
+}

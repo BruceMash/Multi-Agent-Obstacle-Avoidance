@@ -15,8 +15,8 @@ import numpy as np
 
 from Controller.dmp_rl import compute_dmp_transition
 from Environment.frozen_sac_dmp_execution import (
-    build_historical_actor_observation,
-    predict_frozen_action,
+    build_actor_observation,
+    predict_policy_action,
 )
 
 
@@ -64,14 +64,14 @@ def angle_degrees(first: np.ndarray, second: np.ndarray) -> float:
 
 
 def actor_observation_for_goal(env: Any, agent_index: int, active_goal: np.ndarray) -> np.ndarray:
-    """Build the historical 122-D input from one unchanged environment state."""
+    """Build the active policy input from one unchanged environment state."""
 
     agent_index = int(agent_index)
     packet = env.latest_sensor_packets[agent_index]
     if packet is None:
         raise RuntimeError("environment must be reset before observation diagnosis")
     dmp = env.dmps[agent_index]
-    return build_historical_actor_observation(
+    return build_actor_observation(
         velocity=env.dynamics[agent_index].v,
         active_goal=_vector3(active_goal, "active_goal"),
         position=env.dynamics[agent_index].p,
@@ -194,8 +194,8 @@ def dmp_switch_diagnostic(
             env, agent_index, previous_active_goal
         )
         new_observation = actor_observation_for_goal(env, agent_index, new_active_goal)
-        previous_action = predict_frozen_action(policy, previous_observation)
-        new_action = predict_frozen_action(policy, new_observation)
+        previous_action = predict_policy_action(policy, previous_observation)
+        new_action = predict_policy_action(policy, new_observation)
         closed_before, closed_info_before = _controller_acceleration(
             env,
             agent_index,
@@ -399,4 +399,3 @@ def lifecycle_summary(events: Iterable[Mapping[str, Any]]) -> dict[str, float]:
         if rows
         else 0.0,
     }
-

@@ -1,0 +1,72 @@
+{
+  "schema_version": "gat_recurrent_r_training_v1",
+  "variant": "GAT-R",
+  "artifact_root": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244",
+  "dataset": {
+    "examples": "02_recurrent_dataset/recurrent_training_examples.jsonl",
+    "reconciliation": "02_recurrent_dataset/recurrent_dataset_reconciliation.json",
+    "label_freeze": "03_counterfactual_rollouts/COUNTERFACTUAL_LABEL_FREEZE.json",
+    "split_unit": "scenario_id",
+    "train_scenes": 160,
+    "validation_scenes": 40,
+    "dev_used": false
+  },
+  "supervision": {
+    "target_name": "safety_first_progress_second_recurrent_5s",
+    "H_label_seconds": 5.0,
+    "loss": "soft_target_cross_entropy",
+    "smoothness_pairwise_loss_enabled": false,
+    "null_smoothness_supervision_enabled": false,
+    "hierarchy": [
+      "hard_safety",
+      "peer_and_obstacle_risk",
+      "long_range_progress_and_reference_viability",
+      "execution_deviation"
+    ]
+  },
+  "model": {
+    "hidden_dim": 64,
+    "node_encoder_hidden_dim": 64,
+    "edge_dim": 32,
+    "edge_encoder_hidden_dim": 32,
+    "num_heads": 4,
+    "num_layers": 2,
+    "head_aggregation": "concat",
+    "activation": "gelu",
+    "dropout": 0.0,
+    "negative_slope": 0.2,
+    "layer_norm": true
+  },
+  "training": {
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "max_epochs": 100,
+    "early_stopping_patience": 15,
+    "gradient_clip_norm": 5.0,
+    "optimization_seeds": [17, 29, 43],
+    "device": "auto",
+    "num_workers": 0,
+    "hyperparameter_sweep": false,
+    "checkpoint_selection": "minimum_internal_validation_soft_target_loss"
+  },
+  "offline_metric_definitions": {
+    "reference_class": "minimum class index in lexicographic top-equivalence target set for scalar metrics; full target retained for loss",
+    "top1": "predicted_top1 belongs to maximum target-mass class",
+    "top3": "a maximum target-mass class appears in predicted top-3",
+    "mrr": "reciprocal rank of argmax soft target",
+    "spearman": "proposal-only logits versus {-1 unsafe, 0 safe non-target, 1 target}",
+    "null_positive_class": "terminal-local safety-valid null",
+    "checkpoint_selection_uses_dev": false
+  },
+  "runtime_contract": {
+    "goal_distance_normalization_scale_m": 100.0,
+    "canonical_sector_count": 56,
+    "graph_schema_changed": false,
+    "gat_architecture_changed": false,
+    "runtime_future_information_added": false,
+    "runtime_role": "current legal graph to candidate logits to reference selection",
+    "sac_dmp_changed": false
+  }
+}

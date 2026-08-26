@@ -1,0 +1,14 @@
+{
+  "base_config": "configs/evaluation/long_range_dwa_fullstate_development_base.json",
+  "configuration_id": "DWA_FS_BOUNDARY_PILOT",
+  "output_subdir": "09_baseline_tuning/DWA_FS_BOUNDARY_PILOT",
+  "development_scenario_ids": ["DEV_LR_1_000"],
+  "planner": {
+    "horizon_s": 1.2,
+    "velocity_samples_per_axis": 5,
+    "preferred_speed_mps": 2.2,
+    "goal_weight": 2.0,
+    "clearance_weight": 1.5,
+    "collision_buffer_m": 0.08
+  }
+}

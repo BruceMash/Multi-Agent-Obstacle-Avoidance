@@ -1,0 +1,2310 @@
+
+%% Add \usepackage{lineno} before \begin{document} and uncomment 
+%% following line to enable line numbers
+%% \linenumbers
+
+%% main text
+%%
+
+%% Use \section commands to start a section
+
+\section{Introduction}
+\label{sec1}
+%% Labels are used to cross-reference an item using \ref command.
+低空复杂环境中的多无人机协同作业正在成为巡检, 搜救, 园区配送和灾害评估等任务的重要执行方式. 一个典型的工程系统通常由地面任务平台和多架无人机构成: 任务平台根据巡检设备位置, 搜索区域, 物资投送点或灾情评估区域为各无人机分配任务目标, 无人机则在城市低空, 园区, 灾后现场, 森林和工业厂区等环境中自主飞向目标. 这些环境中往往同时存在建筑物, 树木, 设备, 临时障碍物和移动目标, 且现场状态会随任务进程产生变化. 因此, 工程上能够获得任务目标点的具体坐标, 却很难在飞行前获得完整, 准确且实时更新的三维可通行地图.
+
+在上述工程背景下, 在知道任务目标后如何在未知或部分未知的现场结构中安全推进成为一大难题. 具体而言, 每架无人机可以获得自身位置和任务目标点在全局坐标系下的位置, 但目标点只提供任务级方向引导, 并不等价于从当前位置到目标之间的全局可行路径. 沿途障碍是否临时出现, 环境信息是否变化, 邻近无人机会如何占用局部空间, 这些信息通常只能通过机载传感器和有限邻近状态在飞行过程中逐步获得. 因此, 本文面向的是任务目标已知但完整可通行结构未知的多无人机协同路径规划问题.
+
+这一问题对实际飞行提出了比单纯到达目标更严格的要求. 首先, 未知环境决定了无人机无法依赖离线规划结果, 难以获得全局级规划引导; 其次, 多架无人机同时飞行时需要同时处理环境避障和机间避让, 单机安全并不等价于系统安全; 再次, 复杂环境中的大量危险试错在工程上难以接受; 最后, 飞行轨迹还需要保持平滑和稳定, 以避免过大的转向, 震荡和控制负担. 在计算资源, 通信条件和传感范围均受限的条件下, 更实际的做法是让无人机主要依靠局部感知和有限邻近信息进行实时决策.
+
+在这样的工程条件下, 直接让强化学习策略从原始局部观测中学习飞行动作会带来较高的探索风险和不稳定的轨迹行为. 更实际的做法是先从局部观测中提取具有安全与引导意义的候选引导点, 再结合无人机自身状态和邻近无人机状态选择合适的短时目标, 最后通过平滑的运动生成方式执行. 
+
+
+
+本文的主要贡献可概括为:
+\begin{itemize}
+  \item 
+  \item 
+  \item 
+\end{itemize}
+
+\section{Related Work}
+
+The Multi-UAV Path planning task is considered in a bounded three-dimensional environment. Each uav is required to reach its
+
+\section{Problem Formulation and  Preliminaries}
+
+\subsection{Environment Formulation}
+
+The multi-UAV path planning task is considered in a bounded three-dimensional workspace 
+$\mathcal{W}\subset\mathbb{R}^3$. 
+The workspace is defined as
+
+\begin{equation}
+    \label{eq:workspace}
+    \mathcal{W}
+    =
+    [x_{\min},x_{\max}]
+    \times
+    [y_{\min},y_{\max}]
+    \times
+    [z_{\min},z_{\max}].
+\end{equation}
+
+The environment contains a set of obstacles denoted by
+
+\begin{equation}
+    \label{eq:obstacle_set}
+    \mathcal{O}^{t}
+    =
+    \left\{
+    \mathcal{O}_{m}^{t}
+    \right\}_{m=1}^{N_o}.
+\end{equation}
+
+\noindent
+where $\mathcal{O}_{m}^{t}$ denotes the occupied region of the $m$-th obstacle at time step $t$, and $N_o$ denotes the number of obstacles, $x_{\min}$, $x_{\max}$, $y_{\min}$, $y_{\max}$, $z_{\min}$, and $z_{\max}$ denote the spatial boundaries of the workspace.
+
+Each UAV obtains local environmental information through onboard sensing. 
+For UAV $i$, the local observation set at time step $t$ is denoted by
+
+\begin{equation}
+    \label{eq:local_observation_set}
+    \mathcal{Q}_{i}^{t}
+    =
+    \left\{
+    \mathbf{q}_{i,n}^{t}
+    \right\}_{n=1}^{N_i^t}.
+\end{equation}
+
+\noindent
+where $\mathbf{q}_{i,n}^{t}$ denotes the $n$-th local observation point, and $N_i^t$ denotes the number of valid observations.
+
+\subsection{UAV Motion Model and Constraints}
+
+Considering the three-dimensional motion of UAVs, the position of UAV $i$ at time step $t$ is represented as
+
+\begin{equation}
+    \label{eq:uav_position}
+    \mathbf{p}_i^t
+    =
+    \left[
+    x_i^t,\,
+    y_i^t,\,
+    z_i^t
+    \right]^{\top}.
+\end{equation}
+
+\noindent
+where $x_i^t$, $y_i^t$, and $z_i^t$ denote the position coordinates of UAV $i$ along the $x$, $y$, and $z$ axes, respectively.
+
+The acceleration of each UAV is considered as the control input.
+For UAV $i$ at time step $t$, the control input is defined as:
+
+\begin{equation}
+    \label{eq:uav_control_input}
+    \mathbf{u}_i^t
+    =
+    \left[
+    u_{x,i}^t,\,
+    u_{y,i}^t,\,
+    u_{z,i}^t
+    \right]^{\top}.
+\end{equation}
+
+\noindent
+where $u_{x,i}^t$, $u_{y,i}^t$, and $u_{z,i}^t$ denote the acceleration components along the $x$, $y$, and $z$ axes, respectively.
+
+The discrete-time motion of UAV $i$ is described by the following second-order model:
+
+\begin{equation}
+    \label{eq:uav_dynamics}
+    \begin{aligned}
+        \mathbf{v}_i^{t+1}
+        &=
+        \mathbf{v}_i^t
+        +
+        \Delta t\,\mathbf{u}_i^t,\\
+        \mathbf{p}_i^{t+1}
+        &=
+        \mathbf{p}_i^t
+        +
+        \mathbf{v}_i^t\Delta t
+        +
+        \frac{1}{2}
+        \mathbf{u}_i^t\Delta t^2.
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $\mathbf{v}_i^t$ denotes the velocity of UAV $i$ at time step $t$, and $\Delta t$ denotes the sampling interval.
+
+Considering the motion capabilities of the UAVs, the following constraints are imposed:
+
+\begin{equation}
+    \label{eq:motion_constraints}
+    \begin{aligned}
+        \left\|\mathbf{v}_i^t\right\|_2
+        &\leq v_{\max},\\
+        \left\|\mathbf{u}_i^t\right\|_2
+        &\leq a_{\max}.
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $v_{\max}$ and $a_{\max}$ denote the maximum allowable velocity and acceleration, respectively.
+
+
+
+\subsection{Multi-UAV Path Planning Problem}
+
+Based on the environment and UAV motion model defined above, the multi-UAV path planning task is formulated as a constrained multi-agent trajectory planning problem.
+Let $\mathcal{U}=\{u_1,u_2,\ldots,u_N\}$ denote the UAV set.
+For UAV $i$, the initial position and target position are denoted by $\mathbf{p}_i^0$ and $\mathbf{p}_{\mathrm{task},i}$, respectively.
+Its trajectory is represented by $\mathcal{T}_i=\{\mathbf{p}_i^t\}_{t=0}^{T_i}$, where $T_i$ denotes the terminal time step.
+
+The planning objective is to guide all UAVs to their corresponding target positions with collision-free and dynamically feasible trajectories.
+Meanwhile, the completion time and trajectory length are expected to be reduced.
+The problem is formulated as
+
+\begin{equation}
+    \label{eq:multi_uav_planning_objective}
+    \min_{\{\mathcal{T}_i\}_{i=1}^{N}}
+    \sum_{i=1}^{N}
+    \left[
+        \lambda_T T_i \Delta t
+        +
+        \lambda_L
+        \sum_{t=0}^{T_i-1}
+        \left\|
+        \mathbf{p}_i^{t+1}
+        -
+        \mathbf{p}_i^t
+        \right\|_2
+    \right],
+\end{equation}
+
+subject to
+
+\begin{equation}
+    \label{eq:multi_uav_planning_constraints}
+    \begin{aligned}
+        \left\|
+        \mathbf{p}_i^{T_i}
+        -
+        \mathbf{p}_{\mathrm{task},i}
+        \right\|_2
+        &\leq
+        \varepsilon_{\mathrm{goal}},
+        \qquad \forall i,
+        \\[2mm]
+        \mathbf{p}_i^t
+        &\in
+        \mathcal{W}_{\mathrm{free}}^t,
+        \qquad
+        \forall i,\; 0\leq t\leq T_i,
+        \\[2mm]
+        \left\|
+        \mathbf{p}_i^t
+        -
+        \mathbf{p}_j^t
+        \right\|_2
+        &\geq
+        d_{\mathrm{safe}},
+        \qquad
+        \forall i\neq j,
+        \\[2mm]
+        \left\|
+        \mathbf{v}_i^t
+        \right\|_2
+        &\leq
+        v_{\max},
+        \qquad
+        \forall i,\; 0\leq t<T_i,
+        \\[2mm]
+        \left\|
+        \mathbf{u}_i^t
+        \right\|_2
+        &\leq
+        a_{\max},
+        \qquad
+        \forall i,\; 0\leq t<T_i.
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $\lambda_T$ and $\lambda_L$ denote the weighting coefficients for completion time and trajectory length, respectively.
+$\varepsilon_{\mathrm{goal}}$ denotes the target-reaching tolerance.
+$d_{\mathrm{safe}}$ denotes the minimum allowable distance between two UAVs.
+The trajectories should also satisfy the UAV dynamics defined in Eq.~\eqref{eq:uav_dynamics}.
+
+
+
+% \subsection{Problem Formulation}
+% 将多无人机路径规划任务建模为部分可观马尔可夫博弈
+
+% \begin{equation}
+%   \label{Markov Game}
+% \mathcal{G}=\left\langle \mathcal{N},\mathcal{S},
+% \{\mathcal{O}_i\}_{i\in\mathcal N},
+% \{\mathcal{A}_i\}_{i\in\mathcal{N}},P,
+% \{r_i\}_{i\in\mathcal{N}},\gamma\right\rangle .
+% \end{equation}
+
+% \noindent
+% 其中, $\mathcal N$, $\mathcal S$, $\mathcal O_i$和$\mathcal A_i$分别表示无人机集合, 全局状态空间, 无人机$i$的局部观测空间和动作空间; $P$, $r_i$和$\gamma\in[0,1)$分别表示状态转移核, 奖励函数和折扣因子. 在时刻$t$, 无人机$i$依据局部观测独立产生动作:
+% $O_i^t=\Omega_i(s^t)$, $\mathbf u_i^t\sim\pi_i(\cdot\mid O_i^t)$. $s^t\in\mathcal S$为全局状态, $\Omega_i$为局部观测映射, $\mathbf u_i^t\in\mathcal A_i$为策略动作.
+
+% 在线执行阶段保持分布式, 每架无人机使用自身局部观测$O_i^t$及可观测或可通信邻机集合$\mathcal N_i^t\subseteq\mathcal N\setminus\{i\}$. 本文保持$\mathbf x_i^t$, $\mathbf v_i^t$和$\mathbf a_i^t$分别表示无人机$i$的位置, 速度和经下层动作接口映射得到的加速度, $\mathbf p_{\mathrm{task},i}^t$表示其任务终点. 离散运动状态由环境既有动力学推进, 可统一记为$(\mathbf x_i^{t+1},\mathbf v_i^{t+1})
+% =F_{\mathrm{env}}(\mathbf x_i^t,\mathbf v_i^t,
+% \mathbf a_i^t,\Delta t).$
+
+% 场景障碍物集合记为$\mathcal O=\mathcal O_{\mathrm{static}}\cup\mathcal O_{\mathrm{dynamic}}$. 定义无人机到环境障碍物的最小距离$d_{i,\mathrm{obs}}^t$ 及无人机间距离$d_{ij}^t$ 为 $d_{i,\mathrm{obs}}^t=\operatorname{dist}(\mathbf x_i^t,\mathcal O^t)$, $d_{ij}^t=\|\mathbf x_i^t-\mathbf x_j^t\|_2.$, 二者分别依据环境已有的障碍碰撞和机间碰撞判定确定安全性. 
+
+% \subsection{Dynamic Movement Primitives}
+
+% DMP将目标吸引动力学与可学习强制力相结合. 对单个平移自由度, 其二阶点动力学写为
+
+% \begin{equation}
+% \label{eq:DMP_dynamics}
+% \tau\dot z=\alpha_z\bigl(\beta_z(g-y)-z\bigr)+f,
+% \qquad
+% \tau\dot y=z,
+% \end{equation}
+
+% \noindent
+% 其中, $y$和$z$分别表示位置及缩放速度状态, $g$为目标, $\tau>0$为时间尺度参数, $\alpha_z,\beta_z>0$为吸引动力学参数, $f$为调制强制力.
+
+% \subsection{Safety Constraint Representation}
+
+% 为在局部感知条件下统一描述速度与障碍净空对安全性的影响, 定义CBF-inspired安全裕度函数
+
+% \begin{equation}
+% \label{eq:safety_margin_function}
+% h(d,\mathbf v)
+% =d-r_{\mathrm{safe}}-\tau_v\|\mathbf v\|_2,
+% \end{equation}
+
+% \noindent
+% 其中, $d$为沿给定方向或轨迹测得的最小障碍距离, $r_{\mathrm{safe}}$为最小安全距离, $\tau_v\|\mathbf v\|_2$为速度相关安全缓冲量. 正裕度表示当前观测尺度下仍具有可用净空. 该函数用于构造候选扇区评分和重规划触发量, 短时执行质量则直接使用预测轨迹的最小安全净空. 
+
+\section{Methodology}
+
+This section introduces the hierarchical reinforcement learning framework and its algorithmic design. Our method consists of an upper-level subgoal proposal module based on local observations and a lower-level motion execution module. We propose a candidate point proposal mechanism based on local observation-space restriction. After obtaining the candidate points, their execution quality is evaluated through short-horizon policy preview. The spatiotemporal interactions among UAVs are then modeled jointly. Based on these features, a Policy-preview-Aware Coordination-Enhanced Graph Attention Network (PACE-GAT) is developed for candidate evaluation and selection. The lower-level motion execution module combines reinforcement learning with DMP to generate smooth trajectories and perform local obstacle avoidance. Considering the time-scale mismatch between upper-level subgoal updates and lower-level continuous motion execution, a dynamic target point update mechanism is introduced. Our hierarchical framework is depicted in Figure N.
+
+
+% 本节介绍论文面向的强化学习路径规划框架. 该框架面向部分可观条件下的多无人机实时路径规划问题, 由局部风险感知参考点提议, 基于图注意力网络的候选筛选, 活动目标与待接续目标管理以及DMP轨迹生成四部分构成. 上层模块在重规划事件触发后生成并筛选候选参考点, 筛选结果先写入待接续目标缓存; 下层多智能体强化学习策略对当前活动目标进行增量偏移并输出DMP调制量, 最终由状态依赖切换律决定待接续目标何时接管活动目标.
+
+% 这里我本来打算将上层决策器也表示为一个policy network. 我认为全局信息未知的决策过程才是应当关注的, 上层如果继续依赖完整全局地图本质上还是强先验, 我不太喜欢
+
+\subsection{Sensor Sector-Wise Candidate Point Proposal Mechanism}
+
+This subsection presents the proposed Sensor Sector-wise Candidate Point Proposal Mechanism. Given the position $\mathbf{p}_i^t$ and velocity $\mathbf{v}_i^t$ of UAV $i$ at time $t$, the sensor observations set $\mathcal{Q}_i^t$, and the task goal $\mathbf{p}_{\mathrm{task},i}$.
+
+Then, the local observation space is partitioned into $M$ directional sectors.
+The resulting sector set $\mathcal{S}_i^t$ and the corresponding sector-wise observation set $\mathcal{Q}_{i,m}^t$ are given by:
+\begin{equation}
+    \label{eq:sector}
+    \begin{aligned}
+        \mathcal{S}_i^t
+        &= \left\{\mathcal{S}_{i,m}^t\right\}_{m=1}^{M}, \\
+        \mathcal{Q}_{i,m}^t
+        &= \left\{
+        \mathbf{q}\in\mathcal{Q}_i^t
+        \mid
+        \mathbf{q}\in\mathcal{S}_{i,m}^t
+        \right\},
+        \qquad m=1,\ldots,M .
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $M$ denotes the number of sectors, $m$ denotes the index of a sector, and $\mathcal{S}_i^t$ denotes the sector set, which consists of $M$ directional sectors $\mathcal{S}_{i,m}^t$, $m=1,\ldots,M$.
+
+The CBF-inspired safety margin and its normalized value for the $m$-th sector are calculated as follows:
+\begin{equation}
+    \label{eq:sector_safety_margin}
+    \begin{aligned}
+        h_{i,m}^t
+        &= d_{i,m}^{t,\min}
+        - r_{\mathrm{safe}}^{\mathrm{obs}}
+        - \tau_v \left\|\mathbf{v}_i^t\right\|_2, \\
+        \bar{h}_{i,m}^t
+        &= \operatorname{clip}
+        \left(
+        \frac{h_{i,m}^t}{h_{\max}},
+        0,1
+        \right).
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $d_{i,m}^{t,\min}$ denotes the minimum obstacle distance in $\mathcal{Q}_{i,m}^t$, $r_{\mathrm{safe}}^{\mathrm{obs}}$ denotes the prescribed obstacle safety distance, $\tau_v$ is the velocity-related safety coefficient, $\operatorname{clip}(\cdot)$ is the clipping function that limits its input to a specified interval, and $h_{\max}$ is the normalization constraint.
+
+For each sector with a positive safety margin, a candidate point is generated as follows:
+\begin{equation}
+    \label{eq:sector_step_length}
+    \begin{aligned}
+        \tilde{s}_{i,m}^t
+        &= \operatorname{clip}
+        \left(
+        \eta h_{i,m}^t,
+        s_{\min},
+        s_{\max}
+        \right), \\
+        s_{i,m}^t
+        &= \min
+        \left\{
+        \tilde{s}_{i,m}^t,
+        d_{i,m}^{t,\min}-r_{\mathrm{safe}}^{\mathrm{obs}},
+        r_{\mathrm{sensor}},
+        s_{\max}
+        \right\}, \\
+        \mathbf{g}_{i,m}^t
+        &= \mathbf{p}_i^t
+        + s_{i,m}^t\mathbf{d}_{i,m}^t .
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $\tilde{s}_{i,m}^t$ denotes the preliminary look-ahead distance of the $m$-th sector, and $\eta$ is the scaling coefficient for the safety margin. $s_{\min}$ and $s_{\max}$ denote the minimum and maximum allowable look-ahead distances, respectively. $s_{i,m}^t$ denotes the final look-ahead distance after considering the safety and sensing constraints, $\mathbf d_{i,m}^t$ denotes the unit direction of the $m$-th sector, and $r_{\mathrm{sensor}}$ denotes the sensor range. The resulting candidate reference point is denoted by $\mathbf{g}_{i,m}^t$.
+
+
+% 复杂动态环境中的无引导探索通常具有较高的样本复杂度和安全风险. 为降低下层策略直接从原始传感器观测中学习参考点选择的难度, 本文在上层引入基于局部感知的参考点提议机制. 当状态依赖重规划事件触发且当前不存在有效待接续目标时, 该模块根据当前传感器观测和任务目标方向生成一组短时域候选参考点, 作为后续图注意力网络的筛选输入.
+
+% 给定$t$时刻无人机位置$\mathbf{x}_t$, 速度$\mathbf{v}_t$, 局部坐标系下的传感器探测$\mathcal{P}_t=\{\mathbf p_n\}_{n=1}^{N}$和任务目标位置$\mathbf{p}_{\mathrm{task},t}\in\mathbb{R}^3$, 上层模块首先将局部观测划分为有限个方向扇区, 并在每个扇区内构造类控制障碍函数(CBF-inspired)安全裕度. 随后, 系统在安全裕度为正的扇区内提议参考点, 并根据安全裕度, 任务推进性, 运动连续性和可用前视距离保留得分最高的至多$K$个候选. 将无人机$i$在$t$时刻生成的候选参考点集合定义为$\mathcal{G}_i^t=\{\mathbf g_{i,1}^t,\mathbf g_{i,2}^t,\ldots,\mathbf g_{i,K_i^t}^t\}$. 其中, $\mathbf g_{i,k}^t$表示第$k$个候选参考点, $K$表示系统允许保留的最大候选数量, $K_i^t$表示当前有效候选数量, 且$K_i^t\leq K$.
+
+% 首先定义空间离散集合, 该部分将局部可观测空间离散为 $M$ 个方向扇区. 方向集合, 扇区点集及其最近障碍距离统一定义为 $\mathcal{U}_t=\bigl\{\mathbf{u}_t^m\bigr\}_{m=1}^{M}$, $\mathcal{P}_t^m=\bigl\{\mathbf{p}\in\mathcal{P}_t\mid\mathbf{p}\in\mathcal{S}_t^m\bigr\}$, $d_{t,m}^{\min}=\min_{\mathbf{p}\in\mathcal{P}_t^m}\lVert\mathbf{p}\rVert_2\;(m=1,\ldots,M)$. 其中, $\mathbf{u}_t^m$ 和 $\mathcal{S}_t^m$ 分别表示第 $m$ 个扇区的单位方向和观测区域. 
+% 将式\eqref{eq:safety_margin_function}作用于各扇区的最近障碍距离, 得到扇区安全裕度及其归一化量:
+
+% \begin{equation}
+% \label{eq:sector_safety_margin}
+% h_t^m=h(d_{t,m}^{\min},\mathbf v_t),
+% \qquad
+% \bar h_t^m=\operatorname{clip}(h_t^m/h_{\max},0,1),
+% \end{equation}
+
+% \noindent
+% 其中, $h_{\max}$为归一化尺度. $h_t^m>0$表示该扇区在当前速度相关安全缓冲下具有可用净空.
+
+% 为避免提议过程仅提出安全点, 忽略任务推进, 定义任务推进方向为$\hat{\mathbf d}_t=(\mathbf p_{\mathrm{task},t}-\mathbf x_t)/\|\mathbf p_{\mathrm{task},t}-\mathbf x_t\|_2$, 扇区对齐度为$A_t^m=(\mathbf u_t^m)^\top\hat{\mathbf d}_t$.
+
+% 对于满足$h_t^m>0$的安全扇区, 根据安全裕度确定前视步长并生成候选参考点:
+
+% \begin{equation}
+% \label{eq:sector_step_length}
+% \begin{aligned}
+% \tilde s_t^m&=\operatorname{clip}(\eta h_t^m,s_{\min},s_{\max}),\\
+% s_t^m&=\min\{\tilde s_t^m,d_{t,m}^{\min}-r_{\mathrm{safe}},
+% r_{\mathrm{sensor}},s_{\max}\},\\
+% \mathbf g_t^m&=\mathbf x_t+s_t^m\mathbf u_t^m.
+% \end{aligned}
+% \end{equation}
+
+% \noindent
+% 其中, $\eta$为比例系数, $s_{\min}$和$s_{\max}$为前视距离边界. 候选提议得分定义为
+
+% \begin{equation}
+% \label{eq:sector_proposal_score}
+% S_t^m =
+% w_h\bar{h}_t^m
+% + w_g A_t^m
+% + w_v(\mathbf{u}_t^m)^{\top}\hat{\mathbf{v}}_t
+% + w_l\operatorname{clip}(s_t^m/s_{\max},0,1).
+% \end{equation}
+
+% \noindent
+% 其中, $\hat{\mathbf v}_t$为当前速度方向, $w_h,w_g,w_v,w_l$分别对应安全裕度, 任务推进性, 运动连续性和可用前视距离. 根据式\eqref{eq:sector_proposal_score}从安全扇区中保留得分最高的至多$K$个参考点, 形成变长集合$\mathcal G_i^t$. 该评分仅用于候选集合构造, 上层监督标签由受控短时执行质量产生.
+% 这部分主要考虑是引入一部分可解释性, 不至于两个模块对着调, 两个都不对. 后续是不是可以将这部分作为初步的过滤和引导, 主要的工作还是让GAT来实现?
+
+
+% \subsection{Policy-Preview Spatiotemporal Graph Attention}
+% \label{subsec:policy_preview_gat}
+
+% 在候选参考点进入DMP-RL执行器之前, 本文首先引入图注意力网络对上层引导模块生成的局部候选参考点进行过滤与筛选, 以缓解短时局部引导可能存在的非全局最优性和参数敏感性问题. 现有基于当前距离, 运动方向和预计相遇时间的候选评价方式, 能够描述无人机, 候选参考点与邻近友机之间的瞬时几何关系. 然而, 候选参考点对应的实际运动轨迹还受到下层导航策略, 无人机当前运动状态以及DMP内部状态的共同影响. 因此, 仅根据候选点的几何位置难以准确判断其在下层导航策略作用下的实际可执行性. 此外, 不同无人机分别选择的局部可行候选点, 在后续联合执行过程中仍可能产生明显的时空重叠, 仅依赖当前时刻的几何关系难以充分刻画该类潜在冲突.
+
+% 针对上述问题, 本文在由候选参考点, 自身智能体和邻近友机构成的异构候选图基础上, 引入冻结策略短时执行预演机制. 对于每个候选参考点, 首先利用已经完成训练的下层SAC-DMP导航策略, 在当前已知局部信息条件下生成有限预测时域内的闭环运动序列. 随后, 从预演序列中提取短时任务推进量, 最小安全净空, 最大执行偏差和预测末端运动状态等特征, 并将其编码到相应的候选节点中. 在此基础上, 根据候选预演轨迹与邻近友机短时预测轨迹之间的最小距离, 最小距离出现时刻和风险持续时间构造未来时空交互边, 使图注意力网络能够结合候选参考点的实际执行响应和未来多机交互关系, 对不同候选参考点进行联合评价与筛选.
+
+
+% \subsubsection{Frozen-Policy Short-Horizon Execution Preview}
+% \label{subsubsec:frozen_policy_preview}
+
+% 为评估候选参考点与下层实际执行能力之间的匹配关系, 本文设计一种冻结策略短时执行预演机制(Frozen-Policy Short-Horizon Execution Preview, FP-SHEP). 对于无人机$i$在$t$时刻生成的第$k$个候选参考点$g_{i,k}^{t}$, 该机制在不改变真实环境状态的条件下, 复制当前无人机位置$x_i^{t}$, 速度$v_i^{t}$, DMP内部状态$z_i^{t}$, 相位变量$s_i^{t}$及局部传感器观测$O_i^{t}$, 并将候选参考点$g_{i,k}^{t}$暂时设置为预演分支中的active goal. 为便于表述, 将预演初始状态定义为
+
+% \begin{equation}
+%     \label{eq:preview_initial_state}
+%     S_i^{t}
+%     =
+%     \left\{
+%     x_i^{t},
+%     v_i^{t},
+%     z_i^{t},
+%     s_i^{t},
+%     O_i^{t}
+%     \right\}.
+% \end{equation}
+
+% 随后, 固定已完成训练的下层导航策略参数, 在长度为$H$的有限预测时域内, 按照与真实执行过程一致的观测构造, 策略前向计算, 目标偏移与residual forcing调制以及DMP状态递推过程, 生成候选参考点条件下的短时闭环执行序列:
+
+% \begin{equation}
+%     \label{eq:preview_sequence}
+%     \mathcal{H}_{i,k}^{t,H}
+%     =
+%     \left\{
+%     \left(
+%     \hat{x}_{i,k}^{t+h},
+%     \hat{v}_{i,k}^{t+h},
+%     \hat{a}_{i,k}^{t+h}
+%     \right)
+%     \right\}_{h=1}^{H}.
+% \end{equation}
+
+% \noindent
+% 式中, $\hat{x}_{i,k}^{t+h}$, $\hat{v}_{i,k}^{t+h}$和$\hat{a}_{i,k}^{t+h}$分别表示选择候选参考点$g_{i,k}^{t}$后, 第$h$个预演步对应的预测位置, 速度和DMP输出加速度. $H$表示短时执行预演的预测步数. 对于不同候选参考点, 其短时执行序列可统一表示为
+
+% \begin{equation}
+%     \label{eq:preview_dynamics}
+%     \mathcal{H}_{i,k}^{t,H}
+%     =
+%     \operatorname{Preview}
+%     \left(
+%     \pi_{\theta},
+%     \mathrm{DMP},
+%     S_i^{t},
+%     g_{i,k}^{t},
+%     H
+%     \right).
+% \end{equation}
+
+% \noindent
+% 式中, $\pi_{\theta}$表示参数保持冻结的下层SAC导航策略, $\operatorname{Preview}(\cdot)$表示由预测观测构造, 策略前向计算, DMP目标与residual forcing调制, DMP内部状态递推及无人机运动状态更新共同组成的短时闭环预演过程. 随着无人机预测位置, 速度和DMP内部状态的逐步更新, 系统基于当前已知局部环境信息重新构造预测观测, 并调用冻结导航策略生成下一预演步的结构化动作.
+
+% 通过对短时执行序列$\mathcal{H}_{i,k}^{t,H}$进行特征提取, 可以获得候选参考点对应的短时任务推进量, 最小安全净空, 最大执行偏差和预测末端速度等执行特征. 由此, 原始候选参考点由仅包含局部几何信息的静态位置表示扩展为包含下层导航策略实际运动响应的执行感知候选表示, 为后续候选节点特征构造和多无人机未来时空交互关系建模提供依据.
+
+% \subsubsection{Path-Aware Candidate Set Formulation}
+
+% % 这里记得修改
+% % 由于上层引导路点通常以离散形式给出, 仅直接使用这些路点作为候选子目标可能导致候选集合过于稀疏, 难以充分反映局部路径的连续趋势. 同时, 在部分可观环境下, 智能体只能依据当前局部观测评估有限范围内的候选点. 因此, 本文在候选子目标筛选前引入路径感知重采样机制, 重点保留目标方向视场范围内的参考路径段, 以增强候选集合的路径一致性和局部可选择性.
+
+% % 具体而言, 设当前时刻的参考路点集合为 $\mathcal{G}_t=\{\mathbf{g}_t^1,\mathbf{g}_t^2,\ldots,\mathbf{g}_t^n\}$, 目标方向视场角为 $\theta_{\mathrm{goal}}$. 首先, 对 $\mathcal{G}_t$ 中的离散路点进行插值平滑, 得到连续参考路径 $\Pi_t$. 随后, 以智能体当前朝向目标点的方向为中心, 在角度范围 $\left[-\theta_{\mathrm{goal}},\theta_{\mathrm{goal}}\right]$ 内均匀采样 $n_c$ 个方位角, 并在这些方向对应的局部参考路径段上生成候选子目标集合. 由此得到的候选集合不仅保留了上层引导路径的整体推进趋势, 也为后续 GAT 筛选模块提供了更密集且更具局部适应性的候选节点. 该过程得到的候选点集可由下式表示:
+
+% \begin{equation}
+%   \label{eq:candidate goal set}
+%   \mathcal{G}_c^i = \{ g_c^1, g_c^2, g_c^3, \cdots, g_c^n \}
+% \end{equation}
+
+% 将候选点, 我方智能体和临近友方智能体建模为一个异构图. 对当前任务, 其图结构可被描述为:
+
+% \begin{equation}
+%   \label{eq:Dynamic Graph}
+%   \mathcal{H}_t = (\mathcal{V}_t, \mathcal{E}_t, \mathcal{X}_t, \mathcal{Z}_t)
+% \end{equation}
+
+% \noindent
+% 式中, $\mathcal{H}_t$ 表示候选目标动态图, $\mathcal{V}_t$ 表示图节点集合, $\epsilon_t$ 表示边集合, $\mathcal(X)_t$ 表示节点特征, $\mathcal{Z}_t$ 表示边特征.
+
+% 图节点集合包含了当前异构图中包含的全部节点, 可以由下式表示:
+
+% \begin{equation}
+%   \label{eq:graph knot set}
+%   \mathcal{V}_i^t = \{ \mathfrak{v}_{null}^t, \mathfrak{v}_{agent}^t, \mathfrak{v}_{align}^t, \mathfrak{v}_1^t, \cdots, \mathfrak{v}_K^t \}
+% \end{equation}
+
+% \noindent
+% 式中, $ \mathfrak v_{null} $ 表示空引导节点, 即当前时刻不需要引入局部引导, 直接选择目标位置即可获取最高的收益; $ \mathfrak v_{agent} $ 表示自身智能体节点, $ \mathfrak v_1, \cdots, \mathfrak v_K $ 表示当前时刻生成的 $ K $ 个候选引导节点. $ \mathfrak v_{agent} $ 与所有引导节点连接, 其不参与最终候选选择, 只提供当前时刻的智能体信息; $ \mathfrak v_{align} $ 表示友方智能体节点, 其与临近的候选节点相连, 主要将友方智能体位置纳入考量.
+
+% \subsubsection{local confilct-aware heterogeneous candidate graph}
+% 在图神经网络中, 节点特征通常用于刻画节点自身的属性信息, 为后续消息传递与注意力权重计算提供基础. 考虑到本文构建的节点建模方式, 节点特征应能够反应局部几何信息, 风险信息与任务相关属性. 具体而言, 本文考虑的节点特征设计如下所示:
+
+% \begin{enumerate}
+%   \item 空引导节点 $ \mathfrak{v}_{null}$ : 该节点表示当前时刻不需要考虑额外的引导点, 直接将终点作为引导. 其特征向量可被设计为:
+%     \begin{equation}
+%       \label{eq:null knot}
+%       h_{null}^t = \left[ \theta_t^{goal}, r_t^{goal}, s_t^{goal} \right]
+%     \end{equation}
+%     \noindent
+%     式中, $\theta_t^{goal}$ 表示目标点相对机体坐标系的角度, $r_t^{goal}$ 表示目标点相对机体坐标系的剩余距离, $s_t^{goal}$ 表示该节点相对方向的安全评分, 由 $\ref{eq:sector_proposal_score}$ 计算. 我们没有在这部分引入目标点类别增广标记, 旨在让智能体在学习过程中理解不同引导点类型.
+%   \item 智能体节点 $ \mathfrak{v}_{agent} $ :该节点用于引入智能体自身状态与信息. 其特征向量设计如下式所示:
+%     \begin{equation}
+%       \label{eq:agent knot}
+%       h_{agent}^t = \left[ v_i^t, r_i^t, \theta_i^t, v_i^{t-1}, \mathcal{S}_i^t  \right]
+%     \end{equation}
+%     \noindent
+%     式中, $v_i^t$ 表示机体当前速度向量, $r_t^t$, $\theta_i^t$分别表示目标点相对距离和位置; $v_i^{t-1}$表示上一时刻的运动向量, $\mathcal{S}_i^t$表示当前时刻各个sensor扇区的风险评分.
+%   \item 候选引导节点 $\mathfrak{v}_1 \cdots \mathfrak{v}_K$: 该节点用于引入引导节点信息, 为GAT建模过程提供依据与参考.
+%     \begin{equation}
+%       \label{eq:proposal knot}
+%       h_k^t = \left[ p_k^t, \|p_k^t\|_2, \theta_k, l_k, s_k^t \right]
+%     \end{equation}
+%     \noindent
+%     式中, $p_k^t$ 表示候选参考点在机体坐标下的位置, 其二范数表示距离; $\theta_k$ 表示其到相对于机体坐标系的sensor区间标记, $l_k$ 表示当前候选点相对任务目标的推进距离, $s_k^t$ 表示当前方向的风险评分.
+%   \item 友方节点 $\mathfrak{v}_{align_i}$: 该节点引入当前智能体或候选引导节点附近的友机信息, 帮助策略理解场景中存在的其他智能体行为, 规避机间冲突行为.
+%     \begin{equation}
+%       \label{align}
+%       h_{align_i}^t = \left[ \theta_{align_i}^t, r_{align_i}^t, v_{align_i}^t \right]
+%     \end{equation}
+%     \noindent
+%     式中, $\theta_{align_i}^t$ 表示当前友方节点的相对方位角, $r_{align_i}^t$表示相对当前智能体的距离, $v_{align_i}$ 表示相对速度向量. 
+% \end{enumerate}
+
+% \paragraph{Agent-proposal edge features}
+
+% Agent-proposal边主要用于刻画智能体当前运动状态与候选参考点之间的方向关联关系. 对于无人机$i$及其第$k$个候选参考点$\mathbf{g}_{i,k}^{t}$, 将对应的边特征定义为
+
+% \begin{equation}
+%     \label{eq:agent_proposal_edge}
+%     e_{\mathrm{agent},k}^{t}
+%     =
+%     \left[
+%     s_{\mathrm{smooth},i,k}^{t}
+%     \right].
+% \end{equation}
+
+% \noindent
+% 式中, $s_{\mathrm{smooth},i,k}^{t}$用于衡量无人机当前运动方向与候选参考点方向之间的一致程度, 其具体计算方式为
+
+% \begin{equation}
+%     \label{eq:smooth_score}
+%     s_{\mathrm{smooth},i,k}^{t}
+%     =
+%     \frac{
+%     \left(
+%     \mathbf{v}_{i}^{t}
+%     \right)^{\top}
+%     \left(
+%     \mathbf{g}_{i,k}^{t}
+%     -
+%     \mathbf{x}_{i}^{t}
+%     \right)
+%     }{
+%     \left\|
+%     \mathbf{v}_{i}^{t}
+%     \right\|_{2}
+%     \left\|
+%     \mathbf{g}_{i,k}^{t}
+%     -
+%     \mathbf{x}_{i}^{t}
+%     \right\|_{2}
+%     +
+%     \varepsilon
+%     }.
+% \end{equation}
+
+% \noindent
+% 其中, $\varepsilon$为用于避免分母为零的较小正数. 当$s_{\mathrm{smooth},i,k}^{t}$接近$1$时, 表示候选参考点方向与无人机当前速度方向具有较高的一致性, 选择该候选点能够保持较好的运动连续性. 当该值较小时, 表示无人机需要进行较大幅度的方向调整. 考虑到短时任务推进量, 安全净空和执行偏差等执行特征已经由FP-SHEP提取并编码到候选节点中, agent-proposal边仅保留方向平滑性特征, 以避免节点特征与边特征之间的信息重复.
+
+
+% \paragraph{Proposal-align edge features}
+
+% Proposal-align边用于刻画候选参考点对应的预演轨迹与邻近友机预测轨迹之间的未来时空占据关系. 与仅根据候选点位置和友机瞬时状态计算预计相遇时间的方式不同, 本文利用FP-SHEP生成的候选条件短时执行序列$\mathcal{H}_{i,k}^{t,H}$, 对无人机$i$选择候选参考点$\mathbf{g}_{i,k}^{t}$后的运动趋势进行有限时域预测.
+
+% 由短时执行序列$\mathcal{H}_{i,k}^{t,H}$提取无人机$i$的候选预演位置序列
+
+% \begin{equation}
+%     \label{eq:candidate_preview_position_sequence}
+%     \hat{\mathcal{X}}_{i,k}^{t,H}
+%     =
+%     \left\{
+%     \hat{\mathbf{x}}_{i,k}^{t+h}
+%     \right\}_{h=1}^{H}.
+% \end{equation}
+
+% 对于邻近友机$j$, 根据$t$时刻能够获得的位置$\mathbf{x}_{j}^{t}$和速度$\mathbf{v}_{j}^{t}$, 在有限预测时域内采用短时恒速模型构造其预测位置序列
+
+% \begin{equation}
+%     \label{eq:ally_short_horizon_prediction}
+%     \hat{\mathbf{x}}_{j}^{t+h}
+%     =
+%     \mathbf{x}_{j}^{t}
+%     +
+%     h\Delta t\mathbf{v}_{j}^{t},
+%     \qquad
+%     h=1,2,\ldots,H,
+% \end{equation}
+
+% \noindent
+% 式中, $\Delta t$表示相邻预演步之间的时间间隔. 根据候选预演轨迹与友机预测轨迹之间的逐时刻相对位置, 定义第$h$个预测步对应的机间距离为
+
+% \begin{equation}
+%     \label{eq:preview_pairwise_distance}
+%     \hat{d}_{i,k;j}^{t+h}
+%     =
+%     \left\|
+%     \hat{\mathbf{x}}_{i,k}^{t+h}
+%     -
+%     \hat{\mathbf{x}}_{j}^{t+h}
+%     \right\|_{2}.
+% \end{equation}
+
+% 进一步定义预测时域内最小机间距离对应的预演步为
+
+% \begin{equation}
+%     \label{eq:minimum_distance_step}
+%     h_{i,k;j}^{*,t}
+%     =
+%     \arg\min_{1\leq h\leq H}
+%     \hat{d}_{i,k;j}^{t+h}.
+% \end{equation}
+
+% 由此, 选择候选参考点$\mathbf{g}_{i,k}^{t}$后的预计最小相遇时间和预计最小间距分别表示为
+
+% \begin{equation}
+%     \label{eq:predicted_minimum_encounter_time}
+%     \hat{t}_{i,k;j}^{t}
+%     =
+%     h_{i,k;j}^{*,t}\Delta t,
+% \end{equation}
+
+% \begin{equation}
+%     \label{eq:predicted_minimum_separation}
+%     \hat{d}_{i,k;j}^{t}
+%     =
+%     \min_{1\leq h\leq H}
+%     \hat{d}_{i,k;j}^{t+h}.
+% \end{equation}
+
+% 仅使用最小相遇时间和最小间距能够描述两条轨迹之间最显著的接近状态, 但难以区分瞬时接近与持续时空占据. 为进一步刻画候选执行过程中的冲突持续程度, 定义风险持续时间为
+
+% \begin{equation}
+%     \label{eq:predicted_risk_duration}
+%     \hat{T}_{i,k;j}^{t,\mathrm{risk}}
+%     =
+%     \Delta t
+%     \sum_{h=1}^{H}
+%     \mathbb{I}
+%     \left(
+%     \hat{d}_{i,k;j}^{t+h}
+%     <
+%     d_{\mathrm{safe}}
+%     \right),
+% \end{equation}
+
+% \noindent
+% 式中, $d_{\mathrm{safe}}$表示无人机之间的预设安全距离, $\mathbb{I}(\cdot)$表示指示函数. 当两架无人机在第$h$个预测步的距离小于$d_{\mathrm{safe}}$时, 该预测步被计入风险持续时间. 因此, $\hat{T}_{i,k;j}^{t,\mathrm{risk}}$能够描述候选预演轨迹与友机预测轨迹之间持续接近, 平行贴近及局部交叉占据等未来时空冲突特征.
+
+% 综合上述指标, 本文将proposal-align边特征定义为
+
+% \begin{equation}
+%     \label{eq:proposal_align_edge}
+%     e_{i,k;\mathrm{align}_{j}}^{t}
+%     =
+%     \left[
+%     \hat{t}_{i,k;j}^{t},
+%     \hat{d}_{i,k;j}^{t},
+%     \hat{T}_{i,k;j}^{t,\mathrm{risk}}
+%     \right].
+% \end{equation}
+
+% \noindent
+% 式中, $\hat{t}_{i,k;j}^{t}$表示候选预演轨迹与友机预测轨迹达到最小间距的预计时间, $\hat{d}_{i,k;j}^{t}$表示预测时域内的最小机间距离, $\hat{T}_{i,k;j}^{t,\mathrm{risk}}$表示两架无人机处于风险距离范围内的累计持续时间. 该设计在保留原预计相遇时间和预计最小间距语义的基础上, 进一步引入候选执行轨迹对应的风险持续信息, 使图网络能够区分瞬时接近与持续时空占据冲突.
+
+% 为避免对未来运动不存在明显交互关系的友机构建冗余边, 本文根据候选预演轨迹与友机预测轨迹之间的未来最小距离确定proposal-align边的连接关系. 当满足
+
+% \begin{equation}
+%     \label{eq:proposal_align_edge_condition}
+%     \hat{d}_{i,k;j}^{t}
+%     <
+%     d_{\mathrm{align}},
+% \end{equation}
+
+% \noindent
+% 时, 在候选节点$\mathfrak{v}_{i,k}^{t}$与友机节点$\mathfrak{v}_{\mathrm{align},j}^{t}$之间构建proposal-align边. 与根据候选点和友机当前位置之间的静态距离构建边相比, 该方式能够保留当前距离较远但未来运动轨迹可能发生交汇的友机关系, 同时削弱当前距离较近但运动趋势逐渐分离的无效交互关系.
+
+
+% \subsubsection{Risk-Aware Edge-Enhanced GAT Selector}
+% \label{subsubsec:risk_aware_edge_enhanced_gat}
+
+% 按照上述节点及边特征构造规则, 可以得到无人机$i$在$t$时刻对应的局部异构候选图$\mathcal{H}_{i}^{t}$. 其节点集合与边集合分别表示为
+
+% \begin{equation}
+%     \label{eq:node_set}
+%     \mathcal{V}_{i}^{t}
+%     =
+%     \left\{
+%     \mathfrak{v}_{1},
+%     \mathfrak{v}_{2},
+%     \ldots,
+%     \mathfrak{v}_{N_v}
+%     \right\},
+% \end{equation}
+
+% \begin{equation}
+%     \label{eq:edge_set}
+%     \mathcal{E}_{i}^{t}
+%     =
+%     \left\{
+%     \epsilon_{1},
+%     \epsilon_{2},
+%     \ldots,
+%     \epsilon_{N_e}
+%     \right\},
+% \end{equation}
+
+% \noindent
+% 式中, $N_v$和$N_e$分别表示当前局部异构图中的节点数量和边数量. 节点集合包括空引导节点, 自身智能体节点, 候选参考点节点及邻近友机节点. 边集合包括用于描述当前运动方向连续性的agent-proposal边, 以及用于描述候选执行轨迹与友机预测轨迹之间未来时空关系的proposal-align边.
+
+% 由于不同类型节点和不同类型边具有不同的原始特征维度及物理语义, 本文分别采用节点类型相关MLP和边类型相关MLP进行特征映射. 对于图中的第$n$个节点及节点$n$与节点$m$之间的边, 其初始隐状态表示为
+
+% \begin{equation}
+%     \label{eq:node_edge_mlp}
+%     \mathbf{h}_{n}^{0}
+%     =
+%     \phi_{\tau(n)}
+%     \left(
+%     h_{n}^{t}
+%     \right)
+%     \in
+%     \mathbb{R}^{d_h},
+%     \qquad
+%     \mathbf{z}_{nm}^{t}
+%     =
+%     \psi_{\rho(n,m)}
+%     \left(
+%     e_{nm}^{t}
+%     \right)
+%     \in
+%     \mathbb{R}^{d_e}.
+% \end{equation}
+
+% \noindent
+% 式中, $\tau(n)$表示节点$n$对应的节点类型, $\rho(n,m)$表示边$(n,m)$对应的边类型. $\phi_{\tau(n)}(\cdot)$和$\psi_{\rho(n,m)}(\cdot)$分别表示节点类型相关和边类型相关的MLP映射函数. $d_h$和$d_e$分别表示节点隐特征维度和边隐特征维度. 该映射能够在保留不同节点及边物理语义的基础上, 将其转换为适用于后续图注意力计算的连续隐空间表示.
+
+% 在第$l$层图注意力计算中, 边特征与边两端节点特征共同参与未归一化注意力系数计算
+
+% \begin{equation}
+%     \label{eq:edge_enhanced_attention_score}
+%     \eta_{nm}^{l}
+%     =
+%     \operatorname{LeakyReLU}
+%     \left(
+%     \mathbf{a}^{l\top}
+%     \left[
+%     \mathbf{W}_{s}^{l}\mathbf{h}_{n}^{l}
+%     \Vert
+%     \mathbf{W}_{t}^{l}\mathbf{h}_{m}^{l}
+%     \Vert
+%     \mathbf{W}_{e}^{l}\mathbf{z}_{nm}^{t}
+%     \right]
+%     \right),
+% \end{equation}
+
+% \noindent
+% 式中, $\mathbf{W}_{s}^{l}$, $\mathbf{W}_{t}^{l}$和$\mathbf{W}_{e}^{l}$分别表示源节点, 目标节点和边特征对应的线性映射矩阵, $\mathbf{a}^{l}$表示可学习的注意力向量, $\Vert$表示特征拼接操作. 对于节点$n$的邻居节点$m\in\mathcal{N}(n)$, 将未归一化注意力系数归一化为
+
+% \begin{equation}
+%     \label{eq:normalized_attention_coefficient}
+%     \alpha_{nm}^{l}
+%     =
+%     \frac{
+%     \exp\left(\eta_{nm}^{l}\right)
+%     }{
+%     \displaystyle
+%     \sum_{q\in\mathcal{N}(n)}
+%     \exp\left(\eta_{nq}^{l}\right)
+%     }.
+% \end{equation}
+
+% 节点$n$在第$l+1$层的特征更新表示为
+
+% \begin{equation}
+%     \label{eq:edge_enhanced_node_update}
+%     \mathbf{h}_{n}^{l+1}
+%     =
+%     \sigma
+%     \left(
+%     \sum_{m\in\mathcal{N}(n)}
+%     \alpha_{nm}^{l}
+%     \left(
+%     \mathbf{W}_{v}^{l}\mathbf{h}_{m}^{l}
+%     +
+%     \mathbf{W}_{z}^{l}\mathbf{z}_{nm}^{t}
+%     \right)
+%     \right),
+% \end{equation}
+
+% \noindent
+% 式中, $\mathbf{W}_{v}^{l}$和$\mathbf{W}_{z}^{l}$分别表示邻居节点特征与边特征对应的可学习映射矩阵, $\sigma(\cdot)$表示非线性激活函数. 通过将边特征同时引入注意力权重计算和消息聚合过程, 候选节点能够根据当前运动方向连续性, 候选短时执行特性及未来多机时空冲突程度, 自适应聚合自身智能体与邻近友机的信息.
+
+% \noindent
+% 其中, $\mathcal{N}(i)$ 表示节点 $i$ 的邻居节点集合. 对于候选引导节点, 其邻居主要包括智能体节点以及满足局部距离约束的友方节点, 因此 agent-proposal 边与 proposal-align 边均可通过 $\mathbf{z}_{ij}^{t}$ 参与注意力权重计算. 经过EGAT更新后的候选点节点特征可被表示为: 
+
+% \begin{equation}
+%   \label{eq:egat-node-update}
+%   \mathbf{h}_i^{l+1}
+%   =
+%   \sigma
+%   \left(
+%   \sum_{j\in\mathcal{N}(i)}
+%   \alpha_{ij}^{l}
+%   W_v\mathbf{h}_j^{l}
+%   \right)
+% \end{equation}
+
+% 节点状态更新后, 聚合所有候选目标的节点特征可得:
+% \begin{equation}
+%   \label{h' proposal}
+%   \mathcal{V}_{sel}^t =
+%   \{
+%   \mathfrak{v}_{null}^t,
+%   \mathfrak{v}_1^t,
+%   \cdots,
+%   \mathfrak{v}_K^t
+%   \}
+% \end{equation}
+
+% 引入MLP对特征矩阵进行打分, 得到最终节点输出:
+
+% \begin{equation}
+%   \label{eq:GAT output layer}
+%   \mathbf{g}_{GAT} = argmax(softmax(\psi_{out}(\mathcal{V}_{set}^t)))
+% \end{equation}
+
+
+\subsection{Policy-preview-Aware Coordination-Enhanced Graph Attention}
+
+Before the candidate reference points are passed to the low-level motion execution module, we introduce an edge-enhanced graph attention network to evaluate and select an appropriate candidate for each UAV. The network jointly considers candidate execution quality and inter-UAV spatiotemporal interactions.
+
+\subsubsection{Frozen-Policy Short-Horizon Execution Preview Mechanism}
+
+Considering that GAT cannot directly capture the trajectory response of the low-level model, we propose a Frozen-Policy Short-Horizon Execution Preview Mechanism (FP-SHEP). This mechanism performs a short-horizon rollout for each candidate. The low-level policy is kept frozen during the rollout, Several execution-related features are extracted from the predicted trajectory. 
+
+Specifically, for UAV $i$, FP-SHEP fixes the current state at time step $t$. The current local observation $\mathbf{o}_i^t$ and a candidate point $\mathbf g_{i,k}^t$ are used as the inputs to the low-level policy. A forward rollout of $H$ steps is then performed. The resulting trajectory is regarded as the preview trajectory of the candidate. The preview trajectory is defined as
+
+\begin{equation}
+    \label{eq:preview_dynamics}
+    \begin{aligned}
+        \Xi_{i,k}^{t,H}
+        &=
+        \pi_{\theta}
+        \left(
+        \mathbf{s}_i^t,
+        \mathbf{o}_i^t,
+        \mathbf{g}_{i,k}^t
+        \right) \\
+        &=
+        \left\{
+        \left(
+        \hat{\mathbf{p}}_{i,k}^{t+h},
+        \hat{\mathbf{v}}_{i,k}^{t+h},
+        \hat{\mathbf{u}}_{i,k}^{t+h}
+        \right)
+        \right\}_{h=1}^{H}.
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $\mathbf{s}_i^t$ denotes the current state of UAV $i$, $\mathbf{o}_i^t$ denotes its current local observation, and $\mathbf{g}_{i,k}^t$ denotes the $k$-th candidate point. The policy $\pi_{\theta}$ remains frozen during the preview. The low-level DMP execution is embedded in the rollout process. $\Xi_{i,k}^{t,H}$ denotes the resulting $H$-step preview trajectory.
+
+\subsubsection{Candidate Set and Heterogeneous Graph Formulation}
+
+This subsection presents the construction of the candidate point set and the corresponding heterogeneous graph.
+
+First, to reduce the computational burden, a scoring mechanism is introduced to filter the candidate points. The score is defined as follows:
+
+\begin{equation}
+    \label{eq:sector_proposal_score}
+    \Gamma_{i,m}^t =
+    w_h \bar{h}_{i,m}^t
+    + w_g A_{i,m}^t
+    + w_c C_{i,m}^t
+    + w_l L_{i,m}^t .
+\end{equation}
+
+\noindent
+where $\Gamma_{i,m}^t$ denotes the proposal score of the $m$-th sector at time step $t$. $A_{i,m}^t$ denotes the normalized progress of the candidate point toward the final task goal. $C_{i,m}^t$ denotes the motion smoothness of the current candidate point relative to the current UAV motion direction, which is measured by cosine similarity. $L_{i,m}^t$ denotes the distance between the current UAV and the candidate.
+
+Based on the local candidate point proposal mechanism, the candidate points of UAV $i$ at time step $t$ are filtered using the scoring function described above. The Top- $K$ candidates are then retained and reindexed by $k$ to construct the candidates set $\mathcal{G}_i^t = \{\mathbf{g}_{i,k}^t\}_{k=1}^{K_i^t}$, where $K_i^t\leq K$ denotes the retained candidate count. 
+
+Next, a heterogeneous graph is constructed to model the relationships among UAVs, candidate reference points, and task-related information. The heterogeneous graph can be denoted as $\mathcal{H}_{i}^{t}$:
+
+
+\begin{equation}
+    \label{eq:dynamic_graph}
+    \mathcal{H}_{i}^{t}
+    =
+    \left(
+    \mathcal{V}_{i}^{t},
+    \mathcal{E}_{i}^{t},
+    \mathcal{X}_{V,i}^{t},
+    \mathcal{X}_{E,i}^{t}
+    \right).
+\end{equation}
+
+\noindent
+where $\mathcal{V}_{i}^{t}$ denotes the node set, $\mathcal{E}_{i}^{t}$ denotes the edge set, $\mathcal{X}_{V,i}^{t}$ denotes the node feature matrix, and $\mathcal{X}_{E,i}^{t}$ denotes the edge feature matrix. The ego-UAV node is connected to all candidate nodes, while each neighboring-UAV node is connected only to those candidate nodes that satisfy the future spatiotemporal interaction condition.
+
+\subsubsection{Heterogeneous Node Feature construction}
+
+The node types and their feature representations are then specified for the heterogeneous graph. According to the feature requirements of the GAT, four types of nodes are defined in the heterogeneous graph: the ego-UAV node, null-guidance node, candidate node, and neighboring-UAV node. Node objects are denoted by $\mathfrak v$, whereas their feature vectors are denoted by $\mathbf x$ and collected in $\mathcal X_{V,i}^{t}$. The feature representations of these nodes are defined as follows:
+
+\paragraph{Null-guidance Node}
+The null-guidance node $\mathfrak{v}_{\mathrm{null},i}^{t}$ represents the case in which no additional local reference point is required and the final task goal is directly considered as a candidate guidance target. Its feature vector $\mathbf{x}_{\mathrm{null},i}^{t}$ is defined as:
+
+\begin{equation}
+    \label{eq:null_node}
+    \mathbf{x}_{\mathrm{null},i}^{t}
+    =
+    \left[
+        \vartheta_{i}^{t,\mathrm{goal}},
+        d_{i}^{t,\mathrm{goal}},
+        \rho_{i}^{t,\mathrm{goal}}
+    \right].
+\end{equation}
+
+\noindent
+where $\vartheta_{i}^{t,\mathrm{goal}}$ denotes the relative bearing of the final task goal in the local coordinate frame. $d_{i}^{t,\mathrm{goal}}$ denotes the remaining distance from the current UAV position to the final task goal. $\rho_{i}^{t,\mathrm{goal}}$ denotes the component of the sector-wise local risk vector $\boldsymbol{\rho}_{i}^{t}$ associated with the goal direction.
+
+\paragraph{Ego-UAV Node}
+The ego-UAV node $\mathfrak{v}_{\mathrm{ego},i}^{t}$ encodes the current motion state and local perception of UAV $i$. Its feature vector $\mathbf{x}_{\mathrm{ego},i}^{t}$ is defined as:
+
+\begin{equation}
+    \label{eq:ego_node}
+    \mathbf{x}_{\mathrm{ego},i}^{t}
+    =
+    \left[
+        \mathbf{v}_{i}^{t},
+        d_{i}^{t,\mathrm{goal}},
+        \vartheta_{i}^{t,\mathrm{goal}},
+        \mathbf{v}_{i}^{t-1},
+        \boldsymbol{\rho}_{i}^{t}
+    \right].
+\end{equation}
+
+\noindent
+where $i$ denotes the index of the ego UAV. $\mathbf{v}_{i}^{t}$ and $\mathbf{v}_{i}^{t-1}$ denote its velocity vectors at time steps $t$ and $t-1$, respectively. $d_{i}^{t,\mathrm{goal}}$ and $\vartheta_{i}^{t,\mathrm{goal}}$ denote the relative distance and bearing from UAV $i$ to its final task goal. $\boldsymbol{\rho}_{i}^{t}$ denotes the sector-wise local risk vector obtained from the current sensor observation.
+
+\paragraph{Candidate Node}
+The candidate node $\mathfrak{v}_{i,k}^{t}$ represents both the geometric characteristics of candidate reference point $k$ , and its FP-SHEP character.
+
+Let $\mathbf{g}_{i,k}^{t}$ denote the $k$-th candidate reference point of UAV $i$, its relative position and distance are given by $\Delta\mathbf{g}_{i,k}^{t}=\mathbf{g}_{i,k}^{t}-\mathbf{p}_{i}^{t}$ and $L_{i,k}^{t}=\|\Delta\mathbf{g}_{i,k}^{t}\|_{2}$, respectively. The relative bearing of the candidate is denoted by $\vartheta_{i,k}^{t}$.
+
+The geometric task progress of candidate $k$ is defined as $\Delta d_{i,k}^{t,\mathrm{geo}}=\|\mathbf{p}_{\mathrm{task},i}-\mathbf{p}_{i}^{t}\|_{2}-\|\mathbf{p}_{\mathrm{task},i}-\mathbf{g}_{i,k}^{t}\|_{2}$. A positive $\Delta d_{i,k}^{t,\mathrm{geo}}$ indicates that the candidate produces geometric progress toward the final task goal. The local risk score associated with the candidate direction is denoted by $\rho_{i,k}^{t}$.
+
+Based on the FP-SHEP preview trajectory $\Xi_{i,k}^{t,H}$, four execution-related features are further extracted:
+
+\begin{equation}
+    \label{eq:preview_execution_features}
+    \begin{aligned}
+        \Delta d_{i,k}^{t,H}
+        &=
+        \left\|
+            \mathbf{p}_{\mathrm{task},i}
+            -
+            \mathbf{p}_{i}^{t}
+        \right\|_{2}
+        -
+        \left\|
+            \mathbf{p}_{\mathrm{task},i}
+            -
+            \hat{\mathbf{p}}_{i,k}^{t+H}
+        \right\|_{2}, \\
+        c_{i,k}^{t,\min}
+        &=
+        \min_{1\leq h\leq H}
+        d_{\mathrm{obs}}
+        \left(
+            \hat{\mathbf{p}}_{i,k}^{t+h};
+            \mathcal{Q}_{i}^{t}
+        \right), \\
+        e_{i,k}^{t,\perp}
+        &=
+        \max_{1\leq h\leq H}
+        \operatorname{dist}
+        \left(
+            \hat{\mathbf{p}}_{i,k}^{t+h},
+            \overline{\mathbf{p}_{i}^{t}\mathbf{g}_{i,k}^{t}}
+        \right), \\
+        v_{i,k}^{t,H}
+        &=
+        \left\|
+            \hat{\mathbf{v}}_{i,k}^{t+H}
+        \right\|_{2}.
+    \end{aligned}
+\end{equation}
+
+\noindent
+here, $H$ denotes the short-horizon preview length, and $h$ denotes the rollout-step index. $\hat{\mathbf{p}}_{i,k}^{t+h}$ and $\hat{\mathbf{v}}_{i,k}^{t+h}$ denote the predicted position and velocity at preview step $h$, respectively. $\Delta d_{i,k}^{t,H}$ denotes the actual task progress achieved after an $H$-step execution preview. $\mathcal{Q}_{i}^{t}$ is the local observation set defined in Eq.~\eqref{eq:local_observation_set}. The function $d_{\mathrm{obs}}(\mathbf{p};\mathcal{Q}_{i}^{t})$ returns the minimum distance between position $\mathbf{p}$ and the known obstacles or environmental boundaries represented in $\mathcal{Q}_{i}^{t}$. Therefore, $c_{i,k}^{t,\min}$ denotes the minimum obstacle clearance over the preview horizon. The notation $\overline{\mathbf{p}_{i}^{t}\mathbf{g}_{i,k}^{t}}$ denotes the line segment connecting the current UAV position and candidate reference point. The function $\operatorname{dist}(\mathbf{p},\overline{\mathbf{p}_{i}^{t}\mathbf{g}_{i,k}^{t}})$ denotes the perpendicular distance from $\mathbf{p}$ to this line segment. Accordingly, $e_{i,k}^{t,\perp}$ denotes the maximum lateral deviation of the preview trajectory, and $v_{i,k}^{t,H}$ denotes its terminal speed.
+
+The feature vector $\mathbf{x}_{\mathrm{cand},i,k}^{t}$ of candidate node $\mathfrak{v}_{i,k}^{t}$ is then defined as:
+\begin{equation}
+    \label{eq:execution_aware_candidate_node}
+    \mathbf{x}_{\mathrm{cand},i,k}^{t}
+    =
+    \left[
+        \Delta\mathbf{g}_{i,k}^{t},
+        L_{i,k}^{t},
+        \vartheta_{i,k}^{t},
+        \Delta d_{i,k}^{t,\mathrm{geo}},
+        \rho_{i,k}^{t},
+        \Delta d_{i,k}^{t,H},
+        c_{i,k}^{t,\min},
+        e_{i,k}^{t,\perp},
+        v_{i,k}^{t,H}
+    \right].
+\end{equation}
+
+\noindent
+here, $\Delta\mathbf{g}_{i,k}^{t}$, $L_{i,k}^{t}$, $\vartheta_{i,k}^{t}$, $\Delta d_{i,k}^{t,\mathrm{geo}}$, and $\rho_{i,k}^{t}$ characterize the local geometric and risk properties of candidate $k$. $\Delta d_{i,k}^{t,H}$, $c_{i,k}^{t,\min}$, $e_{i,k}^{t,\perp}$, and $v_{i,k}^{t,H}$ characterize its short-horizon execution response obtained by FP-SHEP. In particular, $\Delta d_{i,k}^{t,\mathrm{geo}}$ describes the geometric progress implied by the candidate location, whereas $\Delta d_{i,k}^{t,H}$ describes the actual short-horizon progress produced by the frozen low-level policy.
+
+\paragraph{Neighboring-UAV Node}
+Finally, the neighboring-UAV node $\mathfrak{v}_{\mathrm{nbr},j}^{t}$ represents the relative motion state of neighboring UAV $j$ with respect to ego UAV $i$. Its feature vector $\mathbf{x}_{\mathrm{nbr},j}^{t}$ is defined as:
+
+\begin{equation}
+    \label{eq:neighbor_node}
+    \mathbf{x}_{\mathrm{nbr},j}^{t}
+    =
+    \left[
+        \vartheta_{ij}^{t},
+        d_{ij}^{t},
+        \Delta\mathbf{v}_{ij}^{t}
+    \right].
+\end{equation}
+
+\noindent
+here, $j$ denotes the index of a neighboring UAV. $\vartheta_{ij}^{t}$ denotes the relative bearing of UAV $j$ with respect to UAV $i$, and $d_{ij}^{t}=\|\mathbf{p}_{j}^{t}-\mathbf{p}_{i}^{t}\|_{2}$ denotes their relative distance. $\mathbf{p}_{j}^{t}$ denotes the current position of UAV $j$. The relative velocity is defined as $\Delta\mathbf{v}_{ij}^{t}=\mathbf{v}_{j}^{t}-\mathbf{v}_{i}^{t}$, where $\mathbf{v}_{j}^{t}$ denotes the current velocity of neighboring UAV $j$. These features provide the graph network with the local relative state required to model potential inter-UAV interactions.
+
+\subsubsection{Heterogeneous Edge Feature Construction}
+
+Two types of edge features are considered: Agent-Proposal edges and Proposal-Align edges. Their feature definitions are presented in this subsection.
+
+\paragraph{Agent-proposal Features.}
+The Agent-Proposal edge describes the motion continuity between the current velocity and the candidate direction. Its feature is defined using cosine similarity as :
+
+\begin{equation}
+\label{eq:agent_proposal_edge}
+\boldsymbol\chi_{i,k}^{t,\mathrm{AP}}
+=
+\left[C_{i,k}^{t}\right]
+=
+\left[
+\frac{(\mathbf v_i^t)^\top(\mathbf g_{i,k}^t-\mathbf p_i^t)}
+{\|\mathbf v_i^t\|_2
+ \|\mathbf g_{i,k}^t-\mathbf p_i^t\|_2+\varepsilon}
+\right]
+\in\mathbb R^1.
+\end{equation}
+
+\noindent
+where $\varepsilon$ is a small positive constant.
+
+\paragraph{Proposal-align Features}
+The Proposal-align edge describes the future spatiotemporal interaction between a candidate preview trajectory and the predicted trajectory of a neighboring UAV. For neighboring UAV $j$, a short-horizon constant-velocity prediction is performed using its current position and velocity. The UAV $j$ $\hat d_{i,k;j}^{t+h}$ are calculated as :
+
+\begin{equation}
+\label{eq:pairwise_short_horizon_prediction}
+\hat{\mathbf p}_j^{t+h}=\mathbf p_j^t+h\Delta t\mathbf v_j^t,
+\qquad
+\hat d_{i,k;j}^{t+h}
+=\|\hat{\mathbf p}_{i,k}^{t+h}-\hat{\mathbf p}_j^{t+h}\|_2,
+\quad h=1,\ldots,H.
+\end{equation}
+
+\noindent
+where $\hat{\mathbf{p}}_j^{t+h}$ denotes the predicted position of UAV $j$ at the $h$-th preview step under the constant-velocity assumption, and $h$ denotes the preview-step index. $\hat{\mathbf{p}}_{i,k}^{t+h}$ denotes the predicted position of UAV $i$ at the $h$-th step when executing candidate $k$.
+
+The predicted time to closest approach $ \hat t_{i,k;j}^{t}$, minimum separation $\hat d_{i,k;j}^{t,\min}$, and risk duration $\hat T_{i,k;j}^{t,\mathrm{risk}}$ are then calculated as follows:
+
+\begin{equation}
+    \label{eq:proposal_align_statistics}
+    \begin{aligned}
+        \hat t_{i,k;j}^{t}
+        &=
+        \left(
+        t + \arg\min_{1\leq h\leq H}
+        \hat d_{i,k;j}^{t+h}
+        \right)\Delta t, \\
+        \hat d_{i,k;j}^{t,\min}
+        &=
+        \min_{1\leq h\leq H}
+        \hat d_{i,k;j}^{t+h}, \\
+        \hat T_{i,k;j}^{t,\mathrm{risk}}
+        &=
+        \Delta t
+        \sum_{h=1}^{H}
+        \mathbb{I}
+        \left(
+        \hat d_{i,k;j}^{t+h}<d_{\mathrm{safe}}
+        \right).
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $d_{\mathrm{safe}}$ retains the minimum allowable inter-UAV distance defined in Eq.~\eqref{eq:multi_uav_planning_constraints}, and $\mathbb{I}(\cdot)$ denotes the indicator function. The Proposal-align edge is then defined as:
+
+\begin{equation}
+    \label{eq:proposal_align_edge}
+    \boldsymbol\chi_{i,k;\mathrm{align},j}^{t}
+    =
+    [
+        \hat t_{i,k;j}^{t},
+        \hat d_{i,k;j}^{t,\min},
+        \hat T_{i,k;j}^{t,
+        \mathrm{risk}}
+        ]
+\end{equation}
+
+\subsubsection{Policy-preview Edge-Enhanced Graph Attention Selector}
+
+The candidate nodes and their interaction edges provide execution-aware and coordination-related information for subsequent selection. However, directly selecting candidates based on individual node features cannot fully capture the influence of neighboring UAVs and future trajectory interactions. Therefore, we introduce a Policy-preview Edge-Enhanced Graph Attention Selector to evaluate the candidate points through heterogeneous graph reasoning. 
+
+First, the node and edge features with different dimensions are projected into a unified latent space through multi-layer perceptrons (MLP). This operation enables heterogeneous features to be jointly processed by the graph attention module. 
+
+Subsequently, an edge-enhanced graph attention mechanism is introduced.It aggregates information from neighboring nodes by considering both node and edge features.The attention coefficient $\zeta_{nm}^{\ell}$, attention weight $\alpha_{nm}^{\ell}
+$ and message passing representation $\mathbf h_n^{\ell+1}$ are defined as follows:
+
+\begin{equation}
+\label{eq:edge_enhanced_gat}
+\begin{aligned}
+\zeta_{nm}^{\ell}
+&=
+\operatorname{LeakyReLU}
+\left(
+(\mathbf w_{\mathrm{att}}^{\ell})^\top
+[
+\mathbf W_s^{\ell}\mathbf h_n^{\ell}
+\Vert
+\mathbf W_t^{\ell}\mathbf h_m^{\ell}
+\Vert
+\mathbf W_e^{\ell}\boldsymbol\chi_{nm}^{t}
+]
+\right),
+\\
+\alpha_{nm}^{\ell}
+&=
+\frac{
+\exp(\zeta_{nm}^{\ell})
+}
+{
+\sum_{q\in\mathcal N(n)}
+\exp(\zeta_{nq}^{\ell})
+},
+\\
+\mathbf h_n^{\ell+1}
+&=
+\sigma
+\left(
+\sum_{m\in\mathcal N(n)}
+\alpha_{nm}^{\ell}
+(
+\mathbf W_v^{\ell}\mathbf h_m^{\ell}
++
+\mathbf W_{\chi}^{\ell}\boldsymbol\chi_{nm}^{t}
+)
+\right).
+\end{aligned}
+\end{equation}
+
+\noindent
+where $\mathbf h_n^{\ell}$ and $\mathbf h_m^{\ell}$ denote the hidden representations of node $n$ and its neighboring node $m$ at layer $\ell$, respectively. 
+$\boldsymbol\chi_{nm}^{t}$ denotes the edge feature between node $n$ and node $m$ which extracted from $\mathcal X_{E,i}^t$. $\zeta_{nm}^{\ell}$ denotes the unnormalized attention coefficient.
+$\alpha_{nm}^{\ell}$ denotes the normalized attention weight. $\mathcal N(n)$ denotes the neighbor set of node $n$. $\mathbf W_s^{\ell}$, $\mathbf W_t^{\ell}$, $\mathbf W_e^{\ell}$, $\mathbf W_v^{\ell}$, and $\mathbf W_{\chi}^{\ell}$ are learnable transformation matrices. $\mathbf w_{\mathrm{att}}^{\ell}$ denotes the learnable attention vector. $\Vert$ denotes feature concatenation. $\sigma(\cdot)$ denotes the activation function. 
+
+For each candidate node, the final hidden representation obtained from the graph attention module is fed into an output MLP. The selection probability over the variable candidate set $\mathcal K_i^t=\{\mathrm{null},1,\ldots,K_i^t\}$ is calculated as:
+
+\begin{equation}
+\label{eq:candidate_selection}
+P_{i,k}^{t}
+=
+\frac{
+\exp(\psi_{\mathrm{out}}(\mathbf h_{i,k}^{\ell_{\max}}))
+}
+{
+\sum_{k'\in\mathcal K_i^t}
+\exp(\psi_{\mathrm{out}}(\mathbf h_{i,k'}^{\ell_{\max}}))
+},
+\qquad
+k\in\mathcal K_i^t .
+\end{equation}
+
+The selected candidate index is obtained by
+\begin{equation}
+\label{eq:selected_candidate}
+k_i^{*,t}
+=
+\arg\max_{k\in\mathcal K_i^t}
+P_{i,k}^{t}.
+\end{equation}
+
+\noindent
+where $\psi_{\mathrm{out}}(\cdot)$ denotes the output MLP, $\mathbf h_{i,k}^{\ell_{\max}}$ denotes the final representation of candidate node $k$, $P_{i,k}^{t}$ denotes the selection probability, and $k_i^{*,t}$ denotes the selected candidate index.
+
+\paragraph{Execution-quality-guided candidate supervision.}
+
+The selector is trained on graph states collected at reconstruction events of long-range R-ERR rollouts rather than only at the initial state. The training missions use the same workspace scale, mission-length range, obstacle-population stages, and geometry families as the evaluation task, with disjoint scene seeds and geometry. The runtime graph schema is unchanged; in particular, the same 56-direction canonical projection is retained. Only the normalization scale of the existing task-goal-distance feature is fitted to the 100-m workspace before training.
+
+For each recurrent graph state, every non-null candidate is evaluated offline by a 5-s cloned-state rollout with the frozen SAC-DMP executor. These counterfactual rollouts are used only to construct supervision and are unavailable at runtime. Candidate quality is ordered lexicographically by (i) focal-UAV hard safety, (ii) peer and obstacle margins, (iii) terminal progress and recurrent viability, and (iv) execution deviation. A team collision caused exclusively by a background UAV is not attributed to the focal candidate. The FP-SHEP Top-1 candidate is retained as the default target and is replaced only when another candidate is focal-safe, safety-noninferior, and provides a predeclared material safety or progress improvement. This FP-anchored construction avoids changing otherwise successful decisions merely because of small noisy rollout differences.
+
+Let $y_{i,k}^{t}\in\{0,1\}$ be the resulting one-hot candidate target. The primary selector loss is
+\begin{equation}
+    \label{eq:candidate_selection_loss}
+    \mathcal L_{\mathrm{select}}
+    =
+    -
+    \frac{1}{|\mathcal B|}
+    \sum_{(i,t)\in\mathcal B}
+    \sum_{k\in\mathcal K_i^t}
+    y_{i,k}^{t}
+    \log P_{i,k}^{t}.
+\end{equation}
+
+\noindent
+where $\mathcal B$ is a batch of recurrent candidate graphs and $P_{i,k}^{t}$ is the predicted selection probability. This recurrently aligned model is denoted GAT-R.
+
+We also evaluated a safety-first smoothness-aware variant, GAT-RS. Its eligible pair set $\mathcal P_{\mathrm{sm}}$ contains only non-null candidate pairs that are equivalent within predeclared safety, progress, and execution-deviation bands. For an eligible pair $(k^{+},k^{-})$, the preferred candidate $k^{+}$ has lower mean squared jerk under the same frozen executor. With candidate logit $s_{i,k}^{t}$, the auxiliary loss is
+
+\begin{equation}
+    \label{eq:smoothness_pairwise_loss}
+    \mathcal L_{\mathrm{sm}}
+    =
+    \frac{1}{|\mathcal P_{\mathrm{sm}}|}
+    \sum_{(i,t,k^{+},k^{-})\in\mathcal P_{\mathrm{sm}}}
+    \log\!\left(1+\exp\left(s_{i,k^{-}}^{t}-s_{i,k^{+}}^{t}\right)\right).
+\end{equation}
+
+\begin{equation}
+    \label{eq:upper_selection_loss}
+    \mathcal L_{\mathrm{upper}}
+    =
+    \mathcal L_{\mathrm{select}}
+    +
+    \lambda_{\mathrm{sm}}
+    \mathcal L_{\mathrm{sm}}.
+\end{equation}
+
+\noindent
+Here $\lambda_{\mathrm{sm}}=0$ for GAT-R and a small fixed value is used for the GAT-RS ablation. The smoothness term can therefore break ties only after safety and progress equivalence; it cannot make an unsafe candidate preferable. GAT-RS did not improve paired trajectory smoothness in development and was rejected before holdout. Consequently, the final method uses GAT-R. This supervision update does not alter runtime inputs, candidate-logit outputs, or the role of GAT as the upper-level reference selector.
+
+\subsection{Dynamic Movement Primitives Based UAV Motion Execution}
+
+Dynamic Movement Primitives (DMPs) provide a trajectory generation framework based on nonlinear dynamical systems. They generate continuous and smooth trajectories through a stable attractor system. For UAV motion execution, the DMP transformation system is formulated:
+
+\begin{equation}
+    \label{eq:dmp_system}
+    \begin{aligned}
+        \tau \dot{\mathbf y}
+        &=
+        \mathbf z,\\
+        \tau \dot{\mathbf z}
+        &=
+        \alpha_z
+        \left[
+        \beta_z(\mathbf g-\mathbf y)-\mathbf z
+        \right]
+        +
+        \mathbf f,
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $\mathbf y$ denotes the motion state, $\mathbf z$ is an auxiliary state variable, and $\mathbf g$ denotes the target position. $\tau$ is the temporal scaling parameter. $\alpha_z$ and $\beta_z$ are positive gains that determine the convergence behavior of the system.
+$\varphi$ denotes the phase variable. $\mathbf f$ is the nonlinear forcing term used to shape the generated trajectory. For UAV $i$, $\mathbf y=\mathbf p_i$, $\mathbf g=\widetilde{\mathbf g}_i$, and $\mathbf f=\mathbf f_i$. By changing the target position and the forcing term, DMPs can generate smooth trajectories while adapting to different target positions.
+
+The three-dimensional modulated target is introduced into the DMP dynamics. The result of the low-level acceleration command is given by:
+
+\begin{equation}
+    \label{eq:dmp_acceleration}
+    \mathbf u_{i}^{t}
+    =
+    \frac{1}{\tau^2}
+    \left[
+    \alpha_z
+    \left(
+    \beta_z
+    \left(
+    \widetilde{\mathbf g}_{i}^{t}
+    -
+    \mathbf p_{i}^{t}
+    \right)
+    -
+    \mathbf z_{i}^{t}
+    \right)
+    +
+    \mathbf f_i^t
+    \right].
+\end{equation}
+
+\noindent
+where $\widetilde{\mathbf g}_{i}^{t}$ denotes the current modulated target, and $\mathbf z_i^t$ denotes the scaled velocity state of the DMP. $\mathbf u_i^t$ denotes the DMP acceleration command and the control input defined in Eq.~\eqref{eq:uav_control_input}. The factor $1/\tau^2$ accounts for the temporal scaling from the DMP state dynamics to the physical acceleration.
+
+To suppress unnecessary policy modulation near the target, the policy output is scaled by a distance-dependent gating function:
+
+\begin{equation}
+    \label{eq:dmp_gated_forcing}
+    \mathbf f_i^t
+    =
+    \operatorname{clip}
+    \left(
+    \tanh\left(\kappa d_i^{t,\mathrm{mod}}\right)
+    \mathbf f_{\theta,i}^t,
+    -f_{\max},
+    f_{\max}
+    \right),
+\end{equation}
+
+\noindent
+where $\mathbf f_{\theta,i}^t$ denotes the raw modulation output of the low-level policy. $d_i^{t,\mathrm{mod}}=\|\widetilde{\mathbf g}_i^t-\mathbf p_i^t\|_2$ denotes the distance to the current modulated target. $\kappa$ denotes the distance-gating coefficient, and $f_{\max}$ denotes the maximum modulation magnitude. The gating term gradually reduces the policy modulation as the UAV approaches the target.
+
+\paragraph{Reinforcement Learning-Based DMP Modulation}
+
+The low-level motion execution process is formulated as a partially observable Markov decision process (POMDP). It is represented as
+
+\begin{equation}
+    \label{eq:pomdp_formulation}
+    \mathcal{M}
+    =
+    \left(
+    \mathbb{S},
+    \mathbb{A},
+    \mathsf{P},
+    \mathsf{R},
+    \mathbb{O},
+    \mathsf{O},
+    \gamma
+    \right).
+\end{equation}
+
+\noindent
+where $\mathbb{S}$ and $\mathbb{A}$ denote the environment state space and action space, respectively. $\mathsf{P}$ denotes the state transition function, and $\mathsf{R}$ denotes the reward function. $\mathbb{O}$ denotes the observation space, and $\mathsf{O}$ denotes the observation function. $\gamma\in[0,1)$ is the discount factor.
+
+At time step $t$, UAV $i$ cannot directly access the complete environmental state $\mathbf{s}_i^t\in\mathbb{S}$. Instead, it receives a local observation $\mathbf{o}_i^t\in\mathbb{O}$. The low-level policy generates an action based on the current local observation.
+
+The policy output consists of two components: a target residual $\boldsymbol\delta_i^{t,\mathrm{goal}}$ and a raw modulation output $\mathbf{f}_{\theta,i}^t$. 
+The modulated target and the structured policy action are defined as
+
+\begin{equation}
+    \label{eq:dmp_structured_action_and_goal}
+    \begin{aligned}
+        \widetilde{\mathbf g}_i^t
+        &=
+        \mathbf g_{i,\mathrm{active}}^t
+        +
+        \boldsymbol\delta_i^{t,\mathrm{goal}},\\
+        \boldsymbol\mu_i^t
+        &=
+        \left[
+        (\boldsymbol\delta_i^{t,\mathrm{goal}})^\top,
+        (\mathbf f_{\theta,i}^t)^\top
+        \right]^\top .
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $\mathbf g_{i,\mathrm{active}}^t$ denotes the current active target. 
+$\boldsymbol\delta_i^{t,\mathrm{goal}}$ denotes the target residual generated by the policy. $\widetilde{\mathbf g}_i^t$ denotes the resulting modulated target. $\mathbf f_{\theta,i}^t$ denotes the raw modulation output generated by the policy. $\boldsymbol\mu_i^t\in\mathbb A$ denotes the structured policy action.
+
+The raw modulation output is further scaled by the distance-dependent gating function in Eq.~\eqref{eq:dmp_gated_forcing}. The resulting forcing term $\mathbf f_i^t$ and the modulated target $\widetilde{\mathbf g}_i^t$ are then introduced into the DMP dynamics to generate the final acceleration command.
+
+The observation space and reward function are introduced below. 
+The observation space is designed to support reliable low-level motion execution under partial observability.It considers the current motion tendency of the UAV, its progress toward the active target, and short-term changes in the surrounding environment:
+
+\begin{equation}
+    \label{eq:observation_space}
+    \mathbf{o}_i^t
+    =
+    \left[
+    \mathbf{v}_i^t,\,
+    \hat{\mathbf{d}}_i^{t,\mathrm{active}},\,
+    d_i^{t,\mathrm{active}},\,
+    \mathbf q_i^t,\,
+    \mathbf q_i^{t-1},\,
+    \varphi_i^t,\,
+    \alpha_z,\,
+    \beta_z
+    \right].
+\end{equation}
+
+\noindent
+where $\mathbf{v}_i^t$ denotes the current velocity of the UAV. $\hat{\mathbf{d}}_i^{t,\mathrm{active}}$ denotes the unit vector from the current position to the active target, and $d_i^{t,\mathrm{active}}$ denotes the corresponding distance. $\mathbf q_i^t$ and $\mathbf q_i^{t-1}$ denote the radar point-cloud observation vectors associated with $\mathcal Q_i^t$ and $\mathcal Q_i^{t-1}$, respectively. $\varphi_i^t$, $\alpha_z$, and $\beta_z$ denote the DMP parameters. The observation vector $\mathbf{o}_i^t$ is used as the input to the low-level policy.
+
+\begin{equation}
+    \label{eq:low_level_reward}
+    r_i^t
+    =
+    r_i^{t,\mathrm{prog}}
+    -
+    U_i^{t,\mathrm{APF}}
+    -
+    c_{\mathrm{step}}
+    -
+    c_{\mathrm{col}}\mathbb{I}_{\mathrm{col}}
+    +
+    R_{\mathrm{succ}}
+    \mathbb{I}_{\mathrm{succ}\land\neg\mathrm{col}}
+    -
+    c_{\mathrm{timeout}}\mathbb{I}_{\mathrm{timeout}} .
+\end{equation}
+
+\noindent
+where $r_i^{t,\mathrm{prog}}$ denotes the target-progress reward, and $U_i^{t,\mathrm{APF}}$ denotes the obstacle potential penalty calculated using an artificial potential field (APF). $c_{\mathrm{step}}$ is the fixed step penalty. $c_{\mathrm{col}}$ and $c_{\mathrm{timeout}}$ denote the penalties for collision and timeout, respectively. $R_{\mathrm{succ}}$ denotes the terminal reward for successful completion.
+
+\subsection{Event-Triggered Reference Reconstruction Mechanism}
+
+The upper-level reference planning and the low-level motion execution operate on different time scales. To coordinate these two processes, an Event-Triggered Reference Reconstruction Mechanism (ERR) is introduced. The active reference remains unchanged during normal execution. Reference reconstruction is triggered only when the execution duration, motion progress, or local safety state indicates that the current reference is no longer suitable for continued execution.
+
+For UAV $i$, $\mathbf g_{i,\mathrm{active}}^t$ denotes the active target at time step $t$, and $t_{i,\mathrm{last}}$ denotes the time step of the most recent target update. The execution duration $T_i^{t,\mathrm{age}}$, distance to the active target $d_i^{t,\mathrm{active}}$, and average progress rate $\nu_i^t$ are calculated as follows:
+
+\begin{equation}
+    \label{eq:reference_execution_state}
+    \begin{aligned}
+        T_i^{t,\mathrm{age}}
+        &=
+        (t-t_{i,\mathrm{last}})\Delta t,\\
+        d_i^{t,\mathrm{active}}
+        &=
+        \left\|
+        \mathbf p_i^t-\mathbf g_{i,\mathrm{active}}^t
+        \right\|_2,\\
+        \nu_i^t
+        &=
+        \frac{
+        d_i^{t-W_{\mathrm{prog}},\mathrm{active}}
+        -
+        d_i^{t,\mathrm{active}}
+        }{
+        W_{\mathrm{prog}}\Delta t
+        }.
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $d_i^{t,\mathrm{active}}$ denotes the remaining distance to the active target, 
+$\nu_i^t$ denotes the average progress rate over a window of $W_{\mathrm{prog}}$ steps.
+A positive $\nu_i^t$ indicates progress toward the active target.
+
+Then, three normalized trigger variables are defined for execution duration, task progress, and local safety:
+
+\begin{equation}
+    \label{eq:reference_trigger_variables}
+    \begin{aligned}
+        \phi_{T,i}^t
+        &=
+        \frac{
+        T_i^{t,\mathrm{age}}-T_{\mathrm{rep}}
+        }{
+        T_{\mathrm{rep}}
+        },\\
+        \phi_{\nu,i}^t
+        &=
+        \frac{
+        \nu_{\min}-\nu_i^t
+        }{
+        \nu_{\mathrm{scale}}
+        },\\
+        \phi_{h,i}^t
+        &=
+        \frac{
+        h_{\mathrm{rep}}-h_i^{t,\mathrm{active}}
+        }{
+        h_{\mathrm{scale}}
+        }.
+    \end{aligned}
+\end{equation}
+
+\noindent
+where $T_{\mathrm{rep}}$ denotes the reference evaluation threshold.
+$\nu_{\min}$ denotes the minimum acceptable progress rate.
+$h_i^{t,\mathrm{active}}$ denotes the local safety margin along the active-target direction.
+$h_{\mathrm{rep}}$ denotes the safety reevaluation threshold.
+$\nu_{\mathrm{scale}}$ and $h_{\mathrm{scale}}$ are normalization factors.
+
+The trigger variables are combined into a unified triggering function as follows:
+
+\begin{equation}
+    \label{eq:event_reproposal_surface}
+    \Phi_{i,\mathrm{rep}}^t
+    =
+    \max
+    \left\{
+    \phi_{T,i}^t,\,
+    \phi_{\nu,i}^t,\,
+    \phi_{h,i}^t
+    \right\}.
+\end{equation}
+
+\noindent
+where $\Phi_{i,\mathrm{rep}}^t$ denotes the unified reference reconstruction trigger of UAV $i$ at time step $t$, $max$ is the maximum function.
+
+To avoid frequent reference reconstruction near the triggering boundary, a minimum reference update interval $T_{\mathrm{rep,min}}$ is introduced. An emergency safety threshold $h_{\mathrm{emg}}<h_{\mathrm{rep}}$ is further defined to handle rapid safety degradation. To distinguish a new hazardous-state entry from persistence inside the same hazardous state, each UAV maintains an emergency latch $a_{i,\mathrm{emg}}^t\in\{0,1\}$. The edge-triggered emergency event is
+
+\begin{equation}
+    \label{eq:edge_emergency_event}
+    E_{i,\mathrm{emg}}^t
+    =
+    \mathbb I\!\left(a_{i,\mathrm{emg}}^t=1\right)
+    \mathbb I\!\left(h_i^{t-1,\mathrm{active}}>h_{\mathrm{emg}}\right)
+    \mathbb I\!\left(h_i^{t,\mathrm{active}}\leq h_{\mathrm{emg}}\right).
+\end{equation}
+
+The reference reconstruction event is then defined as:
+
+\begin{equation}
+    \label{eq:final_reproposal_event}
+    E_{i,\mathrm{rep}}^t
+    =
+    \left[
+    \mathbb I
+    \left(
+    \Phi_{i,\mathrm{rep}}^t \geq 0
+    \right)
+    \mathbb I
+    \left(
+    T_i^{t,\mathrm{age}} \geq T_{\mathrm{rep,min}}
+    \right)
+    \right]
+    \vee
+    E_{i,\mathrm{emg}}^t.
+\end{equation}
+
+\noindent
+where $\vee$ denotes the logical OR operation. A newly entered emergency condition bypasses the minimum reference update interval. If the normal and emergency conditions become true on the same time step, they invoke the upper pipeline only once and the event is recorded with emergency priority.
+
+After an emergency event, $a_{i,\mathrm{emg}}$ is disarmed. It is rearmed only after the active-direction safety margin recovers to the already defined normal safety region, without introducing an additional numerical threshold:
+
+\begin{equation}
+    \label{eq:edge_emergency_rearm}
+    a_{i,\mathrm{emg}}^{t^{+}}
+    =
+    \begin{cases}
+        0, & E_{i,\mathrm{emg}}^t=1,\\[1mm]
+        1, & E_{i,\mathrm{emg}}^t=0
+             \land h_i^{t,\mathrm{active}}\geq h_{\mathrm{rep}},\\[1mm]
+        a_{i,\mathrm{emg}}^t, & \mathrm{otherwise}.
+    \end{cases}
+\end{equation}
+
+Consequently, a persistent interval with $h_i^{t,\mathrm{active}}\leq h_{\mathrm{emg}}$ produces one emergency event rather than one event per control step. Multiple emergency reconstructions remain possible in an episode whenever the margin first recovers to $h_{\mathrm{rep}}$ and subsequently crosses into the emergency region again; no reconstruction-count cap is imposed.
+
+When $E_{i,\mathrm{rep}}^t=1$, the upper-level candidate generation, FP-SHEP evaluation, and GAT selection are executed again.
+The symbol $k_i^{*,t}$ retains its definition as the selected candidate index.
+The reconstructed reference is given by
+
+\begin{equation}
+    \label{eq:selected_reference_mapping}
+    \mathbf g_{i,\mathrm{new}}^t
+    =
+    \begin{cases}
+        \mathbf p_{\mathrm{task},i},
+        & k_i^{*,t}=\mathrm{null},\\[1mm]
+        \mathbf g_{i,k_i^{*,t}}^t,
+        & k_i^{*,t}\in\{1,\ldots,K_i^t\}.
+    \end{cases}
+\end{equation}
+
+A separate handoff event is used when the current local reference has been reached:
+
+\begin{equation}
+    \label{eq:reference_handoff_event}
+    E_{i,\mathrm{hand}}^t
+    =
+    \mathbb I
+    \left(
+    d_i^{t,\mathrm{active}}
+    \leq d_{\mathrm{hand}}
+    \right)
+    \mathbb I
+    \left(
+    \mathbf g_{i,\mathrm{active}}^t
+    \neq
+    \mathbf p_{\mathrm{task},i}
+    \right),
+\end{equation}
+
+\noindent
+where $d_{\mathrm{hand}}$ denotes the reference completion threshold.
+Once the local reference is reached, the task goal is directly restored without invoking a new candidate selection.
+
+The active target is finally updated as
+
+\begin{equation}
+    \label{eq:unified_reference_update}
+    \mathbf g_{i,\mathrm{active}}^{t^{+}}
+    =
+    \begin{cases}
+        \mathbf p_{\mathrm{task},i},
+        & E_{i,\mathrm{hand}}^t=1,\\[1mm]
+        \mathbf g_{i,\mathrm{new}}^t,
+        & E_{i,\mathrm{hand}}^t=0
+        \land
+        E_{i,\mathrm{rep}}^t=1,\\[1mm]
+        \mathbf g_{i,\mathrm{active}}^t,
+        & \mathrm{otherwise},
+    \end{cases}
+\end{equation}
+
+\noindent
+where $\land$ denotes the logical AND operation and $t^{+}$ denotes the state immediately after the reference update.
+The handoff event has higher priority than the reconstruction event.
+
+At episode initialization, after the initial active target has been selected, the emergency latch and previous margin are synchronized to that target: the latch is armed if and only if its current active-direction margin is at least $h_{\mathrm{rep}}$. The same synchronization is applied after a reconstructed reference or a terminal-goal handoff becomes active. A target update therefore does not itself rearm the latch; an unsafe or hysteresis-band target remains disarmed, whereas a target already in the existing normal safety region is armed. This synchronization also prevents a second upper-level computation on the same update tick.
+
+The latest update time is refreshed whenever the active target changes:
+
+\begin{equation}
+    \label{eq:last_reference_update}
+    t_{i,\mathrm{last}}^{+}
+    =
+    \begin{cases}
+        t,
+        & E_{i,\mathrm{hand}}^t=1
+        \vee
+        E_{i,\mathrm{rep}}^t=1,\\
+        t_{i,\mathrm{last}},
+        & \mathrm{otherwise}.
+    \end{cases}
+\end{equation}
+
+The reference update is designed to preserve motion continuity during target transitions. 
+This reduces abrupt control variations and trajectory oscillations caused by frequent reference changes. The continuous DMP execution also decouples intermittent upper-level reference decisions from low-level trajectory generation. As a result, the framework can respond to changes in execution quality and local safety without sacrificing trajectory smoothness.
+% 在候选参考点进入下层执行器之前, 本文采用图注意力网络对上层模块生成的局部候选参考点进行筛选, 并将邻近无人机的短时运动关系纳入候选评价过程.
+
+% 针对上述问题, 本文在由候选参考点, 自身状态和邻近友机构成的异构候选图基础上, 引入冻结策略短时执行预演机制, 在当前已知局部信息条件下生成有限预测时域内的闭环运动序列, 并由预演序列提取短时任务推进量, 最小安全净空, 最大执行偏差和预测末端运动状态等特征. 在此基础上, 根据候选预演轨迹与邻近友机短时预测轨迹之间的最小距离, 最小距离出现时刻和风险持续时间构造未来时空交互边, 使图注意力网络能够结合候选参考点的实际执行响应和未来多机交互关系, 对不同候选参考点进行联合评价与筛选.
+
+% \subsubsection{Frozen-Policy Short-Horizon Execution Preview}
+% \label{subsubsec:frozen_policy_preview}
+
+% FP-SHEP复制无人机$i$在$t$时刻的位置, 速度和DMP内部状态, 使用该时刻冻结的局部观测$O_i^t$, 并将候选$\mathbf g_{i,k}^t$设置为预演分支的临时活动目标. 在冻结下层策略$\pi_\theta$下执行$H$步策略前向计算, 增量目标偏移, 强制力调制和DMP状态递推:
+
+% \begin{equation}
+% \label{eq:preview_dynamics}
+% \begin{aligned}
+% \Xi_{i,k}^{t,H}
+% &=\operatorname{Preview}\!\left(
+% \pi_\theta,\mathrm{DMP},
+% \mathbf x_i^t,\mathbf v_i^t,\mathbf z_i^t,
+% O_i^t,\mathbf g_{i,k}^t,H\right)\\
+% &=\left\{(\hat{\mathbf x}_{i,k}^{t+h},
+% \hat{\mathbf v}_{i,k}^{t+h},
+% \hat{\mathbf a}_{i,k}^{t+h})\right\}_{h=1}^{H}.
+% \end{aligned}
+% \end{equation}
+
+% \noindent
+% 式中, 预测量分别对应位置, 速度和DMP输出加速度. FP-SHEP仅在当前已知局部信息下生成在线候选特征与预测轨迹, 不推进真实环境状态.
+
+% \subsubsection{Candidate Set and Heterogeneous Graph Formulation}
+% \label{subsubsec:candidate_graph_formulation}
+
+% 根据上层局部参考点提议模块的输出, 无人机$i$在$t$时刻获得前述定义的变长候选参考点集合$\mathcal G_i^t$. 该集合包含$K_i^t$个有效候选, 并作为FP-SHEP执行预演和图注意力筛选的输入. 当前DMP继续使用活动目标, 直至状态依赖切换条件满足.
+
+% 将候选参考点, 自机状态和邻近友机建模为以无人机$i$为中心的局部异构图. 该图可表示为
+
+% \begin{equation}
+%     \label{eq:dynamic_graph}
+%     \mathcal{H}_{i}^{t}
+%     =
+%     \left(
+%     \mathcal{V}_{i}^{t},
+%     \mathcal{E}_{i}^{t},
+%     \mathcal{X}_{i}^{t},
+%     \mathcal{Z}_{i}^{t}
+%     \right).
+% \end{equation}
+
+% \noindent
+% 式中, $\mathcal{H}_{i}^{t}$表示无人机$i$在$t$时刻构建的局部候选异构图, $\mathcal{V}_{i}^{t}$表示节点集合, $\mathcal{E}_{i}^{t}$表示边集合, $\mathcal{X}_{i}^{t}$表示节点特征集合, $\mathcal{Z}_{i}^{t}$表示边特征集合.
+
+% 图节点集合由null, agent, proposal和align四类节点组成. 其中, $\mathfrak{v}_{\mathrm{null}}^{t}$表示空引导节点, 即当前时刻不需要引入额外的局部参考点. $\mathfrak{v}_{\mathrm{agent},i}^{t}$表示自身智能体节点. $\mathfrak{v}_{i,k}^{t}$表示第$k$个候选参考点节点. $\mathfrak{v}_{\mathrm{align},j}^{t}$表示邻近友机$j$对应的友机节点. $\mathcal{N}_{i}^{t}$表示无人机$i$当前能够感知或通信到的邻近友机集合. 自身智能体节点与所有候选节点连接, 邻近友机节点与满足未来时空交互条件的候选节点连接.
+
+
+% \subsubsection{Heterogeneous Knot Feature Construction}
+% \label{subsubsec:local_conflict_graph}
+
+% 节点特征分别编码任务终点, 自身运动状态, 候选几何及执行响应和邻机相对状态. 各类节点的输入特征如表\ref{tab:heterogeneous_node_features}所示. 其$r$和$\theta$表示相应目标或邻机的相对距离和方位, $s_t^{\mathrm{goal}}$与$\mathcal S_i^t$表示局部风险评分. 对候选$k$, 从FP-SHEP轨迹提取任务推进量, 最小安全净空, 最大横向偏差和末端速度:
+
+% \begin{equation}
+% \label{eq:preview_execution_features}
+% \begin{aligned}
+% \Delta d_{i,k}^{t,H}
+% &=\|\mathbf p_{\mathrm{task},i}^t-\mathbf x_i^t\|_2
+% -\|\mathbf p_{\mathrm{task},i}^t-\hat{\mathbf x}_{i,k}^{t+H}\|_2,\\
+% c_{i,k}^{t,\min}
+% &=\min_{1\le h\le H}d_{\mathrm{obs}}(\hat{\mathbf x}_{i,k}^{t+h};O_i^t),\\
+% e_{i,k}^{t,\perp}
+% &=\max_{1\le h\le H}\operatorname{dist}
+% (\hat{\mathbf x}_{i,k}^{t+h},\overline{\mathbf x_i^t\mathbf g_{i,k}^t}),\\
+% v_{i,k}^{t,H}&=\|\hat{\mathbf v}_{i,k}^{t+H}\|_2.
+% \end{aligned}
+% \end{equation}
+
+% \noindent
+% 其中, $l_{i,k}^{t}$描述候选几何推进量, $\Delta d_{i,k}^{t,H}$描述冻结下层策略作用后的实际短时推进量. 图边包括刻画运动连续性的agent-proposal边和刻画未来多机交互的proposal-align边两类.
+
+% \begin{table*}[t]
+% \centering
+% \caption{Node features of the local heterogeneous candidate graph}
+% \label{tab:heterogeneous_node_features}
+% \renewcommand{\arraystretch}{1.25}
+% \renewcommand{\tabularxcolumn}[1]{m{#1}}
+% \begin{tabularx}{\textwidth}{@{}>{\centering\arraybackslash}m{0.18\textwidth}>{\centering\arraybackslash}X>{\centering\arraybackslash}m{0.26\textwidth}@{}}
+% \toprule
+% Node type & Features & Meaning \\
+% \midrule
+% Null
+% & $\theta_t^{\mathrm{goal}}$, $r_t^{\mathrm{goal}}$, $s_t^{\mathrm{goal}}$
+% & 任务终点的相对方位, 距离和局部风险评分 \\
+% Ego
+% & $\mathbf v_i^t$, $r_i^t$, $\theta_i^t$, $\mathbf v_i^{t-1}$, $\mathcal S_i^t$
+% & 当前速度, 任务目标相对状态, 上一时刻速度和传感器扇区风险评分 \\
+% Proposal
+% & $\mathbf p_{i,k}^{t}$, $\|\mathbf p_{i,k}^{t}\|_2$, $\theta_{i,k}$, $l_{i,k}^{t}$, $s_{i,k}^{t}$, $\Delta d_{i,k}^{t,H}$, $c_{i,k}^{t,\min}$, $e_{i,k}^{t,\perp}$, $v_{i,k}^{t,H}$
+% & 候选几何, 局部评分及FP-SHEP短时执行特征 \\
+% Align
+% & $\theta_{\mathrm{align},j}^t$, $r_{\mathrm{align},j}^t$, $\mathbf v_{\mathrm{align},j}^t$
+% & 邻近友机的相对方位, 距离和速度 \\
+% \bottomrule
+% \end{tabularx}
+% \end{table*}
+
+% \subsubsection{Heterogeneous Edge Feature Construction}
+
+% \paragraph{Agent-proposal edge features}
+
+% Agent--proposal边使用当前速度与候选方向的余弦相似度刻画运动连续性:
+
+% \begin{equation}
+% \label{eq:agent_proposal_edge}
+% \mathfrak e_{\mathrm{agent},k}^{t}
+% =\left[
+% \frac{(\mathbf v_i^t)^\top(\mathbf g_{i,k}^t-\mathbf x_i^t)}
+% {\|\mathbf v_i^t\|_2\|\mathbf g_{i,k}^t-\mathbf x_i^t\|_2+\varepsilon}
+% \right].
+% \end{equation}
+
+% \noindent
+% 其中, $\varepsilon>0$用于避免除零. 任务推进, 安全净空和执行偏差已编码到候选节点, 该边仅保留方向平滑性.
+
+
+% \paragraph{Proposal-align edge features}
+
+% Proposal--align边刻画候选预演轨迹与邻机短时预测轨迹的未来时空关系. 对邻机$j$, 依据当前可用位置与速度采用短时恒速预测, 并定义逐步机间距离:
+
+% \begin{equation}
+% \label{eq:pairwise_short_horizon_prediction}
+% \hat{\mathbf x}_j^{t+h}=\mathbf x_j^t+h\Delta t\mathbf v_j^t,
+% \qquad
+% \hat d_{i,k;j}^{t+h}
+% =\|\hat{\mathbf x}_{i,k}^{t+h}-\hat{\mathbf x}_j^{t+h}\|_2,
+% \quad h=1,\ldots,H.
+% \end{equation}
+
+% 预计最小相遇时间, 最小间距和风险持续时间统一定义为
+
+% \begin{equation}
+%     \label{eq:proposal_align_statistics}
+%     \begin{aligned}
+%         \hat t_{i,k;j}^{t}
+%         &=
+%         \left(
+%         t + \arg\min_{1\leq h\leq H}
+%         \hat d_{i,k;j}^{t+h}
+%         \right)\Delta t, \\
+%         \hat d_{i,k;j}^{t,\min}
+%         &=
+%         \min_{1\leq h\leq H}
+%         \hat d_{i,k;j}^{t+h}, \\
+%         \hat T_{i,k;j}^{t,\mathrm{risk}}
+%         &=
+%         \Delta t
+%         \sum_{h=1}^{H}
+%         \mathbb{I}
+%         \left(
+%         \hat d_{i,k;j}^{t+h}<d_{\mathrm{safe}}
+%         \right).
+%     \end{aligned}
+% \end{equation}
+
+% 相应边特征定义为$e_{i,k;\mathrm{align},j}^{t}=[\hat t_{i,k;j}^{t},\hat d_{i,k;j}^{t},\hat T_{i,k;j}^{t,\mathrm{risk}}]$. 当$\hat d_{i,k;j}^{t}<d_{\mathrm{align}}$时, 将$(i,k;j)$加入边集合$\mathcal E_i^t$.
+
+% \noindent
+% 其中, $d_{\mathrm{safe}}$和$d_{\mathrm{align}}$分别为风险统计距离和预测交互连边阈值. 风险持续时间用于区分瞬时接近与持续时空占据.
+
+
+% \subsubsection{Policy-Preview Edge-Enhanced GAT Selector}
+% \label{subsubsec:policy_preview_edge_enhanced_gat}
+
+% 不同类型节点和边通过类型相关MLP映射至统一隐空间, 即$\mathbf h_n^0=\phi_{\tau(n)}(h_n^t)\in\mathbb R^{d_h}$和$\mathbf z_{nm}^t=\psi_{\rho(n,m)}(e_{nm}^t)\in\mathbb R^{d_e}$.
+
+% \noindent
+% 其中, $\tau(n)$和$\rho(n,m)$分别表示节点类型和边类型. 第$l$层edge-enhanced attention及消息聚合过程表示为:
+
+% \begin{equation}
+% \label{eq:edge_enhanced_gat}
+% \begin{aligned}
+% \eta_{nm}^{l}
+% &=\operatorname{LeakyReLU}\!\left(
+% \mathbf a^{l\top}[\mathbf W_s^l\mathbf h_n^l
+% \Vert\mathbf W_t^l\mathbf h_m^l
+% \Vert\mathbf W_e^l\mathbf z_{nm}^t]\right),\\
+% \alpha_{nm}^{l}
+% &=\frac{\exp(\eta_{nm}^{l})}
+% {\sum_{q\in\mathcal N(n)}\exp(\eta_{nq}^{l})},\\
+% \mathbf h_n^{l+1}
+% &=\sigma\!\left(\sum_{m\in\mathcal N(n)}\alpha_{nm}^{l}
+% (\mathbf W_v^l\mathbf h_m^l+\mathbf W_z^l\mathbf z_{nm}^t)\right).
+% \end{aligned}
+% \end{equation}
+
+% 对于候选节点, 消息来自ego节点及满足预测交互条件的邻机节点. 定义可选类别$\mathcal K_i^t=\{\mathrm{null},1,\ldots,K_i^t\}$, 输出MLP在该变长集合上产生logit和概率, 并根据最大概率确定最终候选索引及对应参考点:
+
+% \begin{equation}
+% \label{eq:candidate_score}
+% \begin{aligned}
+% q_{i,k}^{t}
+%     &= \psi_{\mathrm{out}}\!\left(\mathbf h_{i,k}^{L}\right),
+%     \qquad k \in \mathcal K_i^t, \\[2pt]
+% P_{i,k}^{t}
+%     &= \frac{\exp\!\left(q_{i,k}^{t}\right)}
+%     {\displaystyle\sum_{m\in\mathcal K_i^t}
+%     \exp\!\left(q_{i,m}^{t}\right)},
+%     \qquad k \in \mathcal K_i^t, \\[4pt]
+% k_i^{*,t}
+%     &= \underset{k\in\mathcal K_i^t}{\arg\max}\;
+%     P_{i,k}^{t}, \\[4pt]
+% \mathbf g_{i,\mathrm{sel}}^{t}
+%     &=
+%     \begin{cases}
+%     \mathbf p_{\mathrm{task},i}^{t},
+%         & \text{if } k_i^{*,t}=\mathrm{null}, \\[2pt]
+%     \mathbf g_{i,k_i^{*,t}}^{t},
+%         & \text{if } k_i^{*,t}\in\{1,\ldots,K_i^t\}.
+%     \end{cases}
+% \end{aligned}
+% \end{equation}
+% \\ToDo
+
+% \paragraph{Execution-quality-guided candidate supervision}
+
+% 图注意力网络依据当前局部异构图输出空引导节点及各候选参考点的选择概率. 候选提议阶段的几何评分用于构造具有基本局部可行性的候选集合; 上层网络的训练标签由各候选在冻结下层执行器作用下的短时执行质量构造. 其中$K_i^t\le K$, 空引导分支的临时参考目标定义为$\mathbf g_{i,\mathrm{null}}^t=\mathbf p_{\mathrm{task},i}^t$. 空引导节点与普通候选节点采用相同的短时执行质量评价过程, 并共同参与候选选择软标签的构造.
+
+% 在线候选特征和训练监督分别由两类短时执行机制产生. FP-SHEP使用起始时刻冻结的局部观测, 生成在线图注意力网络所需的候选执行特征和预测轨迹. 训练数据构造阶段采用独立的受控短时执行分支. 每个分支均从同一环境状态快照开始, 仅将无人机$i$的临时参考目标设置为$\mathbf g_{i,k}^t$, $k\in\mathcal K_i^t$; 邻近无人机保持各自的活动目标, 并依赖导航策略进行演化推进. 
+
+% 为统一候选监督与后续目标切换的质量判据, 轨迹$\Xi$对应的短时执行质量定义为
+
+% \begin{equation}
+%     \label{eq:unified_execution_quality}
+%     \mathcal J(\Xi)
+%     =
+%     \omega_d\overline{\Delta d}(\Xi)
+%     +
+%     \omega_c\overline c_{\min}(\Xi)
+%     -
+%     \omega_e\overline e_{\perp}(\Xi)
+%     -
+%     \omega_v\overline r_v(\Xi).
+% \end{equation}
+
+% \noindent
+% 其中, $\overline{\Delta d}(\Xi)$, $\overline c_{\min}(\Xi)$, $\overline e_{\perp}(\Xi)$和$\overline r_v(\Xi)$分别表示归一化后的任务推进量, 最小安全净空, 最大执行偏差和终端运动状态评价量; $\omega_d$, $\omega_c$, $\omega_e$和$\omega_v$为对应权重.
+
+% 候选$k$的监督执行质量定义为
+
+% \begin{equation}
+%     \label{eq:supervision_execution_quality}
+%     J_{i,k}^{t,\mathrm{sup}}
+%     =
+%     \mathcal J
+%     \left(
+%     \widetilde\Xi_{i,k}^{t,H_{\mathrm{sup}}}
+%     \right)
+%     -
+%     \lambda_{\mathrm{fail}}
+%     I_{i,k}^{t,\mathrm{fail}},
+%     \qquad
+%     k\in\mathcal K_i^t.
+% \end{equation}
+
+% \noindent
+% 式中, $I_{i,k}^{t,\mathrm{fail}}$依据训练环境已有终止原因识别明确执行失效类型为碰撞, 成功或超时; $\lambda_{\mathrm{fail}}>0$为明确失效事件的质量降级系数.
+
+% 同一局部状态下可能存在多个执行质量接近的候选. 本文根据候选集合内部的相对执行质量构造软监督分布
+
+% \begin{equation}
+%     \label{eq:execution_quality_soft_label}
+%     Y_{i,k}^{t}
+%     =
+%     \frac{
+%     \exp\left(
+%     J_{i,k}^{t,\mathrm{sup}}/\tau_{\mathrm{lab}}
+%     \right)
+%     }{
+%     \displaystyle
+%     \sum_{m\in\mathcal K_i^t}
+%     \exp\left(
+%     J_{i,m}^{t,\mathrm{sup}}/\tau_{\mathrm{lab}}
+%     \right)
+%     },
+%     \qquad
+%     k\in\mathcal K_i^t,
+% \end{equation}
+
+% \noindent
+% 其中, $\tau_{\mathrm{lab}}>0$为标签温度参数, 用于调节监督分布对候选质量差异的敏感程度. 上层候选选择损失采用软标签交叉熵
+
+% \begin{equation}
+%     \label{eq:candidate_selection_loss}
+%     \mathcal L_{\mathrm{select}}
+%     =
+%     -
+%     \frac{1}{|\mathcal B|}
+%     \sum_{(i,t)\in\mathcal B}
+%     \sum_{k\in\mathcal K_i^t}
+%     Y_{i,k}^{t}
+%     \log P_{i,k}^{t},
+% \end{equation}
+
+% \noindent
+% 其中, $\mathcal B$表示训练批次中的有效候选图样本集合. $\mathcal L_{\mathrm{select}}$用于约束图注意力网络输出的选择概率与受控短时执行质量形成的软标签一致.
+
+% \paragraph{Spatiotemporal overlap regularization}
+
+% 候选选择损失评价单架无人机在当前局部交互条件下的短时执行质量. 为进一步约束多架无人机候选组合的时空兼容性, 对候选参考点引入时空重叠正则项. 对无人机$i$的候选$k\in\{1,\ldots,K_i^t\}$和无人机$j$的候选$l\in\{1,\ldots,K_j^t\}$, FP-SHEP分别生成预测位置序列. 候选组合的时空重叠程度定义为
+
+% \begin{equation}
+%     \label{eq:candidate_trajectory_overlap}
+%     O_{i,k;j,l}^{t}
+%     =
+%     \frac{1}{H}
+%     \sum_{h=1}^{H}
+%     \frac{
+%     \left[
+%     d_{\mathrm{safe}}
+%     -
+%     \left\|
+%     \hat{\mathbf x}_{i,k}^{t+h}
+%     -
+%     \hat{\mathbf x}_{j,l}^{t+h}
+%     \right\|_2
+%     \right]_{+}
+%     }{
+%     d_{\mathrm{safe}}
+%     }.
+% \end{equation}
+
+% \noindent
+% 其中, $[x]_{+}=\max(x,0)$. $O_{i,k;j,l}^{t}$越大, 表示两个候选执行分支在有限预测时域内的时空重叠程度越高. 空引导节点不进入候选组合重叠评价.
+% % 这里需不需要让GAT分支输出一个局部目标的偏移量？但是现在下层已经考虑了这部分内容了．．．
+
+% 根据图注意力网络输出的候选选择概率, 时空重叠正则项定义为
+
+% \begin{equation}
+%     \label{eq:spatiotemporal_overlap_loss}
+%     \mathcal L_{\mathrm{overlap}}
+%     =
+%     \frac{1}{|\mathcal P^t|}
+%     \sum_{(i,j)\in\mathcal P^t}
+%     \sum_{k=1}^{K_i^t}
+%     \sum_{l=1}^{K_j^t}
+%     P_{i,k}^{t}
+%     P_{j,l}^{t}
+%     O_{i,k;j,l}^{t},
+% \end{equation}
+
+% \noindent
+% 其中, $\mathcal P^t$表示当前训练批次中的有效邻近无人机对集合. 当两架无人机同时对重叠程度较高的普通候选分支赋予较高概率时, $\mathcal L_{\mathrm{overlap}}$相应增大.
+
+% 上层候选筛选模块的总体训练目标为
+
+% \begin{equation}
+%     \label{eq:upper_selection_loss}
+%     \mathcal L_{\mathrm{upper}}
+%     =
+%     \mathcal L_{\mathrm{select}}
+%     +
+%     \lambda_{\mathrm{overlap}}
+%     \mathcal L_{\mathrm{overlap}},
+% \end{equation}
+
+% \noindent
+% 其中, $\lambda_{\mathrm{overlap}}$为时空重叠正则项权重. $\mathcal L_{\mathrm{select}}$建立局部异构图与候选短时执行质量之间的对应关系, $\mathcal L_{\mathrm{overlap}}$约束普通候选组合的时空重叠. 
+
+% % \\ToDo
+
+% \paragraph{Selected waypoint interface}
+
+% 图注意力网络输出的选定参考点$\mathbf{g}_{i,\mathrm{sel}}^{t}$先写入待接续目标缓存$\mathbf{g}_{i,\mathrm{pending}}^{t}$.待接续目标写入后, 状态依赖切换监督模块分别计算当前活动目标与待接续目标的预测执行质量. 正常情况下, 仅当待接续目标取得规定的执行质量优势且活动目标满足最小驻留时间时, 才允许其接管下层执行器. 若活动方向进入紧急风险区域, 系统首先检查待接续目标是否有效; 缓存为空时立即触发一次局部参考点提议与筛选, 获得有效待接续目标后绕过正常驻留时间约束完成切换. 
+
+% \subsection{DMP-Based UAV Navigation}
+
+% DMP基础动力学由式\eqref{eq:DMP_dynamics}给出. 下层多智能体强化学习策略输出活动目标增量$\Delta\mathbf g_t$和强制力调制量$\mathbf f_t$, 调制目标及结构化动作定义为
+
+% \begin{equation}
+% \label{eq:structured_action_and_goal}
+% \widetilde{\mathbf g}_t=\mathbf g_{\mathrm{active}}^t+\Delta\mathbf g_t,
+% \qquad
+% \mathbf a_t^{\mathrm{policy}}=[\Delta\mathbf g_t,\mathbf f_t].
+% \end{equation}
+
+% 将三维调制目标代入DMP动力学, 得到低层加速度指令:
+
+% \begin{equation}
+% \label{eq:DMP to acceleration}
+%  \mathbf{a}^{\mathrm{DMP}}_t =
+%  \frac{1}{\tau}
+%  \left[
+%  \alpha_z(\beta_z(\widetilde{\mathbf{g}}_t-\mathbf{x}_t)-\mathbf{z}_t)
+%  + \mathbf{f}_t
+%  \right].
+% \end{equation}
+
+% \noindent
+% 其中, $\mathbf z_t$为DMP缩放速度状态, $1/\tau$保持由$\dot{\mathbf z}_t$到加速度的时间尺度换算. 为限制接近调制目标时的调制幅值, 使用距离门控强制力
+
+% \begin{equation}
+% \label{eq:ImaginaryForceEq}
+%  \mathbf{f}_t =
+%  \operatorname{clip}(
+%  \tanh(\kappa d_t)
+%  \left[
+%  \mathbf{f}_{\mathrm{DMP}}(O_i^t)
+%  \right],
+%  -f_{\max},
+%  f_{\max}
+%  )
+% \end{equation}
+
+% \noindent
+% 其中, $\mathbf f_{\mathrm{DMP}}(O_i^t)$为策略依据局部观测输出的原始调制量, $d_t=\|\widetilde{\mathbf g}_t-\mathbf x_t\|_2$, $f_{\max}$和$\kappa$分别为幅值上限和距离门控系数. 该门控确保其在目标点附近时能够有效收敛到目标位置, 抑制策略网络的不必要输出.
+
+% \subsection{State-Dependent Hybrid Switching Mechanism}
+
+% 上层参考点提议与下层轨迹执行分别采用相应的更新条件. 若候选参考点生成后立即替换当前目标, 下层执行器的目标输入会随候选评分变化而频繁切换. 本文因此将候选重规划, 待接续目标写入和活动目标切换分为三个阶段, 并分别设计触发机制.
+
+% 本文将该过程定义为状态依赖混合切换机制(State-Dependent Hybrid Switching Mechanism, SDH). 该机制将上层候选参考点重规划与下层活动目标切换解耦: 重规划事件负责生成待接续目标, 执行质量条件和驻留时间负责正常切换, 紧急安全条件负责触发立即重规划并允许待接续目标绕过驻留时间接管执行器.
+
+% \subsubsection{Execution-State Representation}
+
+% 活动目标$\mathbf g_{i,\mathrm{active}}^t$持续作用于下层执行器, 待接续目标$\mathbf g_{i,\mathrm{pending}}^t$由上层生成并等待切换条件. 活动目标距离和长度为$W$的滑动窗口推进率定义为
+
+% \begin{equation}
+% \label{eq:active_execution_state}
+% \begin{aligned}
+% d_{i,\mathrm{active}}^t
+% &=\|\mathbf g_{i,\mathrm{active}}^t-\mathbf x_i^t\|_2,\\
+% p_i^t
+% &=\frac{d_{i,\mathrm{active}}^{t-W}-d_{i,\mathrm{active}}^t}
+% {W\Delta t+\varepsilon}.
+% \end{aligned}
+% \end{equation}
+
+% \noindent
+% 其中, $\Delta t$为控制周期, $\varepsilon>0$为数值稳定项. 当前活动方向的安全裕度$h_{i,\mathrm{active}}^t$由式\eqref{eq:safety_margin_function}基于对应方向的局部净空计算, 驻留时间记为$\tau_{i,\mathrm{active}}^t=t-t_{i,\mathrm{last\,sw}}$.
+
+
+% \subsubsection{Event-Triggered Replanning Condition}
+
+% 执行时间, 推进退化和安全裕度分别形成归一化触发量, 并由最大值构造统一重规划面:
+
+% \begin{equation}
+% \label{eq:candidate_score}
+% \begin{aligned}
+% q_{i,k}^{t}
+%     &= \psi_{\mathrm{out}}\!\left(\mathbf h_{i,k}^{L}\right),
+%     \qquad k \in \mathcal K_i^t, \\[2pt]
+% P_{i,k}^{t}
+%     &= \frac{\exp\!\left(q_{i,k}^{t}\right)}
+%     {\displaystyle\sum_{m\in\mathcal K_i^t}
+%     \exp\!\left(q_{i,m}^{t}\right)},
+%     \qquad k \in \mathcal K_i^t, \\[4pt]
+% k_i^{*,t}
+%     &= \underset{k\in\mathcal K_i^t}{\arg\max}\;
+%     P_{i,k}^{t}, \\[4pt]
+% \mathbf g_{i,\mathrm{sel}}^{t}
+%     &=
+%     \begin{cases}
+%     \mathbf p_{\mathrm{task},i}^{t},
+%         & \text{if } k_i^{*,t}=\mathrm{null}, \\[2pt]
+%     \mathbf g_{i,k_i^{*,t}}^{t},
+%         & \text{if } k_i^{*,t}\in\{1,\ldots,K_i^t\}.
+%     \end{cases}
+% \end{aligned}
+% \end{equation}
+
+% \noindent
+% 其中, $T_{\mathrm{rep}}$, $p_{\min}$和$h_{\mathrm{rep}}$分别为时间, 推进率和安全裕度阈值. 当$\mathcal S_{i,\mathrm{rep}}^t\ge0$且不存在有效待接续目标时, 触发一次候选提议与筛选, 并将结果写入$\mathbf g_{i,\mathrm{pending}}^t$.
+
+% \subsubsection{Execution-Quality-Based Switching Function}
+
+% 获得待接续目标后, 系统复用式\eqref{eq:preview_dynamics}的FP-SHEP和式\eqref{eq:unified_execution_quality}的统一判据, 分别计算活动目标与待接续目标的预测执行质量. 记$J_i^t(\mathbf g)=\mathcal J(\Xi_i^{t,H}(\mathbf g))$, 则目标切换函数为
+
+% \begin{equation}
+% \label{eq:execution_quality_switching_function}
+% \mathcal S_{i,\mathrm{sw}}^t
+% =J_i^t(\mathbf g_{i,\mathrm{pending}}^t)
+% -J_i^t(\mathbf g_{i,\mathrm{active}}^t)-\Delta J_{\mathrm{sw}},
+% \end{equation}
+
+% \noindent
+% 其中, $\Delta J_{\mathrm{sw}}>0$为切换所需的最小质量优势. $\mathcal S_{i,\mathrm{sw}}^t\ge0$表示待接续目标满足质量条件, 正常接管仍需满足驻留时间和目标有效性约束.
+
+
+% \subsubsection{Dwell-Time Constraint and Emergency Switching}
+% 正常切换使用最小驻留时间$T_{\mathrm{dwell}}$限制切换频率. 动态障碍或邻机运动可能使活动方向快速进入风险区域, 因此定义紧急安全函数
+% \begin{equation}
+%     \label{eq:emergency_safety_switch}
+%     \mathcal{S}_{i,\mathrm{emg}}^t
+%     =
+%     h_{\mathrm{emg}}
+%     -
+%     h_{i,\mathrm{active}}^t,
+% \end{equation}
+
+% \noindent
+% 其中, $h_{\mathrm{emg}}<h_{\mathrm{rep}}$. 当$h_{\mathrm{emg}}<h_{i,\mathrm{active}}^t\le h_{\mathrm{rep}}$时触发候选重规划; 当$\mathcal S_{i,\mathrm{emg}}^t\ge0$时进入紧急风险区域. 若pending缓存为空, 系统立即执行一次候选提议与筛选, 获得有效目标后绕过正常驻留时间完成切换.
+
+% 状态依赖重规划与目标切换的执行逻辑见Algorithm~\ref{alg:state_dependent_switching}.
+
+% \begin{algorithm}[!htbp]
+% \small
+% \caption{State-dependent replanning and goal switching}
+% \label{alg:state_dependent_switching}
+% \algrenewcommand\algorithmicindent{1.2em}
+% \begin{algorithmic}[1]
+% \If{$\mathcal S_{i,\mathrm{rep}}^t\ge0 \land \mathbf g_{i,\mathrm{pending}}^t=\varnothing$}
+%     \State 执行候选参考点提议与筛选，并令
+%     $\mathbf g_{i,\mathrm{pending}}^t\gets\mathbf g_{i,\mathrm{sel}}^t$
+% \EndIf
+% \If{$\mathcal S_{i,\mathrm{emg}}^t\ge0 \land \mathbf g_{i,\mathrm{pending}}^t=\varnothing$}
+%     \State 立即执行候选参考点提议与筛选，并令
+%     $\mathbf g_{i,\mathrm{pending}}^t\gets\mathbf g_{i,\mathrm{sel}}^t$
+% \EndIf
+% \State $\chi_i^t\gets(\mathcal S_{i,\mathrm{emg}}^t\ge0)\lor
+%     \bigl[(\mathcal S_{i,\mathrm{sw}}^t\ge0)\land
+%     (\tau_{i,\mathrm{active}}^t\ge T_{\mathrm{dwell}})\bigr]$
+% \If{$\chi_i^t \land \mathbf g_{i,\mathrm{pending}}^t\ne\varnothing$}
+%     \State $\mathbf g_{i,\mathrm{active}}^{t+}\gets\mathbf g_{i,\mathrm{pending}}^t$
+%     \State $\mathbf g_{i,\mathrm{pending}}^{t+}\gets\varnothing$, $\mathbf v_i^{t+}\gets\mathbf v_i^t$
+% \Else
+%     \State 继续使用当前活动目标
+% \EndIf
+% \end{algorithmic}
+% \end{algorithm}
+
+% \section{Reinforcement Learning Algorithm Design}
+
+% 本节介绍所提出方法的具体执行与训练流程, 包括分层决策时序, 奖励函数设计, 策略更新方式和整体训练过程. 
+
+% \subsection{Design of Planning Environments}
+% 本节主要简述训练与实验场景设置. 考虑本文面向的现实场景, 将主要的训练场景设置为以下四类:
+
+% \begin{itemize}
+%   \item 封闭场景: 空旷的基础环境, 多智能体分别具有独立的起点和目标点, 用于验证基本规划与协同避让能力.
+%   \item 稀疏障碍场景: 在封闭场景中加入少量静态障碍物, 用于训练智能体对局部障碍的感知, 规避与路径调整能力.
+%   \item 稠密障碍场景: 在稀疏障碍场景的基础上进一步增加障碍物数量与形态复杂度, 使可通行区域显著收窄, 用于考察策略在受限通道中的规划与避障能力.
+%   \item 全量避障场景: 在稠密障碍场景中加入按照固定模式运动的动态障碍物, 用于评估智能体同时处理静态约束与动态风险的综合避障能力.
+% \end{itemize}
+
+% 上述四类场景以任务成功率为依据, 通过课程学习逐步提升难度, 引导智能体依次掌握编队内避让, 静态障碍绕行和动态障碍规避能力.
+
+% \subsection{Reinforcement Learning Formulation}
+% 本节给出强化学习结构构建, 状态空间与观测空间设计即算法构建的详细过程.
+
+% \subsubsection{State and Observation Spaces}
+% 本节主要介绍训练过程的状态与观测空间设计. 对本文面向的多智能体协同路径规划任务, 考虑场景中存在的多架智能体状态空间可被定义为:
+
+% \begin{equation}
+%   \label{eq:state space}
+%   s_t =
+%   \left[
+%     p_t, v_t, a_t
+%   \right]
+% \end{equation}
+
+% \noindent
+% 式中, $p_t$, $v_t$ 和 $a_t$ 分别表示所有智能体在时刻 $t$ 的位置, 速度和加速度状态. 对于单个智能体, 其控制量输入即为其三轴加速度$ \left[ a_x, a_y, a_z \right]$.
+
+% 智能体依赖传感器构建观测空间, 本文构建基于智能体自身传感器观测的传感器观测, 具体组织形式如下式所示:
+
+% \begin{equation}
+%   \label{eq:sensor observation}
+%   x_{ray} = 
+%   \left[
+%     d_{t,r},
+%     d_{t-1,r},
+%     \Delta d_{t,r},
+%     h_{t,r}
+%   \right]
+% \end{equation}
+% \noindent
+% 式中, $d_{t,r}, d_{t-1,r}$ 表示当前方向智能体与最近障碍物之间的最小归一化距离, 
+
+% \subsubsection{Action Space}
+
+% \subsubsection{Design of Reward Function}
+
+
+% % 写作提示: 这里需要把奖励函数写完整. 当前应重点体现中间路点的顺序切换, 朝向下一路点的速度约束, 到达终点后的悬停行为, 避障安全性和路径效率.
+
+% \subsection{Policy Update}
+
+% % 写作提示: 这里写类HARL或CTDE训练更新过程. 如果四个输出由不同子策略产生, 需要说明各子策略如何共同形成当前智能体动作, 以及训练时如何共享或分离价值估计.
+
+% 综合上述几部分网络, 该部分训练策略可被分解为两阶段:
+
+% % \begin{item}
+
+% % \end{item}
+
+% \subsection{Training Procedure}
+
+% % 写作提示: 这里建议放算法伪代码, 按初始化, 采样, 上层路点生成, 下层动作执行, 奖励计算和参数更新的顺序写.
+
+\section{Experiments and Analysis}
+
+本节通过对比实验和消融实验验证所提出方法的有效性.
+
+\subsection{Experimental Setup}
+
+% 写作提示: 这里写环境尺寸, 无人机数量, 障碍物设置, 训练参数和评价场景.
+
+\subsection{Baseline Methods}
+
+% 写作提示: 这里列出对比方法, 并说明每个方法和本文方法的主要差异.
+
+\subsection{Evaluation Metrics}
+
+% 写作提示: 建议包含成功率, 碰撞率, 平均路径长度, 到达时间, 轨迹平滑度和训练收敛速度.
+
+\subsection{Comparison Results}
+
+% 写作提示: 这里放主要对比结果表格和分析, 重点说明本文方法在哪些场景下更稳定.
+
+\subsection{Ablation Study}
+
+% 写作提示: 建议分别去掉候选路点引导, 安全约束和DMP模块, 用于证明每个模块的必要性.
+
+\section{Conclusion}
+
+本文研究复杂动态环境下的多无人机路径规划问题, 并提出一种结合安全引导候选路点, DMP轨迹生成和分层强化学习的路径规划框架. 后续工作将进一步考虑更真实的无人机动力学约束, 通信受限条件以及真实平台实验验证.
+
+%% For citations use: 
+%%       \cite{<label>} ==> [1]
+
+%%
+Example citation, See \cite{lamport94}.
+
+%% If you have bib database file and want bibtex to generate the
+%% bibitems, please use
+%%
+%%  \bibliographystyle{elsarticle-num} 
+%%  \bibliography{<your bibdatabase>}
+
+%% else use the following coding to input the bibitems directly in the
+%% TeX file.
+
+%% Refer following link for more details about bibliography and citations.
+%% https://en.wikibooks.org/wiki/LaTeX/Bibliography_Management
+
+\begin{thebibliography}{00}
+
+%% For numbered reference style
+%% \bibitem{label}
+%% Text of bibliographic item
+
+\bibitem{lamport94}
+  Leslie Lamport,
+  \textit{\LaTeX: a document preparation system},
+  Addison Wesley, Massachusetts,
+  2nd edition,
+  1994.
+
+\end{thebibliography}

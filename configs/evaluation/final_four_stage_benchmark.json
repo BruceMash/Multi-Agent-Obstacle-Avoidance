@@ -1,0 +1,148 @@
+{
+  "schema_version": "final_four_stage_benchmark_v1",
+  "output_root": "artifacts/final_four_stage_benchmark",
+  "technical_path": "Proposal + FP-SHEP + GAT-V1 + Frozen SAC-DMP",
+  "methods": [
+    "dwa_style",
+    "rvo_orca_style",
+    "terminal",
+    "proposal",
+    "fp_shep",
+    "gat_v1"
+  ],
+  "method_display_names": {
+    "dwa_style": "3D-DWA-style",
+    "rvo_orca_style": "RVO/ORCA-style",
+    "terminal": "Terminal",
+    "proposal": "Proposal",
+    "fp_shep": "FP-SHEP",
+    "gat_v1": "Proposed"
+  },
+  "sources": {
+    "stage1_config": "configs/training/gat_stage1.json",
+    "gat_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+    "gat_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+    "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+    "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+    "base_execution_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+    "may20_reference_dir": "artifacts/20260520_201912/generalization_eval",
+    "joint_compatibility_audit": "artifacts/gat_joint_compatibility_recoverability_audit/20260818_174721"
+  },
+  "execution": {
+    "num_agents": 3,
+    "top_k": 10,
+    "H_preview": 4,
+    "max_steps": 220,
+    "dt": 0.1,
+    "peer_radius": 0.3,
+    "handoff_threshold_m": 0.25,
+    "forcing_gate": "historical_vector_goal_eff_gate",
+    "actor_observation_dim": 122,
+    "deterministic_inference": true,
+    "phase": "legacy/classic",
+    "execution_protocol": "one_shot_temporary_reference_phase_preserving_handoff",
+    "boundary_mode": "boundary_free",
+    "replanning_enabled": false
+  },
+  "scenario_protocol": {
+    "development_scenarios_per_stage": 10,
+    "formal_scenarios_per_stage": 100,
+    "development_seed_base": 880100000,
+    "formal_seed_base": 880200000,
+    "development_prefix": "D",
+    "formal_prefix": "S",
+    "family_count_per_stage": 5,
+    "maximum_obvious_duplication_rate": 0.05
+  },
+  "proposal_config": {
+    "top_k": 10
+  },
+  "fp_shep": {
+    "H_preview": 4,
+    "score_name": "fixed_physical_scale_three_feature_online_score",
+    "formula": "+progress +clearance -deviation",
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    }
+  },
+  "graph": {
+    "horizon_steps": 4,
+    "d_align": 1.2,
+    "d_align_source": "development_frozen_existing_parameter",
+    "candidate_order_preserved": true,
+    "null_class_index": 0,
+    "proposal_class_offset": 1
+  },
+  "engineering_search": {
+    "proposed": [
+      {"config_id": "P00", "safe_radius": 1.15, "d_align": 1.2, "obstacle_motion_allowance": 0.06},
+      {"config_id": "P01", "safe_radius": 1.05, "d_align": 1.2, "obstacle_motion_allowance": 0.06},
+      {"config_id": "P02", "safe_radius": 1.25, "d_align": 1.2, "obstacle_motion_allowance": 0.06},
+      {"config_id": "P03", "safe_radius": 1.15, "d_align": 1.0, "obstacle_motion_allowance": 0.06},
+      {"config_id": "P04", "safe_radius": 1.15, "d_align": 1.4, "obstacle_motion_allowance": 0.06},
+      {"config_id": "P05", "safe_radius": 1.15, "d_align": 1.2, "obstacle_motion_allowance": 0.04},
+      {"config_id": "P06", "safe_radius": 1.15, "d_align": 1.2, "obstacle_motion_allowance": 0.08}
+    ],
+    "dwa_style": [
+      {"config_id": "D00", "horizon_s": 0.8, "velocity_samples_per_axis": 3, "preferred_speed_mps": 1.8, "goal_weight": 2.0, "clearance_weight": 1.3, "speed_weight": 0.18, "peer_weight": 1.2, "collision_buffer_m": 0.08},
+      {"config_id": "D01", "horizon_s": 1.2, "velocity_samples_per_axis": 3, "preferred_speed_mps": 1.8, "goal_weight": 2.0, "clearance_weight": 1.3, "speed_weight": 0.18, "peer_weight": 1.2, "collision_buffer_m": 0.08},
+      {"config_id": "D02", "horizon_s": 1.6, "velocity_samples_per_axis": 3, "preferred_speed_mps": 1.8, "goal_weight": 2.0, "clearance_weight": 1.3, "speed_weight": 0.18, "peer_weight": 1.2, "collision_buffer_m": 0.08},
+      {"config_id": "D03", "horizon_s": 1.2, "velocity_samples_per_axis": 3, "preferred_speed_mps": 2.4, "goal_weight": 2.0, "clearance_weight": 1.3, "speed_weight": 0.18, "peer_weight": 1.2, "collision_buffer_m": 0.08},
+      {"config_id": "D04", "horizon_s": 1.2, "velocity_samples_per_axis": 3, "preferred_speed_mps": 3.0, "goal_weight": 2.0, "clearance_weight": 1.3, "speed_weight": 0.18, "peer_weight": 1.2, "collision_buffer_m": 0.08},
+      {"config_id": "D05", "horizon_s": 1.2, "velocity_samples_per_axis": 5, "preferred_speed_mps": 2.4, "goal_weight": 2.0, "clearance_weight": 1.3, "speed_weight": 0.18, "peer_weight": 1.2, "collision_buffer_m": 0.08},
+      {"config_id": "D06", "horizon_s": 1.2, "velocity_samples_per_axis": 3, "preferred_speed_mps": 2.4, "goal_weight": 2.5, "clearance_weight": 1.0, "speed_weight": 0.15, "peer_weight": 1.4, "collision_buffer_m": 0.10},
+      {"config_id": "D07", "horizon_s": 1.2, "velocity_samples_per_axis": 3, "preferred_speed_mps": 2.4, "goal_weight": 1.7, "clearance_weight": 1.7, "speed_weight": 0.12, "peer_weight": 1.6, "collision_buffer_m": 0.12}
+    ],
+    "rvo_orca_style": [
+      {"config_id": "R00", "preferred_speed_mps": 1.8, "peer_time_horizon_s": 1.4, "obstacle_time_horizon_s": 1.2, "reciprocal_gain": 0.55, "static_gain": 0.8, "dynamic_gain": 0.8, "safety_buffer_m": 0.08, "iterations": 2},
+      {"config_id": "R01", "preferred_speed_mps": 2.4, "peer_time_horizon_s": 1.4, "obstacle_time_horizon_s": 1.2, "reciprocal_gain": 0.55, "static_gain": 0.8, "dynamic_gain": 0.8, "safety_buffer_m": 0.08, "iterations": 2},
+      {"config_id": "R02", "preferred_speed_mps": 3.0, "peer_time_horizon_s": 1.4, "obstacle_time_horizon_s": 1.2, "reciprocal_gain": 0.55, "static_gain": 0.8, "dynamic_gain": 0.8, "safety_buffer_m": 0.08, "iterations": 2},
+      {"config_id": "R03", "preferred_speed_mps": 2.4, "peer_time_horizon_s": 1.8, "obstacle_time_horizon_s": 1.4, "reciprocal_gain": 0.62, "static_gain": 1.0, "dynamic_gain": 0.9, "safety_buffer_m": 0.12, "iterations": 3},
+      {"config_id": "R04", "preferred_speed_mps": 2.4, "peer_time_horizon_s": 2.2, "obstacle_time_horizon_s": 1.8, "reciprocal_gain": 0.70, "static_gain": 1.1, "dynamic_gain": 1.0, "safety_buffer_m": 0.15, "iterations": 3},
+      {"config_id": "R05", "preferred_speed_mps": 2.0, "peer_time_horizon_s": 2.2, "obstacle_time_horizon_s": 1.8, "reciprocal_gain": 0.75, "static_gain": 1.2, "dynamic_gain": 1.1, "safety_buffer_m": 0.18, "iterations": 3},
+      {"config_id": "R06", "preferred_speed_mps": 2.8, "peer_time_horizon_s": 1.8, "obstacle_time_horizon_s": 1.4, "reciprocal_gain": 0.65, "static_gain": 1.1, "dynamic_gain": 1.0, "safety_buffer_m": 0.12, "iterations": 3},
+      {"config_id": "R07", "preferred_speed_mps": 2.4, "peer_time_horizon_s": 2.4, "obstacle_time_horizon_s": 2.0, "reciprocal_gain": 0.80, "static_gain": 1.3, "dynamic_gain": 1.2, "safety_buffer_m": 0.20, "iterations": 4}
+    ],
+    "selection_criterion": [
+      "highest_team_success",
+      "lowest_any_collision",
+      "lowest_timeout",
+      "lowest_successful_completion_time",
+      "lowest_successful_path_length",
+      "lowest_planning_runtime"
+    ]
+  },
+  "formal_statistics": {
+    "binomial_confidence": 0.95,
+    "mcnemar_alternative": "two-sided",
+    "continuous_subset": "both_methods_team_success",
+    "bootstrap_samples": 5000,
+    "ranking": [
+      "team_success_desc",
+      "any_collision_asc",
+      "timeout_asc",
+      "successful_completion_time_asc",
+      "successful_path_length_asc",
+      "planning_runtime_asc"
+    ]
+  },
+  "strict_exclusions": {
+    "gat_retraining": false,
+    "sac_retraining": false,
+    "graph_change": false,
+    "new_node_or_edge_features": false,
+    "new_loss_or_supervision": false,
+    "joint_repair": false,
+    "err": false,
+    "orca_inside_proposed": false,
+    "replanning": false,
+    "top_k_change": false,
+    "h_preview_change": false,
+    "max_steps_change": false,
+    "collision_or_success_definition_change": false
+  }
+}

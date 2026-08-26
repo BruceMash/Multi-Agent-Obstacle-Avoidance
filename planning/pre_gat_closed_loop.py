@@ -24,6 +24,7 @@ from planning.policy_preview import (
     adapt_candidate_proposals,
     build_preview_inputs_from_env,
     preview_candidate,
+    preview_candidates_batched,
 )
 from pre_gat_closed_loop_constants import (
     CLOSED_LOOP_SCHEMA_VERSION,
@@ -68,8 +69,8 @@ class FPSHEPOnlineScoreSpec:
     definition_status: str = "goal_specific_baseline_not_global_fp_shep_definition"
 
     def __post_init__(self) -> None:
-        if int(self.horizon) != FORMAL_PREVIEW_HORIZON:
-            raise ValueError("online FP-SHEP selector must use H_preview=4")
+        if int(self.horizon) <= 0:
+            raise ValueError("online FP-SHEP selector horizon must be positive")
         for name in ("progress_weight", "clearance_weight", "deviation_weight"):
             value = float(getattr(self, name))
             if not np.isfinite(value) or value <= 0.0:
@@ -77,7 +78,7 @@ class FPSHEPOnlineScoreSpec:
             object.__setattr__(self, name, value)
         if float(self.terminal_speed_weight) != 0.0:
             raise ValueError("terminal speed is recorded but excluded from online ranking")
-        object.__setattr__(self, "horizon", FORMAL_PREVIEW_HORIZON)
+        object.__setattr__(self, "horizon", int(self.horizon))
         object.__setattr__(self, "terminal_speed_weight", 0.0)
 
     @classmethod
@@ -108,7 +109,7 @@ class FPSHEPOnlineScoreSpec:
     def metadata(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "H_preview": FORMAL_PREVIEW_HORIZON,
+            "H_preview": int(self.horizon),
             "formula": "+progress +clearance -deviation",
             "feature_order": [
                 "task_progress",
@@ -290,8 +291,9 @@ def score_fp_shep_candidates(
     proposals: Sequence[Any],
     policy: Any,
     spec: FPSHEPOnlineScoreSpec | None = None,
+    observation_extension: dict[str, Any] | None = None,
 ) -> tuple[PreviewScoreRecord, ...]:
-    """Evaluate one proposal-only set with the operational H=4 preview."""
+    """Evaluate one proposal-only set with the explicitly configured preview."""
 
     spec = spec or FPSHEPOnlineScoreSpec()
     initial_state, local_context = build_preview_inputs_from_env(env, int(agent_index))
@@ -302,9 +304,10 @@ def score_fp_shep_candidates(
             local_context=local_context,
             candidate_goal=np.asarray(proposal.point, dtype=float),
             policy=policy,
-            horizon=FORMAL_PREVIEW_HORIZON,
+            horizon=int(spec.horizon),
             dmp_config=env.dmps[int(agent_index)].config,
             dynamics=env.dynamics[int(agent_index)],
+            observation_extension=observation_extension,
         )
         execution = graph_ready_candidate_execution(candidate_id, preview)
         normalized = normalize_execution_features(execution, spec.normalization)
@@ -330,6 +333,97 @@ def score_fp_shep_candidates(
                 runtime_ms=float(preview.performance.total_ms),
                 preview=preview,
             )
+        )
+    return tuple(records)
+
+
+def score_fp_shep_candidates_batched(
+    *,
+    env: Any,
+    agent_index: int,
+    proposals: Sequence[Any],
+    policy: Any,
+    spec: FPSHEPOnlineScoreSpec | None = None,
+    timing_sink: dict[str, float] | None = None,
+    observation_extension: dict[str, Any] | None = None,
+) -> tuple[PreviewScoreRecord, ...]:
+    """Evaluate the configured score with candidate-batched actor calls."""
+
+    import time
+
+    spec = spec or FPSHEPOnlineScoreSpec()
+    prepare_started = time.perf_counter_ns()
+    initial_state, local_context = build_preview_inputs_from_env(env, int(agent_index))
+    state_prepare_ms = (time.perf_counter_ns() - prepare_started) / 1.0e6
+    preview_timing: dict[str, float] = {}
+    previews = preview_candidates_batched(
+        initial_state=initial_state,
+        local_context=local_context,
+        candidates=proposals,
+        policy=policy,
+        horizon=int(spec.horizon),
+        dmp_config=env.dmps[int(agent_index)].config,
+        dynamics=env.dynamics[int(agent_index)],
+        timing_sink=preview_timing,
+        observation_extension=observation_extension,
+    )
+    metric_started = time.perf_counter_ns()
+    records: list[PreviewScoreRecord] = []
+    for candidate_id, (proposal, preview) in enumerate(
+        zip(proposals, previews, strict=True)
+    ):
+        execution = graph_ready_candidate_execution(candidate_id, preview)
+        normalized = normalize_execution_features(execution, spec.normalization)
+        values = normalized.values
+        score = (
+            spec.progress_weight * values[0]
+            + spec.clearance_weight * values[1]
+            - spec.deviation_weight * values[2]
+            - spec.terminal_speed_weight * values[3]
+        )
+        records.append(
+            PreviewScoreRecord(
+                candidate_id=candidate_id,
+                candidate_world_position=proposal.point,
+                score=float(score),
+                preview_task_progress=float(preview.task_progress),
+                preview_min_clearance=float(preview.min_clearance),
+                preview_max_execution_deviation=float(
+                    preview.max_execution_deviation
+                ),
+                preview_terminal_speed=float(preview.terminal_speed),
+                normalized_features=normalized.values,
+                valid_mask=normalized.valid_mask,
+                clipped_mask=normalized.clipped_mask,
+                runtime_ms=float(preview.performance.total_ms),
+                preview=preview,
+            )
+        )
+    score_metric_ms = (time.perf_counter_ns() - metric_started) / 1.0e6
+    if timing_sink is not None:
+        timing_sink.update(
+            {
+                "fp_shep_state_prepare_ms": float(
+                    state_prepare_ms + preview_timing.get("observation_ms", 0.0)
+                ),
+                "fp_shep_actor_forward_ms": float(
+                    preview_timing.get("actor_forward_ms", 0.0)
+                ),
+                "fp_shep_dmp_rollout_ms": float(
+                    preview_timing.get("dmp_rollout_ms", 0.0)
+                ),
+                "fp_shep_geometry_metric_ms": float(
+                    preview_timing.get("sensor_reconstruction_ms", 0.0)
+                    + preview_timing.get("geometry_metric_ms", 0.0)
+                    + score_metric_ms
+                ),
+                "fp_shep_actor_batch_calls": float(
+                    preview_timing.get("actor_batch_calls", 0.0)
+                ),
+                "fp_shep_preview_branch_count": float(
+                    preview_timing.get("preview_branch_count", 0.0)
+                ),
+            }
         )
     return tuple(records)
 

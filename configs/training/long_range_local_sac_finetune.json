@@ -1,0 +1,56 @@
+{
+  "schema_version": "long_range_local_sac_finetune_v1",
+  "artifact_root": "artifacts/semi_structured_long_range_main_benchmark/20260820_193228",
+  "training_manifest": "07_training/training_manifest.json",
+  "validation_manifest": "07_training/validation_manifest.json",
+  "source_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "source_checkpoint_sha256": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "run_id": "sac_long_range_finetune_run1",
+  "seed": 2026082001,
+  "total_timesteps": 250000,
+  "checkpoint_interval": 50000,
+  "learning_rate": 0.00003,
+  "buffer_size": 300000,
+  "batch_size": 256,
+  "learning_starts": 1000,
+  "train_freq": 1,
+  "gradient_steps": 1,
+  "ent_coef": "auto_0.1",
+  "local_episode_max_steps": 120,
+  "validation_episode_count": 160,
+  "goal_tolerance_m": 0.25,
+  "maximum_speed_norm_mps": 3.2,
+  "local_reference_distance_m": {
+    "near_probability": 0.75,
+    "near_range": [0.55, 1.30],
+    "extended_range": [1.30, 4.50]
+  },
+  "boundary_exposure_probability": 0.35,
+  "action_guidance": {
+    "enabled_training_only": true,
+    "radius_m": 1.0,
+    "initial_weight": 0.5,
+    "decay_steps": 100000
+  },
+  "reward": {
+    "step_reward_weight": 10.0,
+    "step_penalty": 0.01,
+    "obstacle_potential_weight": 2.0,
+    "obstacle_influence_distance_m": 1.5,
+    "boundary_potential_weight": 2.0,
+    "boundary_influence_distance_m": 1.2,
+    "collision_penalty": 80.0,
+    "timeout_penalty": 20.0,
+    "success_bonus": 300.0
+  },
+  "frozen_semantics": {
+    "actor_observation_dim": 122,
+    "spatial_range_directions": 56,
+    "action_dim": 6,
+    "forcing_gate": "historical_vector_goal_eff_gate",
+    "dmp_action_semantics_changed": false,
+    "network_architecture_changed": false,
+    "sensor_range_m": 4.5,
+    "candidate_or_upper_planner_used_for_training": false
+  }
+}

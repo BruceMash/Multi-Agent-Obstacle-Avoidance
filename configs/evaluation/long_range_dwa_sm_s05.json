@@ -1,0 +1,1 @@
+{"base_config":"configs/evaluation/long_range_dwa_development_base.json","configuration_id":"DWA_SM_S05","output_subdir":"09_baseline_tuning/DWA_SM_S05","planner":{"horizon_s":1.2,"velocity_samples_per_axis":5,"preferred_speed_mps":2.8,"goal_weight":2.5,"clearance_weight":1.5,"collision_buffer_m":0.15}}

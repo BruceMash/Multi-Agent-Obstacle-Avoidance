@@ -1,0 +1,82 @@
+{
+  "schema_version": "semi_structured_long_range_contract_pilot_v1",
+  "artifact_root": "artifacts/semi_structured_long_range_main_benchmark/20260820_193228",
+  "stage1_config": "configs/training/gat_stage1.json",
+  "gat_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "gat_checkpoint_sha256_expected": "bf224c91731f0dc3f3d43cfb7b4f9da70b58a789b8b4c409226a087ff92b36d8",
+  "sac_checkpoint": "artifacts/20260520_201912/best_eval_model.pt",
+  "sac_checkpoint_sha256_expected": "0c3595f738b2f2f2b7e88fc90479e6d525c986a216ab2d1b2eecc139833ad3d5",
+  "base_execution_config": "configs/evaluation/historical_gate_abcd_rerun.json",
+  "pilot_seed_base": 2110000000,
+  "pilot_scenarios_per_stage": 10,
+  "num_agents": 3,
+  "top_k": 10,
+  "H_preview": 4,
+  "max_steps": 1500,
+  "dt": 0.1,
+  "peer_radius": 0.3,
+  "maximum_speed_norm_mps": 3.2,
+  "handoff_threshold_m": 0.25,
+  "workspace_bounds": [[0.0, 0.0, 0.8], [100.0, 100.0, 3.2]],
+  "sensor_direction_count": 56,
+  "sensor_range_m": 4.5,
+  "actor_observation_dim": 122,
+  "peer_information_contract": {
+    "mode": "local_anonymous_ally_block",
+    "range_m": 4.5,
+    "nearest_agent_count": 2,
+    "stable_identity_available": false,
+    "continuous_global_peer_state_available": false
+  },
+  "proposal_config": {
+    "top_k": 10,
+    "safe_radius": 1.15,
+    "obstacle_motion_allowance": 0.06
+  },
+  "fp_shep": {
+    "H_preview": 4,
+    "score_name": "fixed_physical_scale_three_feature_online_score",
+    "formula": "+progress +clearance -deviation",
+    "normalization": {
+      "version": "fp_shep_h4_v1",
+      "task_progress_scale": 0.32,
+      "min_clearance_scale": 4.5,
+      "max_execution_deviation_scale": 1.05,
+      "terminal_speed_scale": 1.2
+    }
+  },
+  "graph": {
+    "horizon_steps": 4,
+    "d_align": 1.0,
+    "d_align_source": "accepted_historical_P03_existing_parameter",
+    "candidate_order_preserved": true,
+    "null_class_index": 0,
+    "proposal_class_offset": 1
+  },
+  "err": {
+    "W_p": 30,
+    "T_rep_s": 5.0,
+    "T_dwell_s": 1.0,
+    "p_min_mps": 0.02666666666666667,
+    "p_scale_mps": 0.8,
+    "h_rep_m": 0.35,
+    "h_scale_m": 2.5,
+    "h_emg_m": 0.0,
+    "d_hand_m": 0.25,
+    "goal_equality_tolerance_m": 1e-09,
+    "reference_completion_mode": "reconstruct_unless_terminal_local",
+    "terminal_local_scope_m": 4.5
+  },
+  "pilot_decision_rule": {
+    "performance_metrics_are_descriptive_only": true,
+    "forbid_stage_or_method_tuning_from_pilot_success": true,
+    "required_software_error_count": 0,
+    "required_nonfinite_record_count": 0,
+    "required_scene_reconstruction_match_rate": 1.0,
+    "required_actor_observation_dim": 122,
+    "required_sensor_direction_count": 56,
+    "required_phase_continuity_max_abs_delta": 0.0,
+    "required_speed_norm_upper_bound_mps": 3.2000001,
+    "required_reference_completion_event_observed": true
+  }
+}

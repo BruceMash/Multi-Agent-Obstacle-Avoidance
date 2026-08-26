@@ -18,9 +18,10 @@ import math
 import sys
 import time
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -33,7 +34,11 @@ for search_path in (REPO_ROOT, ALGO_ROOT, SCRIPTS_ROOT):
     if str(search_path) not in sys.path:
         sys.path.insert(0, str(search_path))
 
-from Guidance.reference_point_proposal_demo import Proposal, ProposalConfig  # noqa: E402
+from Guidance.reference_point_proposal_demo import (  # noqa: E402
+    Proposal,
+    ProposalConfig,
+    propose_reference_points,
+)
 from planning.candidate_execution_interface import (  # noqa: E402
     graph_ready_candidate_execution,
 )
@@ -61,6 +66,8 @@ from planning.pre_gat_closed_loop import (  # noqa: E402
     FPSHEPOnlineScoreSpec,
     score_fp_shep_candidates,
 )
+from planning.policy_preview import adapt_candidate_proposals  # noqa: E402
+from planning.online_runtime_instrumentation import synchronize_cuda  # noqa: E402
 from planning.goal_semantics_diagnosis import VARIANT_A, VARIANT_D  # noqa: E402
 from scripts.evaluate_actor_dmp_goal_semantics import (  # noqa: E402
     run_variant_episode,
@@ -453,8 +460,12 @@ def build_shared_selection_bundle(
     gat_device: torch.device,
     scenario: str,
     seed: int,
+    environment_builder: Callable[..., tuple[Any, dict[str, Any]]] | None = None,
+    runtime_recorder: Any | None = None,
 ) -> dict[str, Any]:
-    env, scene_metadata = build_closed_loop_environment(
+    upper_started = time.perf_counter_ns()
+    builder = environment_builder or build_closed_loop_environment
+    env, scene_metadata = builder(
         config=multi_config,
         scenario=scenario,
         seed=int(seed),
@@ -464,13 +475,58 @@ def build_shared_selection_bundle(
         snapshot = _scene_snapshot(env)
         initial_hash = _scenario_hash(snapshot)
         terminal_goals = np.asarray(env.goals, dtype=float).copy()
-        immutable = generate_immutable_candidate_bundle(
-            env,
-            scenario=scenario,
-            seed=int(seed),
-            proposal_config=ProposalConfig(**dict(config["proposal_config"])),
-            consumer_top_k=int(config["top_k"]),
-        )
+        proposal_started = time.perf_counter_ns()
+        coarse_ranking_ms = 0.0
+        if runtime_recorder is None:
+            immutable = generate_immutable_candidate_bundle(
+                env,
+                scenario=scenario,
+                seed=int(seed),
+                proposal_config=ProposalConfig(**dict(config["proposal_config"])),
+                consumer_top_k=int(config["top_k"]),
+            )
+        else:
+            proposal_config = ProposalConfig(**dict(config["proposal_config"]))
+            per_agent: list[tuple[ImmutableCandidate, ...]] = []
+            counts: list[int] = []
+            for agent_index in range(int(env.num_agents)):
+                packet = env.latest_sensor_packets[agent_index]
+                if packet is None:
+                    raise RuntimeError("environment must be reset before candidate generation")
+                timing_sink: dict[str, float] = {}
+                all_proposals = propose_reference_points(
+                    env.dynamics[agent_index].p,
+                    env.goals[agent_index],
+                    env.dynamics[agent_index].v,
+                    packet,
+                    env.sensors[agent_index],
+                    proposal_config,
+                    float(env.env_config.goal_tolerance),
+                    timing_sink=timing_sink,
+                )
+                coarse_ranking_ms += float(timing_sink.get("coarse_ranking_ms", 0.0))
+                truncation_started = time.perf_counter_ns()
+                selected = adapt_candidate_proposals(
+                    all_proposals, consumer_top_k=int(config["top_k"])
+                )
+                coarse_ranking_ms += (
+                    time.perf_counter_ns() - truncation_started
+                ) / 1.0e6
+                per_agent.append(
+                    tuple(
+                        ImmutableCandidate.from_proposal(proposal, index)
+                        for index, proposal in enumerate(selected)
+                    )
+                )
+                counts.append(len(all_proposals))
+            immutable = ImmutableCandidateBundle(
+                scenario=str(scenario),
+                seed=int(seed),
+                per_agent=tuple(per_agent),
+                count_before_consumer=tuple(counts),
+            )
+        proposal_runtime_ms = (time.perf_counter_ns() - proposal_started) / 1.0e6
+        proposal_generation_ms = max(0.0, proposal_runtime_ms - coarse_ranking_ms)
         candidate_hash_before = immutable.candidate_set_hash
 
         proposals_by_agent: list[tuple[Proposal, ...]] = []
@@ -523,10 +579,21 @@ def build_shared_selection_bundle(
 
         previews_by_agent: list[tuple[Any, ...]] = []
         graphs: list[Any] = []
-        with scoped_historical_preview_and_multi_agent_transition(
+        preview_runtime_ms = 0.0
+        graph_runtime_ms = 0.0
+        preview_actor_start = (
+            len(runtime_recorder.actor_rows) if runtime_recorder is not None else 0
+        )
+        actor_context = (
+            policy.timing_mode("fp_shep_preview_actor")
+            if runtime_recorder is not None and hasattr(policy, "timing_mode")
+            else nullcontext()
+        )
+        with actor_context, scoped_historical_preview_and_multi_agent_transition(
             preview_observer=observe_preview
         ):
             for agent_id, proposals in enumerate(proposals_by_agent):
+                preview_started = time.perf_counter_ns()
                 previews = score_fp_shep_candidates(
                     env=env,
                     agent_index=agent_id,
@@ -534,7 +601,9 @@ def build_shared_selection_bundle(
                     policy=policy,
                     spec=score_spec,
                 )
+                preview_runtime_ms += (time.perf_counter_ns() - preview_started) / 1.0e6
                 previews_by_agent.append(previews)
+                graph_started = time.perf_counter_ns()
                 executions = tuple(
                     graph_ready_candidate_execution(record.candidate_id, record.preview)
                     for record in previews
@@ -551,6 +620,7 @@ def build_shared_selection_bundle(
                         d_align_source=str(config["graph"]["d_align_source"]),
                     ),
                 )
+                graph_runtime_ms += (time.perf_counter_ns() - graph_started) / 1.0e6
                 preview_trajectory_match = all(
                     np.array_equal(
                         graph.candidate_preview_positions[index],
@@ -585,9 +655,19 @@ def build_shared_selection_bundle(
         if candidate_hash_after_preview != candidate_hash_before:
             raise RuntimeError("preview mutated the immutable candidate bundle")
 
+        batch_started = time.perf_counter_ns()
         batched = batch_candidate_graphs(graphs).to(gat_device)
+        if runtime_recorder is not None:
+            synchronize_cuda()
+        graph_runtime_ms += (time.perf_counter_ns() - batch_started) / 1.0e6
+        gat_started = time.perf_counter_ns()
+        if runtime_recorder is not None:
+            synchronize_cuda()
         with torch.inference_mode():
             gat_output = gat_model(batched)
+        if runtime_recorder is not None:
+            synchronize_cuda()
+        gat_runtime_ms = (time.perf_counter_ns() - gat_started) / 1.0e6
         if not torch.isfinite(gat_output.candidate_logits).all():
             raise RuntimeError("GAT produced non-finite logits")
 
@@ -698,6 +778,29 @@ def build_shared_selection_bundle(
             METHOD_FP_SHEP: preview_hash,
             METHOD_GAT: preview_hash,
         }
+        upper_planning_total_ms = (time.perf_counter_ns() - upper_started) / 1.0e6
+        preview_actor_ms = (
+            float(
+                sum(
+                    row["runtime_ms"]
+                    for row in runtime_recorder.actor_rows[preview_actor_start:]
+                    if row["actor_mode"] == "fp_shep_preview_actor"
+                )
+            )
+            if runtime_recorder is not None
+            else None
+        )
+        runtime_components = {
+            "proposal_generation_ms": float(proposal_generation_ms),
+            "coarse_ranking_ms": float(coarse_ranking_ms),
+            "fp_shep_total_ms": float(preview_runtime_ms),
+            "fp_shep_preview_actor_ms": preview_actor_ms,
+            "graph_build_ms": float(graph_runtime_ms),
+            "gat_forward_ms": float(gat_runtime_ms),
+            "upper_planning_total_ms": float(upper_planning_total_ms),
+        }
+        if runtime_recorder is not None:
+            runtime_recorder.record_upper_event(runtime_components)
         return {
             "scenario": scenario,
             "seed": int(seed),
@@ -719,9 +822,38 @@ def build_shared_selection_bundle(
             "reconstruction_rows": reconstruction_rows,
             "plans": plans,
             "gat_diagnostics": gat_diagnostics,
+            # Keep the already-computed online objects available to extension
+            # evaluators.  They are intentionally process-local and are never
+            # serialized into the V1 artifacts.  Reusing these exact objects
+            # lets a paired checkpoint evaluation run another frozen model on
+            # the same proposals, H4 previews, and graph tensors without
+            # regenerating any selection input.
+            "proposals_by_agent": proposals_by_agent,
+            "previews_by_agent": previews_by_agent,
+            "graphs": graphs,
             "candidate_count_per_agent": [
                 len(proposals) for proposals in proposals_by_agent
             ],
+            "runtime_components": runtime_components,
+            "planning_runtime_ms": {
+                METHOD_TERMINAL: 0.0,
+                METHOD_PROPOSAL: float(proposal_runtime_ms),
+                METHOD_FP_SHEP: float(proposal_runtime_ms + preview_runtime_ms),
+                METHOD_GAT: float(
+                    proposal_runtime_ms
+                    + preview_runtime_ms
+                    + graph_runtime_ms
+                    + gat_runtime_ms
+                ),
+                "proposal_component": float(proposal_runtime_ms),
+                "proposal_generation_component": float(proposal_generation_ms),
+                "coarse_ranking_component": float(coarse_ranking_ms),
+                "preview_component": float(preview_runtime_ms),
+                "preview_actor_component": preview_actor_ms,
+                "graph_component": float(graph_runtime_ms),
+                "gat_component": float(gat_runtime_ms),
+                "upper_planning_total_actual": float(upper_planning_total_ms),
+            },
             "graph_schema_match": all(
                 graph.graph_metadata["feature_schema_version"] == GRAPH_SCHEMA_VERSION
                 and int(graph.graph_metadata["H"]) == int(config["H_preview"])
@@ -886,6 +1018,20 @@ def _standardize_episode(
         "terminal_task_goals_unchanged": bool(raw["terminal_task_goals_unchanged"]),
         "max_steps": 220,
         "episode_runtime_ms": float(raw["episode_runtime_ms"]),
+        "lower_level_runtime_ms": float(raw.get("lower_level_runtime_ms", 0.0)),
+        "lower_level_runtime_per_step_ms": float(
+            raw.get("lower_level_runtime_per_step_ms", 0.0)
+        ),
+        "environment_step_runtime_ms": float(
+            raw.get("environment_step_runtime_ms", 0.0)
+        ),
+        "planning_runtime_ms": float(shared.get("planning_runtime_ms", {}).get(method, 0.0)),
+        "planning_decision_count": 0 if method == METHOD_TERMINAL else 1,
+        "planning_runtime_per_decision_ms": (
+            None
+            if method == METHOD_TERMINAL
+            else float(shared.get("planning_runtime_ms", {}).get(method, 0.0))
+        ),
     }
     return episode, agents
 
@@ -898,6 +1044,9 @@ def run_method_episode(
     policy: Any,
     shared: Mapping[str, Any],
     method: str,
+    environment_builder: Callable[..., tuple[Any, dict[str, Any]]] | None = None,
+    trajectory_sink: dict[str, Any] | None = None,
+    runtime_recorder: Any | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     execution_trace: list[dict[str, Any]] = []
 
@@ -914,7 +1063,17 @@ def run_method_episode(
     variant = VARIANT_A if method == METHOD_TERMINAL else VARIANT_D
     plan = shared["plans"].get(method)
     plan_hash_before = stable_hash(plan) if plan is not None else None
-    with scoped_historical_preview_and_multi_agent_transition(
+    actor_context = (
+        policy.timing_mode("execution_actor")
+        if runtime_recorder is not None and hasattr(policy, "timing_mode")
+        else nullcontext()
+    )
+    dmp_context = (
+        runtime_recorder.dmp_mode("execution_dmp")
+        if runtime_recorder is not None
+        else nullcontext()
+    )
+    with actor_context, dmp_context, scoped_historical_preview_and_multi_agent_transition(
         execution_observer=observe_execution
     ):
         raw, _, _ = run_variant_episode(
@@ -925,6 +1084,8 @@ def run_method_episode(
             seed=int(shared["seed"]),
             variant=variant,
             selection_plan=plan,
+            environment_builder=environment_builder,
+            trajectory_sink=trajectory_sink,
         )
     plan_hash_after = stable_hash(plan) if plan is not None else None
     if plan_hash_before != plan_hash_after:
@@ -1377,6 +1538,7 @@ def evaluate_seed_set(
     seeds: Sequence[int],
     shared_cache: dict[tuple[str, int], dict[str, Any]],
     phase_name: str,
+    environment_builder: Callable[..., tuple[Any, dict[str, Any]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     episodes: list[dict[str, Any]] = []
     agents: list[dict[str, Any]] = []
@@ -1400,6 +1562,7 @@ def evaluate_seed_set(
                 gat_device=gat_device,
                 scenario=scenario,
                 seed=seed,
+                environment_builder=environment_builder,
             )
             reconstruction.extend(shared_cache[key]["reconstruction_rows"])
             gat_diagnostics.extend(_gat_diagnostic_rows(shared_cache[key]))
@@ -1410,6 +1573,7 @@ def evaluate_seed_set(
             policy=policy,
             shared=shared_cache[key],
             method=method,
+            environment_builder=environment_builder,
         )
         episodes.append(episode)
         agents.extend(agent_rows)

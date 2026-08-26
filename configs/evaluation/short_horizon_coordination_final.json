@@ -1,0 +1,19 @@
+{
+  "schema_version": "short_horizon_coordination_final_v1",
+  "artifact_root": "artifacts/semi_structured_long_range_main_benchmark/20260820_193228",
+  "output_subdir": "02_short_coordination",
+  "base_final_method_config": "configs/evaluation/semi_structured_long_range_development_d05.json",
+  "scenario_count": 100,
+  "seed_base": 2500000000,
+  "max_steps": 220,
+  "dt": 0.1,
+  "num_agents": 3,
+  "workspace_bounds": [[0.0, 0.0, 0.0], [9.0, 4.5, 2.4]],
+  "boundary_mode": "boundary_free",
+  "external_static_obstacle_count": 0,
+  "external_dynamic_obstacle_count": 0,
+  "task_patterns": ["crossing", "merge", "conflict"],
+  "method": "Proposal + FP-SHEP H4 + GAT-V1 + R-ERR + adapted 256-ray SAC-DMP",
+  "performance_role": "FOUNDATIONAL_CAPABILITY_TEST_NOT_LONG_RANGE_FORMAL",
+  "selection_or_tuning_allowed": false
+}

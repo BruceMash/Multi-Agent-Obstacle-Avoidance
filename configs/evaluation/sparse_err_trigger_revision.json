@@ -1,0 +1,24 @@
+{
+  "schema_version": "sparse_err_trigger_revision_v1",
+  "authority_artifact": "artifacts/theory_aligned_final_recovery/20260818_232900",
+  "fairness_artifact": "artifacts/equal_information_baseline_audit/20260819_012339",
+  "base_benchmark_config": "artifacts/final_four_stage_benchmark/20260818_202620/config.json",
+  "selected_upper_config": "artifacts/final_four_stage_benchmark/20260818_202620/engineering_search/selected_configs.json",
+  "err_parameter_source": "configs/evaluation/gat_v1_err_development.json",
+  "methods": [
+    "gat_v1_one_shot",
+    "gat_v1_err",
+    "gat_v1_rerr",
+    "fp_shep_rerr"
+  ],
+  "development_scenarios_per_stage": 20,
+  "development_scenario_count": 80,
+  "current_emergency_semantics": "level_triggered",
+  "revised_emergency_semantics": "edge_triggered_existing_threshold_rearm",
+  "normal_trigger_changed": false,
+  "new_numeric_threshold_added": false,
+  "multiple_reproposals_allowed": true,
+  "artificial_reproposal_cap": null,
+  "formal_benchmark_authorized": false,
+  "training_authorized": false
+}

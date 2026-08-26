@@ -1,0 +1,34 @@
+{
+  "schema_version": "gat_recurrent_r_development_v1",
+  "evaluation_block": "holdout",
+  "artifact_root": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244",
+  "development_manifest": "08_holdout/GAT_RS_HOLDOUT_SCENE_MANIFEST.json",
+  "preflight_path": "13_objective_revision/08_holdout/GAT_R_HOLDOUT_PREFLIGHT_FREEZE.json",
+  "base_method_config": "artifacts/semi_structured_long_range_main_benchmark/20260820_193228/10_final_freeze/method_configs/M9_Proposed_RERR_GAT_SAC_DMP.json",
+  "gat_r_training_config": "configs/training/gat_recurrent_r_fp_anchor.json",
+  "gat_r_checkpoint": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244/13_objective_revision/05_gat_r_fp_anchor_training/checkpoints/best_validation.pt",
+  "gat_r_checkpoint_sha256_expected": "df8a9a8c13ba8f29fc1b8a64626fe336ccde68cab189587062beb6b93510baef",
+  "selectors": {
+    "fp_shep": {
+      "display_name": "R-ERR + FP-SHEP + SAC-DMP",
+      "runtime_method": "rerr_fp_shep",
+      "output_subdir": "13_objective_revision/08_holdout/FP_SHEP_HOLDOUT400"
+    },
+    "gat_r": {
+      "display_name": "R-ERR + focal-safe FP-anchored GAT-R + SAC-DMP",
+      "runtime_method": "gat_v1_rerr",
+      "output_subdir": "13_objective_revision/08_holdout/GAT_R_FP_ANCHOR_HOLDOUT400"
+    }
+  },
+  "goal_distance_normalization": {
+    "gat_r_scale_m": 100.0,
+    "gat_v1_scale_m": 9.0,
+    "semantic_change": false
+  },
+  "expected_scenario_count": 400,
+  "shard_count": 4,
+  "formal_v1_used": false,
+  "checkpoint_selected_before_holdout": true,
+  "holdout_opened": true,
+  "formal_v2_generated": false
+}

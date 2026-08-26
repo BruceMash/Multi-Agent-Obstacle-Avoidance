@@ -258,6 +258,7 @@ def run_variant_episode(
     score_spec: FPSHEPOnlineScoreSpec | None = None,
     environment_builder: Callable[..., tuple[Any, dict[str, Any]]] | None = None,
     selection_plan: Mapping[str, Any] | None = None,
+    trajectory_sink: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Run one 2x2 variant from a deterministic fresh environment."""
 
@@ -275,6 +276,8 @@ def run_variant_episode(
     actor_shift_rows: list[dict[str, Any]] = []
     dmp_shift_rows: list[dict[str, Any]] = []
     episode_started = time.perf_counter_ns()
+    lower_level_inference_runtime_ms = 0.0
+    environment_step_runtime_ms = 0.0
     try:
         initial_snapshot = _scene_snapshot(env)
         initial_condition_hash = _scenario_hash(initial_snapshot)
@@ -428,9 +431,13 @@ def run_variant_episode(
                 )
             else:
                 observations = terminal_observations
+            inference_started = time.perf_counter_ns()
             actions = predict_actions_without_postprocessing(
                 policy, observations, tuple(env.action_shape)
             )
+            lower_level_inference_runtime_ms += (
+                time.perf_counter_ns() - inference_started
+            ) / 1.0e6
 
             if variant == VARIANT_B:
                 for agent_index in range(int(env.num_agents)):
@@ -487,7 +494,11 @@ def run_variant_episode(
             action_saturation_values.extend(
                 saturation_mask.astype(float).reshape(-1).tolist()
             )
+            environment_step_started = time.perf_counter_ns()
             _, _, terminated, truncated, info = env.step(actions)
+            environment_step_runtime_ms += (
+                time.perf_counter_ns() - environment_step_started
+            ) / 1.0e6
             positions.append(env._positions().copy())
             velocities.append(env._velocities().copy())
             applied = np.asarray(info["applied_accelerations"], dtype=float)
@@ -984,6 +995,11 @@ def run_variant_episode(
             "episode_runtime_ms": float(
                 (time.perf_counter_ns() - episode_started) / 1.0e6
             ),
+            "lower_level_runtime_ms": float(lower_level_inference_runtime_ms),
+            "lower_level_runtime_per_step_ms": float(
+                lower_level_inference_runtime_ms / max(1, int(env.steps))
+            ),
+            "environment_step_runtime_ms": float(environment_step_runtime_ms),
             "GAT_used": bool(
                 selection_plan is not None
                 and selection_plan.get("selection_source") == "gat_stage1"
@@ -997,6 +1013,18 @@ def run_variant_episode(
             "final_state_hash": final_state_hash,
             **scene_metadata,
         }
+        if trajectory_sink is not None:
+            trajectory_sink.clear()
+            trajectory_sink.update(
+                {
+                    "positions": position_array.copy(),
+                    "velocities": velocity_array.copy(),
+                    "accelerations": acceleration_array.copy(),
+                    "starts": starts.copy(),
+                    "goals": terminal_goals.copy(),
+                    "temporary_references": temporary_references.copy(),
+                }
+            )
         return episode, actor_shift_rows, dmp_shift_rows
     finally:
         env.close()

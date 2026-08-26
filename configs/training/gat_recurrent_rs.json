@@ -1,0 +1,84 @@
+{
+  "schema_version": "gat_recurrent_rs_training_v1",
+  "variant": "GAT-RS",
+  "artifact_root": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244",
+  "dataset": {
+    "examples": "02_recurrent_dataset/recurrent_training_examples.jsonl",
+    "eligible_smoothness_pairs": "03_counterfactual_rollouts/eligible_smoothness_pairs.csv",
+    "reconciliation": "02_recurrent_dataset/recurrent_dataset_reconciliation.json",
+    "label_freeze": "03_counterfactual_rollouts/COUNTERFACTUAL_LABEL_FREEZE.json",
+    "gat_r_dev_diagnostic": "07_development/GAT_R_DEV_DIAGNOSTIC.json",
+    "split_unit": "scenario_id",
+    "train_scenes": 160,
+    "validation_scenes": 40,
+    "expected_pair_count": 6770,
+    "dev_used_for_training": false
+  },
+  "supervision": {
+    "primary_target_name": "safety_first_progress_second_recurrent_5s",
+    "primary_loss": "soft_target_cross_entropy",
+    "smoothness_pairwise_loss_enabled": true,
+    "smoothness_pairwise_loss": "softplus_negative_logit_difference",
+    "smoothness_pairwise_margin": 0.0,
+    "smoothness_pairwise_weight": 0.1,
+    "smoothness_pairwise_aggregation": "mean_pairs_within_state_then_mean_all_states_zero_if_ineligible",
+    "smoothness_weight_search": false,
+    "null_smoothness_supervision_enabled": false,
+    "pair_eligibility": [
+      "safety_equivalent",
+      "progress_equivalent",
+      "significant_jerk_difference",
+      "null_excluded"
+    ],
+    "hierarchy": [
+      "hard_safety",
+      "peer_and_obstacle_risk",
+      "long_range_progress_and_reference_viability",
+      "execution_deviation",
+      "secondary_trajectory_smoothness"
+    ]
+  },
+  "model": {
+    "hidden_dim": 64,
+    "node_encoder_hidden_dim": 64,
+    "edge_dim": 32,
+    "edge_encoder_hidden_dim": 32,
+    "num_heads": 4,
+    "num_layers": 2,
+    "head_aggregation": "concat",
+    "activation": "gelu",
+    "dropout": 0.0,
+    "negative_slope": 0.2,
+    "layer_norm": true
+  },
+  "training": {
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "max_epochs": 100,
+    "early_stopping_patience": 15,
+    "gradient_clip_norm": 5.0,
+    "optimization_seeds": [17, 29, 43],
+    "device": "auto",
+    "num_workers": 0,
+    "hyperparameter_sweep": false,
+    "initialize_from_gat_r": false,
+    "checkpoint_selection": "minimum_internal_validation_total_loss"
+  },
+  "offline_metric_definitions": {
+    "candidate_metrics": "same_as_gat_r",
+    "smoothness_pair_accuracy": "fraction_of_frozen_pairs_with_preferred_logit_greater_than_disfavored_logit",
+    "smoothness_pair_margin": "preferred_logit_minus_disfavored_logit",
+    "checkpoint_selection_uses_dev": false
+  },
+  "runtime_contract": {
+    "goal_distance_normalization_scale_m": 100.0,
+    "canonical_sector_count": 56,
+    "graph_schema_changed": false,
+    "gat_architecture_changed": false,
+    "runtime_future_information_added": false,
+    "runtime_role": "current legal graph to candidate logits to reference selection",
+    "sac_dmp_changed": false
+  }
+}

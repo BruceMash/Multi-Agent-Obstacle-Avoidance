@@ -1,0 +1,69 @@
+{
+  "schema_version": "gat_recurrent_fp_anchored_training_v2",
+  "variant": "GAT-RS",
+  "artifact_root": "artifacts/gat_recurrent_smoothness_rescue/20260821_180244",
+  "output_subdir": "13_objective_revision/06_gat_rs_fp_anchor_training",
+  "initialization_checkpoint": "artifacts/gat_stage1_training/20260815_230509/checkpoints/best_validation.pt",
+  "dataset": {
+    "examples": "13_objective_revision/dataset_v2/recurrent_training_examples_fp_anchored.jsonl",
+    "pairs": "13_objective_revision/dataset_v2/eligible_smoothness_pairs_fp_anchored.csv",
+    "summary": "13_objective_revision/dataset_v2/FP_ANCHORED_DATASET_SUMMARY.json",
+    "contract": "13_objective_revision/dataset_v2/FP_ANCHORED_TARGET_CONTRACT_FREEZE.json"
+  },
+  "supervision": {
+    "primary_target": "focal-safe FP anchor with strict safety-noninferior material correction",
+    "primary_loss": "one-hot candidate cross entropy",
+    "smoothness_pairwise_loss": "mean per-state softplus(disfavored logit - preferred logit)",
+    "smoothness_pairwise_weight": 0.02,
+    "smoothness_weight_role": "small secondary preference; primary safety/progress loss remains dominant",
+    "hierarchy": [
+      "focal hard safety",
+      "peer and obstacle safety",
+      "5 s task progress and viability",
+      "execution deviation",
+      "secondary trajectory smoothness"
+    ]
+  },
+  "model": {
+    "hidden_dim": 64,
+    "node_encoder_hidden_dim": 64,
+    "edge_dim": 32,
+    "edge_encoder_hidden_dim": 32,
+    "num_heads": 4,
+    "num_layers": 2,
+    "head_aggregation": "concat",
+    "activation": "gelu",
+    "dropout": 0.0,
+    "negative_slope": 0.2,
+    "layer_norm": true
+  },
+  "training": {
+    "optimizer": "AdamW",
+    "learning_rate": 0.0002,
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "max_epochs": 80,
+    "early_stopping_patience": 15,
+    "gradient_clip_norm": 5.0,
+    "optimization_seeds": [17, 29, 43],
+    "device": "auto",
+    "hyperparameter_sweep": false,
+    "initialization": "same frozen GAT-V1 weights and fresh optimizer as GAT-R"
+  },
+  "offline_metric_definitions": {
+    "checkpoint_selection": "maximum internal-validation exact-target Top-1, then minimum total loss, then MRR",
+    "retain_fp_accuracy": "Top-1 accuracy on states whose frozen target retains FP-SHEP",
+    "correction_accuracy": "Top-1 accuracy on predeclared focal-safety/material-gain correction states",
+    "smoothness_pair_accuracy": "preferred lower-jerk candidate logit exceeds disfavored candidate logit",
+    "dev_used_for_checkpoint_selection": false
+  },
+  "runtime_contract": {
+    "goal_distance_normalization_scale_m": 100.0,
+    "canonical_sector_count": 56,
+    "graph_schema_changed": false,
+    "runtime_input_semantics_changed": false,
+    "runtime_role": "current legal graph to candidate logits to reference selection",
+    "sac_dmp_changed": false,
+    "rerr_changed": false
+  }
+}

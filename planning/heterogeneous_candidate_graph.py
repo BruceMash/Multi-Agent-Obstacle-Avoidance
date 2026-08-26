@@ -10,6 +10,7 @@ heading, or body rotation is invented.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import time
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -20,6 +21,49 @@ from Guidance.reference_point_proposal_demo import (
     ProposalConfig,
     compute_sector_safety_field,
 )
+
+
+GAT_CANONICAL_AZIMUTH_BINS = 8
+GAT_CANONICAL_ELEVATION_BINS = 7
+GAT_CANONICAL_ELEVATION_RANGE_DEG = (-80.0, 80.0)
+
+
+def _canonical_gat_sector_projection(
+    safety: np.ndarray,
+    sensor_directions: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project a denser scan onto the frozen GAT's original 8x7 directions."""
+    safety = np.asarray(safety, dtype=float).reshape(-1)
+    sensor_directions = np.asarray(sensor_directions, dtype=float).reshape(-1, 3)
+    if safety.size != sensor_directions.shape[0]:
+        raise ValueError("sector safety and direction counts do not match")
+    canonical_azimuth = np.linspace(
+        -np.pi, np.pi, GAT_CANONICAL_AZIMUTH_BINS, endpoint=False, dtype=float
+    )
+    canonical_elevation = np.deg2rad(
+        np.linspace(
+            GAT_CANONICAL_ELEVATION_RANGE_DEG[0],
+            GAT_CANONICAL_ELEVATION_RANGE_DEG[1],
+            GAT_CANONICAL_ELEVATION_BINS,
+            dtype=float,
+        )
+    )
+    canonical = []
+    for azimuth in canonical_azimuth:
+        for elevation in canonical_elevation:
+            cosine = float(np.cos(elevation))
+            canonical.append(
+                [
+                    cosine * float(np.cos(azimuth)),
+                    cosine * float(np.sin(azimuth)),
+                    float(np.sin(elevation)),
+                ]
+            )
+    canonical_directions = np.asarray(canonical, dtype=float)
+    nearest = np.argmax(canonical_directions @ sensor_directions.T, axis=1)
+    if len(set(nearest.astype(int).tolist())) != canonical_directions.shape[0]:
+        raise RuntimeError("canonical GAT sector projection is not one-to-one")
+    return safety[nearest].copy(), canonical_directions
 from planning.candidate_execution_interface import (
     ExecutionNormalizationSpec,
     GraphReadyCandidateExecution,
@@ -228,10 +272,12 @@ def build_heterogeneous_candidate_graph(
     neighbors: Sequence[Any],
     config: HeterogeneousCandidateGraphConfig | None = None,
     execution_normalization: ExecutionNormalizationSpec | None = None,
+    timing_sink: dict[str, float] | None = None,
 ) -> HeteroData:
     """Build one ego-local typed graph without mutating or reordering inputs."""
 
     # 读取配置与输入
+    graph_started = time.perf_counter_ns()
     config = config or HeterogeneousCandidateGraphConfig()
     proposals = tuple(proposals)
     executions = tuple(executions)
@@ -362,6 +408,7 @@ def build_heterogeneous_candidate_graph(
         data[node_type].x_normalized = _tensor(normalized)
         data[node_type].x = data[node_type].x_normalized
 
+    edge_started = time.perf_counter_ns()
     candidate_count = len(proposals)
     smooth_edge_index = np.vstack([
         np.zeros(candidate_count, dtype=np.int64),
@@ -438,6 +485,7 @@ def build_heterogeneous_candidate_graph(
     conflict_store.neighbor_minimum_position = _tensor(
         np.asarray(neighbor_minimum_positions, dtype=float).reshape(conflict_count, 3)
     )
+    edge_ns = time.perf_counter_ns() - edge_started
 
     proposal_store = data["proposal"]
     proposal_store.candidate_id = _tensor(
@@ -527,7 +575,7 @@ def build_heterogeneous_candidate_graph(
         "d_align_source": config.d_align_source,
         "d_align_edge_inequality": "minimum_separation < d_align",
         "candidate_order_preserved": True,
-        "neighbor_order_source": "existing_observation_nearest_distance_then_agent_id",
+        "neighbor_order_source": "environment_observation_membership_and_order; ids_may_be_event_local_slots",
         "candidate_count": candidate_count,
         "neighbor_count": len(neighbors),
         "goal_sector_id": int(ego.goal_sector_id),
@@ -550,6 +598,15 @@ def build_heterogeneous_candidate_graph(
     data.candidate_preview_velocities = tuple(
         item.preview_velocities for item in executions
     )
+    if timing_sink is not None:
+        total_ns = time.perf_counter_ns() - graph_started
+        timing_sink.update(
+            {
+                "graph_feature_build_ms": max(0.0, (total_ns - edge_ns) / 1.0e6),
+                "graph_edge_build_ms": edge_ns / 1.0e6,
+                "graph_total_cpu_ms": total_ns / 1.0e6,
+            }
+        )
     return data
 
 
@@ -562,9 +619,11 @@ def build_heterogeneous_candidate_graph_from_env(
     proposal_config: ProposalConfig,
     config: HeterogeneousCandidateGraphConfig | None = None,
     execution_normalization: ExecutionNormalizationSpec | None = None,
+    timing_sink: dict[str, float] | None = None,
 ) -> HeteroData:
     """Read only the currently observable state and delegate to the pure builder."""
 
+    adapter_started = time.perf_counter_ns()
     agent_index = int(agent_index)
     packet = env.latest_sensor_packets[agent_index]
     if packet is None:
@@ -584,14 +643,17 @@ def build_heterogeneous_candidate_graph_from_env(
     goal_direction = _unit(goal_vector)
     directions = np.asarray(env.sensors[agent_index].ray_directions, dtype=float)
     flat_directions = directions.reshape(-1, 3)
-    goal_sector_id = int(np.argmax(flat_directions @ goal_direction))
+    graph_sector_safety, graph_directions = _canonical_gat_sector_projection(
+        sector_field.normalized_margin, flat_directions
+    )
+    goal_sector_id = int(np.argmax(graph_directions @ goal_direction))
     ego = EgoGraphState(
         agent_id=agent_index,
         position=env.dynamics[agent_index].p,
         velocity=env.dynamics[agent_index].v,
         previous_velocity=env.previous_velocities[agent_index],
         task_goal=env.goals[agent_index],
-        sector_safety=sector_field.normalized_margin.reshape(-1),
+        sector_safety=graph_sector_safety,
         goal_sector_id=goal_sector_id,
     )
     resolved = config or HeterogeneousCandidateGraphConfig()
@@ -601,14 +663,26 @@ def build_heterogeneous_candidate_graph_from_env(
         d_safe=float(env.env_config.inter_agent_safe_distance),
         d_safe_source="MultiAgentEnvConfig.inter_agent_safe_distance",
     )
-    return build_heterogeneous_candidate_graph(
+    adapter_ms = (time.perf_counter_ns() - adapter_started) / 1.0e6
+    graph_timing: dict[str, float] = {}
+    result = build_heterogeneous_candidate_graph(
         ego=ego,
         proposals=proposals,
         executions=executions,
         neighbors=env.observable_neighbor_states(agent_index),
         config=resolved,
         execution_normalization=execution_normalization,
+        timing_sink=graph_timing,
     )
+    if timing_sink is not None:
+        timing_sink.update(graph_timing)
+        timing_sink["graph_feature_build_ms"] = float(
+            timing_sink.get("graph_feature_build_ms", 0.0) + adapter_ms
+        )
+        timing_sink["graph_total_cpu_ms"] = float(
+            timing_sink.get("graph_total_cpu_ms", 0.0) + adapter_ms
+        )
+    return result
 
 
 def graph_debug_summary(data: HeteroData) -> str:
